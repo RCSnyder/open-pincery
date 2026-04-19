@@ -6,6 +6,7 @@ use axum::{
     Router,
 };
 use sqlx::PgPool;
+use tower_http::services::{ServeDir, ServeFile};
 use uuid::Uuid;
 
 pub mod agents;
@@ -72,10 +73,15 @@ pub fn router(state: AppState) -> Router {
         .merge(events::router())
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware));
 
+    // Serve static UI files, falling back to index.html for SPA routing
+    let static_files = ServeDir::new("static")
+        .not_found_service(ServeFile::new("static/index.html"));
+
     Router::new()
         .merge(bootstrap::router())
         .route("/health", axum::routing::get(health_check))
         .nest("/api", authed)
+        .fallback_service(static_files)
         .with_state(state)
 }
 
