@@ -195,7 +195,7 @@ READY
 ## v3 Scope Reduction Risks
 
 - **AC-18 (metrics)**: Tempting to skip the histogram (wake duration) if `metrics-exporter-prometheus` bucket config is fiddly. The histogram is in scope. Default buckets are acceptable — we do not need to tune them.
-- **AC-19 (readiness)**: Tempting to check only the DB pool and skip the background-tasks check. The `background_alive` flag must be present and checked. A server with a dead listener should fail readiness.
+- **AC-19 (readiness)**: Tempting to check only the DB pool and skip the background-tasks check. Per-task liveness flags (`listener_alive` + `stale_alive`) must both be present and AND'd. A server with a dead listener — even with a healthy stale-recovery task — should fail readiness with `failing: "background_task:listener"`.
 - **AC-20 (release)**: Tempting to ship unsigned binaries to "get the first release out." This AC is signed-or-not-shipped. If cosign keyless breaks on first attempt, we debug it rather than skip signing.
 - **AC-21 (runbooks)**: Tempting to write thin runbooks with vague prose. Diagnostic commands must be concrete copy-paste shell invocations. Review will catch and reject vague runbooks.
 - **AC-17 (logging)**: Tempting to leave existing ad-hoc `println!` calls (if any) untouched. Any stdout writes from runtime code must go through `tracing` so they respect the JSON toggle. Audit during BUILD.
@@ -207,7 +207,7 @@ None.
 ## v3 Build Order
 
 1. **AC-17 — JSON logging** (v3 Slice 1): Minimal, self-contained. `src/observability/logging.rs` + wire in `main.rs`. Unblocks observable BUILD for later slices.
-2. **AC-19 — Health/ready split** (v3 Slice 2): Small, self-contained. Before metrics because readiness needs the `background_alive` flag which we wire once and then reuse.
+2. **AC-19 — Health/ready split** (v3 Slice 2): Small, self-contained. Before metrics because readiness needs the per-task liveness flags (`listener_alive` + `stale_alive`, each guarded by an `AliveGuard` RAII that resets on any exit path) which we wire once and then reuse.
 3. **AC-18 — Metrics** (v3 Slice 3): Depends on the observability module scaffolding from Slice 1 and the `AppState` plumbing from Slice 2. Add counters incrementally across existing runtime files.
 4. **AC-16 — CI workflow** (v3 Slice 4): Written once the new code exists so CI actually runs the new tests. Includes `deny.toml` with an initial conservative allow-list.
 5. **AC-21 — Runbooks** (v3 Slice 5): Pure docs, parallelizable. Uses the metrics and health endpoints from earlier slices in its diagnostic commands.

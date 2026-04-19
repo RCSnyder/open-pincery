@@ -472,7 +472,14 @@ Additive only. No runtime behaviour changes. Six new concerns:
     ci.yml                       # AC-16: fmt, clippy, test (with Postgres service), cargo-deny
     release.yml                  # AC-20: tag build + SBOM + cosign sign + GitHub Release
 .cargo/
-  config.toml                    # AC-20: release profile with LTO + strip
+  config.toml                    # AC-20: build-env tweaks — [net] retry + aarch64 cross-linker.
+                                 #        NOTE: the [profile.release] overrides (LTO, strip,
+                                 #        codegen-units=1, opt-level=3) live in top-level Cargo.toml
+                                 #        because stable Rust reads profile settings from the manifest,
+                                 #        not from .cargo/config.toml. scope.md AC-20 wording is
+                                 #        pre-reconcile and still names .cargo/config.toml; the
+                                 #        substance of the AC (LTO + strip in the release profile) is
+                                 #        satisfied in Cargo.toml.
 deny.toml                        # AC-16: cargo-deny config (advisories + licenses + bans + sources)
 src/
   observability/
@@ -498,10 +505,10 @@ tests/
 
 ```toml
 metrics = "0.24"
-metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }
+metrics-exporter-prometheus = { version = "0.16", default-features = false }
 ```
 
-Both are maintained by the `tokio-rs/tracing`-adjacent ecosystem, lightweight, no transitive heavy deps. The `metrics` facade is crate-local (no runtime overhead when unused); the exporter only activates when `METRICS_ADDR` is set. No new dependency for logging — `tracing-subscriber` already has `json` feature enabled in Cargo.toml.
+Both are maintained by the `tokio-rs/tracing`-adjacent ecosystem, lightweight, no transitive heavy deps. The `metrics` facade is crate-local (no runtime overhead when unused); the Prometheus exporter is used only for its `PrometheusBuilder::install_recorder()` + `PrometheusHandle::render()` — we do not use the crate's built-in HTTP listener (the `http-listener` feature was removed during REVIEW fixes because we ship a hand-rolled axum `/metrics` server in `src/observability/server.rs`). Metrics are only served when `METRICS_ADDR` is set. No new dependency for logging — `tracing-subscriber` already has `json` feature enabled in Cargo.toml.
 
 No new runtime dependencies for CI / release — those are pure GitHub Actions YAML.
 
@@ -548,8 +555,11 @@ pub async fn ready(State(app): State<AppState>) -> impl IntoResponse {
     if sqlx::query("SELECT 1").execute(&app.pool).await.is_err() {
         return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"status":"not_ready","failing":"database"})));
     }
-    // Check 2: expected migration count matches
-    // Check 3: app.background_alive flag (set by listener + stale tasks)
+    // Check 2: expected migration count matches (COUNT _sqlx_migrations WHERE success = TRUE
+    //          >= crate::db::expected_migration_count())
+    // Check 3: per-task liveness flags app.listener_alive AND app.stale_alive both true.
+    //          503 payload reports which specific task is down:
+    //          "background_task:listener" | "background_task:stale_recovery" | "background_tasks".
     (StatusCode::OK, Json(json!({"status":"ready"})))
 }
 ```
@@ -561,7 +571,7 @@ pub async fn ready(State(app): State<AppState>) -> impl IntoResponse {
 | Replace `tracing_subscriber::fmt::init()` in `main.rs` | `src/main.rs`                                                                                                                                                     | AC-17 toggle                                                            |
 | Record counters inside existing runtime code           | `src/runtime/wake_loop.rs`, `src/runtime/maintenance.rs`, `src/runtime/llm.rs`, `src/runtime/tools.rs`, `src/api/webhooks.rs`, `src/api/mod.rs` rate limit branch | AC-18 — one-line `metrics::counter!()` calls at existing natural points |
 | Move `/health` handler out of `main.rs`, add `/ready`  | `src/api/health.rs`                                                                                                                                               | AC-19                                                                   |
-| Add `background_alive: Arc<AtomicBool>` to `AppState`  | `src/lib.rs`                                                                                                                                                      | AC-19 — readiness depends on it                                         |
+| Add per-task liveness flags (`listener_alive: Arc<AtomicBool>`, `stale_alive: Arc<AtomicBool>`) to `AppState` | `src/api/mod.rs`                                                                                                                                                  | AC-19 — readiness depends on both flags; each task flips its own on entry and an `AliveGuard` `Drop` flips it back on any exit (clean shutdown, error, panic) |
 | Conditionally spawn metrics server                     | `src/main.rs`                                                                                                                                                     | AC-18 — only when `METRICS_ADDR` set                                    |
 
 ### External Integrations (new)
