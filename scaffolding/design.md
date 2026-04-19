@@ -69,6 +69,8 @@ open-pincery/
 │   └── 20260418000013_create_auth_audit.sql
 ├── src/
 │   ├── main.rs                 # Entry point: config, pool, server, background tasks
+│   ├── lib.rs                  # Crate root: public module declarations
+│   ├── auth.rs                 # Session token generation + SHA-256 hashing
 │   ├── config.rs               # Env-based configuration (DATABASE_URL, LLM_API_KEY, etc.)
 │   ├── db.rs                   # Pool creation, migration runner
 │   ├── error.rs                # Unified error types
@@ -102,17 +104,16 @@ open-pincery/
 └── tests/
     ├── common/
     │   └── mod.rs              # Test helpers (DB setup, fixtures)
-    └── integration/
-        ├── lifecycle_test.rs   # AC-1: CAS lifecycle
-        ├── event_log_test.rs   # AC-2: Event log immutability
-        ├── prompt_test.rs      # AC-3: Prompt assembly
-        ├── wake_loop_test.rs   # AC-4: Wake loop end-to-end
-        ├── maintenance_test.rs # AC-5: Maintenance cycle
-        ├── api_test.rs         # AC-6: HTTP API
-        ├── trigger_test.rs     # AC-7: LISTEN/NOTIFY wake triggers
-        ├── stale_test.rs       # AC-8: Stale wake recovery
-        ├── drain_test.rs       # AC-9: Drain check
-        └── bootstrap_test.rs   # AC-10: Local admin bootstrap
+    ├── lifecycle_test.rs       # AC-1: CAS lifecycle
+    ├── event_log_test.rs       # AC-2: Event log immutability
+    ├── prompt_test.rs          # AC-3: Prompt assembly
+    ├── wake_loop_test.rs       # AC-4: Wake loop end-to-end
+    ├── maintenance_test.rs     # AC-5: Maintenance cycle
+    ├── api_test.rs             # AC-6: HTTP API
+    ├── trigger_test.rs         # AC-7: LISTEN/NOTIFY wake triggers
+    ├── stale_test.rs           # AC-8: Stale wake recovery
+    ├── drain_test.rs           # AC-9: Drain check
+    └── bootstrap_test.rs       # AC-10: Local admin bootstrap
 ```
 
 ## Interfaces
@@ -120,18 +121,11 @@ open-pincery/
 ### Agent (Postgres ↔ Rust)
 
 ```rust
-// Coarse DB lifecycle — matches Postgres agents.status column
-// The TLA+ fine-grained states (ToolDispatching, PromptAssembling, etc.)
+// Coarse DB lifecycle — the code uses raw strings ("asleep", "awake", "maintenance")
+// rather than a Rust enum. The TLA+ fine-grained states (ToolDispatching, PromptAssembling, etc.)
 // are in-memory runtime states, not persisted to DB.
-#[derive(sqlx::Type, Debug, Clone, PartialEq)]
-#[sqlx(type_name = "text", rename_all = "snake_case")]
-pub enum AgentStatus {
-    Asleep,
-    Awake,
-    Maintenance,
-}
 
-#[derive(sqlx::FromRow, Debug)]
+#[derive(sqlx::FromRow, Debug, Serialize, Deserialize)]
 pub struct Agent {
     pub id: Uuid,
     pub name: String,
@@ -143,6 +137,8 @@ pub struct Agent {
     pub wake_iteration_count: i32,
     pub permission_mode: String, // "yolo" for v1
     pub is_enabled: bool,
+    pub disabled_reason: Option<String>,
+    pub disabled_at: Option<DateTime<Utc>>,
     pub budget_limit_usd: Decimal,
     pub budget_used_usd: Decimal,
     pub created_at: DateTime<Utc>,
@@ -178,12 +174,12 @@ pub async fn drain_reacquire(pool: &PgPool, agent_id: Uuid) -> Result<Option<Age
 ### Event Log
 
 ```rust
-#[derive(sqlx::FromRow, Debug, Serialize)]
+#[derive(sqlx::FromRow, Debug, Serialize, Deserialize)]
 pub struct Event {
     pub id: Uuid,
     pub agent_id: Uuid,
     pub event_type: String,      // message_received, tool_call, tool_result, etc.
-    pub source: Option<String>,  // human, webhook, timer, agent
+    pub source: String,          // human, webhook, timer, agent, system
     pub wake_id: Option<Uuid>,
     pub tool_name: Option<String>,
     pub tool_input: Option<String>,
@@ -194,7 +190,18 @@ pub struct Event {
 }
 
 // Append-only — the only write operation
-pub async fn append_event(pool: &PgPool, event: &NewEvent) -> Result<Event>
+pub async fn append_event(
+    pool: &PgPool,
+    agent_id: Uuid,
+    event_type: &str,
+    source: &str,
+    wake_id: Option<Uuid>,
+    tool_name: Option<&str>,
+    tool_input: Option<&str>,
+    tool_output: Option<&str>,
+    content: Option<&str>,
+    termination_reason: Option<&str>,
+) -> Result<Event>
 // SQL: INSERT INTO events (...) VALUES (...) RETURNING *
 
 // Query recent events for prompt assembly
@@ -204,8 +211,8 @@ pub async fn recent_events(pool: &PgPool, agent_id: Uuid, limit: i64) -> Result<
 
 // Check for events newer than high-water mark (drain check)
 pub async fn has_pending_events(pool: &PgPool, agent_id: Uuid, since: DateTime<Utc>) -> Result<bool>
-// SQL: SELECT EXISTS(SELECT 1 FROM events WHERE agent_id=$1
-//      AND event_type='message_received' AND created_at > $2)
+// SQL: SELECT COUNT(*) FROM events WHERE agent_id=$1
+//      AND created_at > $2 AND source = 'human'
 ```
 
 ### Prompt Assembly Output
@@ -226,19 +233,19 @@ pub struct LlmClient {
     base_url: String,     // e.g. "https://openrouter.ai/api/v1"
     api_key: String,
     model: String,        // e.g. "anthropic/claude-sonnet-4-20250514"
+    maintenance_model: String, // e.g. "anthropic/claude-sonnet-4-20250514"
 }
 
 pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
     pub tools: Option<Vec<ToolDefinition>>,
-    pub temperature: Option<f32>,
 }
 
 pub struct ChatResponse {
     pub id: String,
     pub choices: Vec<Choice>,
-    pub usage: Usage,
+    pub usage: Option<Usage>,
 }
 
 pub struct Choice {
@@ -263,7 +270,7 @@ pub enum ToolResult {
 }
 
 // Dispatch a tool call to its handler
-pub async fn dispatch_tool(tool_call: &ToolCall) -> ToolResult
+pub async fn dispatch_tool(tool_call: &ToolCallRequest) -> ToolResult
 
 // Tool definitions for LLM
 pub fn tool_definitions() -> Vec<ToolDefinition>

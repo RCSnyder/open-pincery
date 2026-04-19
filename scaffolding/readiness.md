@@ -21,16 +21,16 @@ READY
 
 ## Key Links
 
-- **L-1** AC-1 → `models/agent.rs` (acquire_wake, transition_to_maintenance, release_to_asleep, drain_reacquire CAS functions) → `tests/integration/lifecycle_test.rs` → Runtime proof: two concurrent wake attempts, exactly one wins
-- **L-2** AC-2 → `models/event.rs` (append_event, recent_events) + migration `create_events.sql` → `tests/integration/event_log_test.rs` → Runtime proof: send message → wake → query event log → verify complete sequence with ordering
-- **L-3** AC-3 → `runtime/prompt.rs` (AssembledPrompt struct) + `models/projection.rs` + `models/prompt_template.rs` → `tests/integration/prompt_test.rs` → Runtime proof: create agent with known projections/events → assemble prompt → verify all 6 components present and ordered
-- **L-4** AC-4 → `runtime/wake_loop.rs` + `runtime/llm.rs` (LlmClient) + `runtime/tools.rs` (dispatch_tool) → `tests/integration/wake_loop_test.rs` → Runtime proof: mock LLM returns tool_call then stop → verify events, iteration count, termination
-- **L-5** AC-5 → `runtime/maintenance.rs` + `models/projection.rs` (new versioned rows) + wake_summaries → `tests/integration/maintenance_test.rs` → Runtime proof: after wake, query projection versions and wake_summary table → confirm new rows with content
-- **L-6** AC-6 → `api/agents.rs` + `api/messages.rs` + `api/events.rs` + `api/bootstrap.rs` → `tests/integration/api_test.rs` → Runtime proof: exercise each endpoint with curl/reqwest → verify status codes and JSON response shapes
-- **L-7** AC-7 → `background/listener.rs` + Postgres LISTEN/NOTIFY → `tests/integration/trigger_test.rs` → Runtime proof: send message to resting agent → measure wake latency < 5 seconds
-- **L-8** AC-8 → `background/stale.rs` → `tests/integration/stale_test.rs` → Runtime proof: set agent to `awake` with wake_started_at 3 hours ago → run recovery job → verify status = `asleep` + `stale_wake_recovery` event
-- **L-9** AC-9 → `runtime/drain.rs` + `models/event.rs` (has_pending_events) + `models/agent.rs` (drain_reacquire) → `tests/integration/drain_test.rs` → Runtime proof: send message during active wake → confirm drain check triggers re-acquire after maintenance
-- **L-10** AC-10 → `api/bootstrap.rs` + `db.rs` (migration runner) → `tests/integration/bootstrap_test.rs` → Runtime proof: start with empty DB → call bootstrap endpoint → verify user, org, workspace rows created
+- **L-1** AC-1 → `models/agent.rs` (acquire_wake, transition_to_maintenance, release_to_asleep, drain_reacquire CAS functions) → `tests/lifecycle_test.rs` → Runtime proof: two concurrent wake attempts, exactly one wins
+- **L-2** AC-2 → `models/event.rs` (append_event, recent_events) + migration `create_events.sql` → `tests/event_log_test.rs` → Runtime proof: send message → wake → query event log → verify complete sequence with ordering
+- **L-3** AC-3 → `runtime/prompt.rs` (AssembledPrompt struct) + `models/projection.rs` + `models/prompt_template.rs` → `tests/prompt_test.rs` → Runtime proof: create agent with known projections/events → assemble prompt → verify all 6 components present and ordered
+- **L-4** AC-4 → `runtime/wake_loop.rs` + `runtime/llm.rs` (LlmClient) + `runtime/tools.rs` (dispatch_tool) → `tests/wake_loop_test.rs` → Runtime proof: mock LLM returns tool_call then stop → verify events, iteration count, termination
+- **L-5** AC-5 → `runtime/maintenance.rs` + `models/projection.rs` (new versioned rows) + wake_summaries → `tests/maintenance_test.rs` → Runtime proof: after wake, query projection versions and wake_summary table → confirm new rows with content
+- **L-6** AC-6 → `api/agents.rs` + `api/messages.rs` + `api/events.rs` + `api/bootstrap.rs` → `tests/api_test.rs` → Runtime proof: exercise each endpoint with curl/reqwest → verify status codes and JSON response shapes
+- **L-7** AC-7 → `background/listener.rs` + Postgres LISTEN/NOTIFY → `tests/trigger_test.rs` → Runtime proof: send message to resting agent → measure wake latency < 5 seconds
+- **L-8** AC-8 → `background/stale.rs` → `tests/stale_test.rs` → Runtime proof: set agent to `awake` with wake_started_at 3 hours ago → run recovery job → verify status = `asleep` + `stale_wake_recovery` event
+- **L-9** AC-9 → `runtime/drain.rs` + `models/event.rs` (has_pending_events) + `models/agent.rs` (drain_reacquire) → `tests/drain_test.rs` → Runtime proof: send message during active wake → confirm drain check triggers re-acquire after maintenance
+- **L-10** AC-10 → `api/bootstrap.rs` + `db.rs` (migration runner) → `tests/bootstrap_test.rs` → Runtime proof: start with empty DB → call bootstrap endpoint → verify user, org, workspace rows created
 
 ## Acceptance Criteria Coverage
 

@@ -48,3 +48,20 @@
 - **Changes**: All source modules, migrations, tests created. 5 commits.
 - **Retries**: 0
 - **Next**: REVIEW
+
+## REVIEW — 2026-04-18T00:04Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: Review identified 2 critical and 6 required findings. All addressed in commit 82f7935. No `Critical` or `Required` findings remain.
+- **Changes**: Code fixes applied per review findings (commit `fix(build): address REVIEW findings`)
+- **Retries**: 0
+- **Next**: RECONCILE
+
+## RECONCILE — 2026-04-18T00:05Z
+
+- **Structural drift fixed**:
+  - design.md directory structure: tests were under `tests/integration/` in doc but `tests/` in code; added missing `src/lib.rs` and `src/auth.rs`
+  - design.md interfaces: Agent struct missing `disabled_reason`/`disabled_at` fields; Event.source was `Option<String>` but code uses `String`; ChatRequest had `temperature` field not in code; ChatResponse.usage was non-optional but code uses `Option<Usage>`; LlmClient missing `maintenance_model` field; AgentStatus enum described but not implemented (code uses raw strings); `append_event` used `NewEvent` struct in doc but code uses individual params; `has_pending_events` query filter differed; `ToolCall` type renamed to `ToolCallRequest` in code
+  - readiness.md Key Links: all 10 paths referenced `tests/integration/` but actual paths are `tests/`
+  - log.md: missing REVIEW phase entry despite git commit 82f7935 recording review fixes
+- **Documents updated**: `scaffolding/design.md`, `scaffolding/readiness.md`, `scaffolding/log.md`
