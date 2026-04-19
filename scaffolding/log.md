@@ -73,3 +73,11 @@
 - **Changes**: None (read-only verification)
 - **Retries**: 0
 - **Next**: DEPLOY
+
+## DEPLOY — 2026-04-18T00:07Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: Application starts successfully, health endpoint returns 200 `{"status":"ok"}`, bootstrap creates admin + returns session token, double-bootstrap returns 409, auth rejects invalid tokens. docker-compose.yml + .env.example present. README.md updated with setup/run instructions. DELIVERY.md created.
+- **Changes**: Updated README.md, created DELIVERY.md
+- **Retries**: 0
+- **Next**: DONE — deployed as self_host_individual (local binary + PostgreSQL)

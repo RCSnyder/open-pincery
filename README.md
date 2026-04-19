@@ -2,7 +2,7 @@
 
 **Open Pincery is an open-source multi-agent platform for durable, event-driven AI agents.** Each agent is a continuous entity with a stable identity, append-only event log, and wake/sleep lifecycle. Agents wake on messages, webhooks, or timers, work until done, and rest. Configure them by conversation. Orchestrate fleets via async messaging.
 
-> **Status:** Early-stage. The architecture is specified ([TLA+ spec](docs/input/OpenPinceryAgent.tla), [design docs](docs/input/)), the implementation stack is chosen, but the runtime is not yet buildable.
+> **Status:** v1 runtime implemented. CAS lifecycle, event log, LLM-powered wake/sleep cycles, maintenance projections, HTTP API, and PostgreSQL persistence are all functional.
 
 ## Why Another Agent Platform?
 
@@ -157,3 +157,52 @@ The platform's design practices are informed by emerging research in agentic sof
 ## License
 
 [MIT](LICENSE)
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- Rust 1.75+
+- PostgreSQL 16+
+- An OpenAI-compatible LLM API key
+
+### Setup
+
+```bash
+# Start PostgreSQL
+docker compose up -d
+
+# Configure environment
+cp .env.example .env
+# Edit .env: set LLM_API_KEY and OPEN_PINCERY_BOOTSTRAP_TOKEN
+
+# Build and run
+cargo build --release
+source .env && ./target/release/open-pincery
+
+# Bootstrap (one-time)
+curl -X POST http://localhost:8080/api/bootstrap \
+  -H "Authorization: Bearer YOUR_BOOTSTRAP_TOKEN"
+```
+
+### API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Health check |
+| POST | `/api/bootstrap` | One-time admin setup |
+| POST | `/api/agents` | Create agent |
+| GET | `/api/agents` | List agents |
+| GET | `/api/agents/:id` | Agent detail with projections |
+| POST | `/api/agents/:id/messages` | Send message (triggers wake) |
+| GET | `/api/agents/:id/events` | Event log |
+
+All `/api/*` routes (except bootstrap) require `Authorization: Bearer <session_token>`.
+
+### Tests
+
+```bash
+cargo test -- --test-threads=1
+```
