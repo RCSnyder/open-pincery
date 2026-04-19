@@ -39,8 +39,8 @@ pub async fn run_maintenance(
         .unwrap_or("No identity set yet.");
     let current_work_list = current_proj
         .as_ref()
-        .map(|p| serde_json::to_string_pretty(&p.work_list).unwrap_or_default())
-        .unwrap_or_else(|| "[]".into());
+        .map(|p| p.work_list.as_str())
+        .unwrap_or("");
     let current_version = current_proj.as_ref().map(|p| p.version).unwrap_or(0);
 
     let messages = vec![
@@ -95,8 +95,8 @@ pub async fn run_maintenance(
                     .unwrap_or(current_identity);
                 let work_list = parsed
                     .get("work_list")
-                    .cloned()
-                    .unwrap_or(serde_json::json!([]));
+                    .map(|v| v.to_string())
+                    .unwrap_or_default();
                 let summary = parsed
                     .get("summary")
                     .and_then(|v| v.as_str())

@@ -10,7 +10,7 @@ pub struct AgentProjection {
     pub id: Uuid,
     pub agent_id: Uuid,
     pub identity: String,
-    pub work_list: serde_json::Value,
+    pub work_list: String,
     pub version: i32,
     pub created_at: DateTime<Utc>,
 }
@@ -28,7 +28,7 @@ pub async fn insert_projection(
     pool: &PgPool,
     agent_id: Uuid,
     identity: &str,
-    work_list: &serde_json::Value,
+    work_list: &str,
     version: i32,
 ) -> Result<AgentProjection, AppError> {
     let proj = sqlx::query_as::<_, AgentProjection>(

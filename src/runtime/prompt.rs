@@ -36,7 +36,7 @@ pub async fn assemble_prompt(
         system_prompt.push_str(&format!("\n\n## Identity\n{}", proj.identity));
         system_prompt.push_str(&format!(
             "\n\n## Work List\n{}",
-            serde_json::to_string_pretty(&proj.work_list).unwrap_or_default()
+            proj.work_list.clone()
         ));
     }
 
