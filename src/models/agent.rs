@@ -148,10 +148,10 @@ pub async fn find_stale_agents(pool: &PgPool, stale_hours: i64) -> Result<Vec<Ag
     let agents = sqlx::query_as::<_, Agent>(
         "SELECT * FROM agents
          WHERE status IN ('awake', 'maintenance')
-           AND wake_started_at < NOW() - make_interval(hours => $1)
+           AND wake_started_at < NOW() - make_interval(hours => $1::int)
         "
     )
-    .bind(stale_hours as f64)
+    .bind(stale_hours as i32)
     .fetch_all(pool)
     .await?;
     Ok(agents)
