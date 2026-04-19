@@ -1,0 +1,11 @@
+# AC-20: Supplementary Cargo configuration for release builds.
+#
+# NOTE: The actual [profile.release] overrides live in the top-level Cargo.toml
+# (stable Rust reads release profile settings from there). This file exists to
+# hold build-environment tweaks that complement the release profile.
+
+[net]
+retry = 3
+
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"

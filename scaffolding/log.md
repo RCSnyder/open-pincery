@@ -234,3 +234,17 @@
 - **Changes**: New files: `src/observability/{mod,logging,metrics,server}.rs`, `src/api/health.rs`, `.github/workflows/ci.yml`, `deny.toml`, `tests/{health,observability}_test.rs`, `docs/runbooks/*.md`. Modified: `src/api/{mod,webhooks,messages}.rs`, `src/background/{listener,stale}.rs`, `src/models/{event,llm_call}.rs`, `src/runtime/{wake_loop,llm,tools}.rs`, `src/main.rs`, `src/lib.rs`, `tests/agent_mgmt_test.rs`, `Cargo.toml`.
 - **Retries**: 0
 - **Next**: Slice 6 (AC-20 release+SBOM), then REVIEW
+
+## v3 BUILD Slice 6 — 2026-04-19T01:04Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**:
+  - `Cargo.toml` gained `[profile.release]` with `lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`, `opt-level = 3`, `panic = "abort"` — placed in Cargo.toml rather than `.cargo/config.toml` because stable Rust reads profile settings from the manifest (flagged for RECONCILE to update design.md).
+  - `.cargo/config.toml` created with `[net] retry = 3` and aarch64 cross-linker directive (`aarch64-linux-gnu-gcc`).
+  - `.github/workflows/release.yml` created — triggers on `v*` tags, matrix-builds `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` with `--locked`, installs `gcc-aarch64-linux-gnu` for cross, stages binary + SHA-256, signs with cosign keyless (`id-token: write` permission, GitHub OIDC), emits `.sig` + `.pem` per artifact.
+  - Separate `sbom` job runs `cargo cyclonedx --format json` pinned to `0.5.7 --locked`, signs the SBOM with cosign keyless.
+  - `publish` job depends on `[build, sbom]`, downloads all artifacts, uses `softprops/action-gh-release@v2` with `fail_on_unmatched_files: true` and auto-detects prerelease from `-rc/-beta/-alpha` tag suffix.
+  - `cargo metadata --no-deps` exits 0 (manifest still valid). `cargo fmt --all -- --check` exits 0.
+- **Changes**: New: `.github/workflows/release.yml`, `.cargo/config.toml`. Modified: `Cargo.toml` ([profile.release] block added).
+- **Retries**: 0
+- **Next**: REVIEW
