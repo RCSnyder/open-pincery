@@ -197,3 +197,68 @@ None. All six ACs have unambiguous pass/fail criteria and do not depend on exter
 - Multi-instance coordination and leader election for background jobs — v4+.
 - Performance baselining and load-test harness — separate iteration.
 - Binary signing with non-keyless cosign (hardware-token backed) — future enterprise release line.
+
+
+---
+
+## v4 — Usable Self-Host (CLI + Minimal UI + Safety Hardening)
+
+### Problem (v4)
+
+v3 closed the operational gate, but the runtime is still not actually usable by an individual operator: there is no CLI to drive the API, the UI is a placeholder static page, and three v3-known limitations (root container, unenforced budgets, no webhook rotation) keep blocking the path to a safely-hostable system.
+
+The vision is two deployment modes worth shipping: `self_host_individual` (now) and `saas_managed` (eventually). v4 makes `self_host_individual` real, locks in an HTTP API contract that downstream consumers (CLI, UI, future WASM rewrite, future SaaS control plane) can depend on, and finishes the safety items v3 deferred. v4 explicitly does **not** attempt: real signup/login (v5), multi-tenant RBAC enforcement (v5), tool sandboxing (v6), or a tagged release (deferred until the product is genuinely usable).
+
+### Changes from v3
+
+- Additive runtime + container changes: Dockerfile non-root user, budget-check in wake acquisition, one new endpoint (`POST /api/agents/:id/webhook/rotate`)
+- New deliverable: a `pcy` CLI binary added to the existing Cargo workspace
+- New deliverable: real (not placeholder) UI under `static/` — vanilla JS, no build step
+- New deliverable: `docs/api.md` API contract document
+- No new database tables or columns. The `agents.budget_limit_usd` / `budget_used_usd` columns from v1 are now enforced rather than added.
+- No changes to existing AC semantics (AC-1..AC-21 remain satisfied)
+
+### v4 Acceptance Criteria
+
+- **AC-22** (Container runs as non-root): The runtime stage of `Dockerfile` creates a non-root system user `pcy` (UID 10001) and ends with `USER pcy`. The application binary, `/app/migrations`, and `/app/static` are owned by `pcy:pcy`. Inside the running container `id -u` returns `10001`, and a write attempt outside the user-owned tree (e.g. `touch /etc/foo`) fails with permission denied. The existing `/health` HEALTHCHECK continues to succeed (port 8080 is bind-able as non-root). Verified by `docker compose up -d` followed by `docker compose exec app id -u` returning `10001`, `docker compose exec app touch /etc/x` failing with non-zero exit, and `curl http://localhost:8080/health` returning 200.
+
+- **AC-23** (Hard budget enforcement at wake acquisition): Before each wake acquisition, the runtime reads `agents.budget_used_usd` and `agents.budget_limit_usd`. If `budget_limit_usd > 0` and `budget_used_usd >= budget_limit_usd`, wake acquisition is rejected: no LLM call is issued, no `wake_started` event is logged, but exactly one `budget_exceeded` event is appended (`event_type='budget_exceeded'`, `source='runtime'`, JSON payload `{"limit_usd": …, "used_usd": …}`), and the agent's `status` returns to `asleep`. After every successful LLM call, `agents.budget_used_usd` is incremented by the call's `cost_usd` in the same transaction that inserts into `llm_calls`. `budget_limit_usd = 0` means unlimited (escape hatch). Verified by an integration test that sets a test agent's `budget_limit_usd = 0.000001` and `budget_used_usd = 0.000002`, sends a message, and asserts: zero new `llm_calls` rows for that agent, exactly one new `budget_exceeded` event, and `agents.status = 'asleep'` after settle.
+
+- **AC-24** (Webhook secret rotation): `POST /api/agents/:id/webhook/rotate` (session-token authenticated, workspace-scoped exactly like the existing PATCH/DELETE endpoints) returns `200 {"webhook_secret":"<new-base64-32>"}` exactly once. The new secret atomically replaces `agents.webhook_secret`. After rotation, an HMAC computed with the old secret returns `401 Unauthorized` from `POST /api/agents/:id/webhooks`; an HMAC computed with the new secret returns `202 Accepted`. A `webhook_secret_rotated` event is appended (`event_type='webhook_secret_rotated'`, `source='api'`, no secret material in payload). Verified by an integration test that creates an agent, captures the original secret, rotates, then sends two webhooks (one signed with each secret) and asserts the 401/202 split + the audit event.
+
+- **AC-25** (`pcy` CLI binary): A second binary `pcy` is added to the Cargo workspace (built by `cargo build --release` alongside `open-pincery`). Subcommands: `pcy bootstrap` (calls `POST /api/bootstrap`, writes returned token to `~/.config/open-pincery/config.toml`), `pcy login --token <token>` (writes a token to config without bootstrapping), `pcy agent {create,list,show,disable,rotate-secret}`, `pcy message <agent> <text>`, `pcy events <agent> [--tail --since <id>]`, `pcy budget {set,show,reset} <agent> [<usd>]`, `pcy status` (calls `/ready`, exits 0 only if all checks pass). Reads `OPEN_PINCERY_URL` (default `http://localhost:8080`) and the cached token from env or config file; `--url` and `--token` flags override. Verified by an end-to-end shell test (`tests/e2e/cli.sh` or equivalent Rust integration test) that runs `pcy bootstrap` against a live server, creates an agent, sends a message, tails events, rotates the secret, and exits 0 — without any direct `curl` invocation.
+
+- **AC-26** (Minimal control-plane UI): The existing placeholder `static/index.html` is replaced with a real single-page UI in vanilla JavaScript (no framework, no build step). Five views, all served as static files by the existing axum static handler: (1) login (paste session token, persisted to `localStorage`), (2) agent list (calls `GET /api/agents`), (3) agent detail with live event stream via long-poll on `GET /api/agents/:id/events?since=<last_id>` (4 second poll interval, exponential backoff on error), (4) send-message form, (5) settings panel per-agent (rotate webhook secret button, set/show budget). No multi-user features; the UI assumes a single-tenant operator. CSS is a small reset + utility classes only — no design system. Verified by an integration test that boots a live server with a freshly bootstrapped agent, drives the UI through `headless_chrome` or a `curl`+grep equivalent, and asserts: index loads with 200, `/api/agents` is hit on list view, posting the message form results in a `wake_started` event appearing in the stream within 5 seconds, rotate button replaces the secret in `agents.webhook_secret`.
+
+- **AC-27** (HTTP API stability contract): `docs/api.md` documents every public HTTP endpoint that `pcy` and the UI consume, with for each: method + path, required headers (auth, content-type), request body shape (typed fields, required vs optional), response body shape per status code, and any side effects (events appended, status transitions). The document declares the v4 API as **stable through v5** — endpoints may be added but not removed or renamed; field types may not change incompatibly. Verified by REVIEW confirming every endpoint reachable from `src/api/` that the CLI or UI calls is documented, and every documented endpoint exists in `src/api/`.
+
+### v4 Deployment Target
+
+Same as v1/v2/v3: `self_host_individual`. The deliverable for v4 is the source repo + Docker Compose stack + `pcy` binary + browser UI. No tagged release.
+
+### v4 Estimated Cost
+
+$0 — all changes are inside the existing binary, image, and CI surface. No new dependencies of significance (clap for the CLI is the one notable add).
+
+### v4 Quality Tier
+
+Still skyscraper. v4 closes the usability + safety gaps that block individual operator adoption.
+
+### v4 Clarifications Needed
+
+None. Vanilla JS without a type-check step is locked. CLI name `pcy` is locked. AC-27 stability scope (v4 → v5) is locked.
+
+### v4 Deferred (from this iteration)
+
+- **Real signup/login flow** (password hashing, session creation from credentials rather than bootstrap token) — v5
+- **Multi-tenant RBAC enforcement on the API** — v5
+- **Per-workspace rate limits** — v5
+- **Account suspension model** — v5
+- **TLA+ enum-name alignment** (runtime currently uses raw status strings; spec requires `Resting`/`WakeAcquiring`/etc.) — v5 RECONCILE work, tracked but out of v4 scope
+- **Tool sandboxing (Zerobox or fallback)** — v6
+- **Credential vault / proxy injection** — v6
+- **GitHub OAuth signup, billing, abuse prevention, ToS/Privacy** — v7 (SaaS productization)
+- **First tagged release with cosign-verified artifacts** — deferred until v7 produces a usable end-state product
+- **WASM UI rewrite** — possible v7+ if SPA features are actually needed; v4 vanilla JS stays the canonical UI until proven inadequate
+- **CLI auth subcommands beyond `bootstrap`/`login`** (e.g. `pcy logout`, `pcy whoami`) — v5 when real auth lands
+- **UI styling beyond a minimal reset** — out of scope; intentionally utilitarian

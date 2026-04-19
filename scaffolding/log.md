@@ -313,3 +313,11 @@
 - **Changes**: `README.md`, `DELIVERY.md`, `scaffolding/log.md`.
 - **Retries**: 0
 - **Next**: v3 complete. Await iteration signal (ITERATE on new inputs).
+
+## v4 EXPAND — 2026-04-19T05:00Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: scope.md v4 section appended (lines 200-264) with 6 ACs (AC-22..AC-27): non-root container, hard budget enforcement, webhook secret rotation, `pcy` CLI binary, minimal vanilla-JS control plane UI, HTTP API stability contract. Each AC has a measurable threshold (UID 10001, exact event type names, exact endpoint paths, named subcommands, named views). Stack reuses existing Rust+axum+Postgres + adds clap for CLI. Deployment target unchanged (`self_host_individual`, no tagged release). Tier still skyscraper. Vision audit confirmed alignment with `docs/input/{self_host,saas}_readiness.md` gaps; explicitly defers v5 (auth+RBAC), v6 (sandboxing+vault), v7 (SaaS).
+- **Changes**: `scaffolding/scope.md` (199 → 264 lines).
+- **Retries**: 0
+- **Next**: DESIGN.
