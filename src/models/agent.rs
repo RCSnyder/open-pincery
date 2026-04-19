@@ -165,7 +165,8 @@ pub async fn force_release(pool: &PgPool, agent_id: Uuid) -> Result<(), AppError
              wake_id = NULL,
              wake_started_at = NULL,
              wake_iteration_count = 0
-         WHERE id = $1"
+         WHERE id = $1
+           AND status IN ('awake', 'maintenance')"
     )
     .bind(agent_id)
     .execute(pool)

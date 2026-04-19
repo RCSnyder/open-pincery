@@ -47,7 +47,8 @@ async fn send_message(
     .await?;
 
     // Issue NOTIFY for the agent on the shared channel
-    sqlx::query(&format!("NOTIFY agent_wake, '{}'", agent_id))
+    sqlx::query("SELECT pg_notify('agent_wake', $1::text)")
+        .bind(agent_id.to_string())
         .execute(&state.pool)
         .await
         .map_err(|e| AppError::Database(e))?;

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tracing::{error, info};
 
 use crate::config::Config;
-use crate::models::agent;
+use crate::models::{agent, event};
 
 /// Periodically check for and recover stale wakes.
 pub async fn start_stale_recovery(pool: PgPool, config: Arc<Config>) {
@@ -19,6 +19,13 @@ pub async fn start_stale_recovery(pool: PgPool, config: Arc<Config>) {
                     info!(agent_id = %a.id, wake_id = ?a.wake_id, "Recovering stale agent");
                     if let Err(e) = agent::force_release(&pool, a.id).await {
                         error!(agent_id = %a.id, error = %e, "Failed to recover stale agent");
+                    } else {
+                        // Record stale_wake_recovery event
+                        let _ = event::append_event(
+                            &pool, a.id, "stale_wake_recovery", "system",
+                            a.wake_id, None, None, None,
+                            Some("Agent recovered from stale wake"), None,
+                        ).await;
                     }
                 }
             }

@@ -1,5 +1,5 @@
 use sqlx::PgPool;
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::llm::{ChatMessage, LlmClient};
@@ -101,6 +101,8 @@ pub async fn run_maintenance(
                     .get("summary")
                     .and_then(|v| v.as_str())
                     .unwrap_or("No summary provided.");
+                // T-6: Enforce ≤500 character limit
+                let summary: String = summary.chars().take(500).collect();
 
                 // Insert new projection
                 projection::insert_projection(
@@ -113,12 +115,17 @@ pub async fn run_maintenance(
                 .await?;
 
                 // Insert wake summary
-                projection::insert_wake_summary(pool, agent_id, wake_id, summary).await?;
+                projection::insert_wake_summary(pool, agent_id, wake_id, &summary).await?;
 
                 info!(agent_id = %agent_id, version = current_version + 1, "Maintenance projection updated");
             } else {
-                // If not valid JSON, just record as summary
-                projection::insert_wake_summary(pool, agent_id, wake_id, text).await?;
+                // Non-JSON response — warn and create default projection + summary
+                warn!(agent_id = %agent_id, "Maintenance LLM returned non-JSON, preserving current projection");
+                let truncated: String = text.chars().take(500).collect();
+                projection::insert_projection(
+                    pool, agent_id, current_identity, current_work_list, current_version + 1,
+                ).await?;
+                projection::insert_wake_summary(pool, agent_id, wake_id, &truncated).await?;
             }
         }
     }

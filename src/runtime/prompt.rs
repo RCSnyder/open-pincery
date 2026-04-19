@@ -58,6 +58,7 @@ pub async fn assemble_prompt(
     // 6. Convert recent events to chat messages
     let events = event::recent_events(pool, agent_id, event_window).await?;
     let mut messages = Vec::new();
+    let mut last_tool_call_id: Option<String> = None;
 
     // Events come in DESC order, reverse for chronological
     for ev in events.into_iter().rev() {
@@ -73,6 +74,7 @@ pub async fn assemble_prompt(
             "tool_call" => {
                 if let (Some(tool_name), Some(tool_input)) = (&ev.tool_name, &ev.tool_input) {
                     let tool_call_id = ev.id.to_string();
+                    last_tool_call_id = Some(tool_call_id.clone());
                     messages.push(ChatMessage {
                         role: "assistant".into(),
                         content: None,
@@ -94,7 +96,7 @@ pub async fn assemble_prompt(
                     .or(ev.content)
                     .unwrap_or_default();
                 // Find matching tool_call event ID
-                let tool_call_id = ev.wake_id.map(|id| id.to_string()).unwrap_or_default();
+                let tool_call_id = last_tool_call_id.take().unwrap_or_default();
                 messages.push(ChatMessage {
                     role: "tool".into(),
                     content: Some(output),
