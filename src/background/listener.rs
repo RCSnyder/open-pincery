@@ -1,5 +1,6 @@
 use sqlx::postgres::PgListener;
 use sqlx::PgPool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -10,7 +11,16 @@ use crate::models::agent;
 use crate::runtime::{drain, llm::LlmClient, maintenance, wake_loop};
 
 /// Spawn the LISTEN/NOTIFY handler that triggers wakes.
-pub async fn start_listener(pool: PgPool, config: Arc<Config>, llm: Arc<LlmClient>, shutdown: CancellationToken) {
+///
+/// `alive` is set to `true` after the LISTEN succeeds, signalling readiness
+/// (AC-19).
+pub async fn start_listener(
+    pool: PgPool,
+    config: Arc<Config>,
+    llm: Arc<LlmClient>,
+    shutdown: CancellationToken,
+    alive: Arc<AtomicBool>,
+) {
     // We listen on a wildcard pattern — but PgListener requires exact channel names.
     // Instead, we'll listen on a general channel and agents will NOTIFY on it.
     // Actually, Postgres LISTEN doesn't support wildcards. We use a single channel.
@@ -27,6 +37,7 @@ pub async fn start_listener(pool: PgPool, config: Arc<Config>, llm: Arc<LlmClien
         return;
     }
 
+    alive.store(true, Ordering::Relaxed);
     info!("Background listener started on channel 'agent_wake'");
 
     loop {

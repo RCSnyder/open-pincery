@@ -1,4 +1,5 @@
 use sqlx::PgPool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -7,9 +8,19 @@ use crate::config::Config;
 use crate::models::{agent, event};
 
 /// Periodically check for and recover stale wakes.
-pub async fn start_stale_recovery(pool: PgPool, config: Arc<Config>, shutdown: CancellationToken) {
+///
+/// `alive` is set to `true` immediately before the tick loop starts,
+/// signalling readiness (AC-19).
+pub async fn start_stale_recovery(
+    pool: PgPool,
+    config: Arc<Config>,
+    shutdown: CancellationToken,
+    alive: Arc<AtomicBool>,
+) {
     let interval_secs = 60; // Check every minute
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+
+    alive.store(true, Ordering::Relaxed);
 
     loop {
         tokio::select! {

@@ -13,6 +13,7 @@ use governor::{
 use sqlx::PgPool;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU32;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tower_http::services::{ServeDir, ServeFile};
 use uuid::Uuid;
@@ -20,6 +21,7 @@ use uuid::Uuid;
 pub mod agents;
 pub mod bootstrap;
 pub mod events;
+pub mod health;
 pub mod messages;
 pub mod webhooks;
 
@@ -33,6 +35,10 @@ pub struct AppState {
     pub config: crate::config::Config,
     pub unauth_limiter: Arc<KeyedRateLimiter>,
     pub auth_limiter: Arc<KeyedRateLimiter>,
+    /// AC-19: set to `true` by each background task on startup. `/ready`
+    /// returns 503 if this is `false`. Currently a single flag because
+    /// all background tasks share startup fate; can be split per-task later.
+    pub background_alive: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -134,6 +140,7 @@ impl AppState {
             config,
             unauth_limiter,
             auth_limiter,
+            background_alive: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -156,22 +163,10 @@ pub fn router(state: AppState) -> Router {
         .not_found_service(ServeFile::new("static/index.html"));
 
     Router::new()
-        .route("/health", axum::routing::get(health_check))
+        .route("/health", axum::routing::get(health::health))
+        .route("/ready", axum::routing::get(health::ready))
         .merge(unauthed)
         .nest("/api", authed)
         .fallback_service(static_files)
         .with_state(state)
-}
-
-async fn health_check(
-    State(state): State<AppState>,
-) -> axum::Json<serde_json::Value> {
-    let db_ok = sqlx::query_scalar::<_, i32>("SELECT 1")
-        .fetch_one(&state.pool)
-        .await
-        .is_ok();
-    axum::Json(serde_json::json!({
-        "status": if db_ok { "ok" } else { "degraded" },
-        "db": if db_ok { "connected" } else { "disconnected" }
-    }))
 }

@@ -9,11 +9,8 @@ async fn main() {
     // Load .env if present
     let _ = dotenvy::dotenv();
 
-    // Init tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .json()
-        .init();
+    // Init tracing (human-readable by default; LOG_FORMAT=json for structured output)
+    open_pincery::observability::logging::init_logging();
 
     let config = config::Config::from_env().expect("Failed to load configuration");
     let pool = db::create_pool(&config.database_url)
@@ -36,24 +33,26 @@ async fn main() {
     let config = Arc::new(config);
     let shutdown = CancellationToken::new();
 
+    // Build API (holds the background_alive flag used by /ready).
+    let state = api::AppState::new(pool.clone(), (*config).clone());
+
     // Start background tasks
     let bg_pool = pool.clone();
     let bg_config = config.clone();
     let bg_llm = llm.clone();
     let bg_shutdown = shutdown.clone();
+    let bg_alive = state.background_alive.clone();
     let listener_handle = tokio::spawn(async move {
-        background::listener::start_listener(bg_pool, bg_config, bg_llm, bg_shutdown).await;
+        background::listener::start_listener(bg_pool, bg_config, bg_llm, bg_shutdown, bg_alive).await;
     });
 
     let stale_pool = pool.clone();
     let stale_config = config.clone();
     let stale_shutdown = shutdown.clone();
+    let stale_alive = state.background_alive.clone();
     let stale_handle = tokio::spawn(async move {
-        background::stale::start_stale_recovery(stale_pool, stale_config, stale_shutdown).await;
+        background::stale::start_stale_recovery(stale_pool, stale_config, stale_shutdown, stale_alive).await;
     });
-
-    // Build API
-    let state = api::AppState::new(pool, (*config).clone());
 
     let app = api::router(state);
 

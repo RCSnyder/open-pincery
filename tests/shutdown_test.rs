@@ -1,5 +1,7 @@
 mod common;
 
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 /// AC-11: Background tasks exit cleanly when CancellationToken is cancelled.
@@ -26,9 +28,10 @@ async fn test_shutdown_cancels_stale_recovery() {
 
     let shutdown = CancellationToken::new();
     let shutdown_clone = shutdown.clone();
+    let alive = Arc::new(AtomicBool::new(false));
 
     let handle = tokio::spawn(async move {
-        open_pincery::background::stale::start_stale_recovery(pool, config, shutdown_clone).await;
+        open_pincery::background::stale::start_stale_recovery(pool, config, shutdown_clone, alive).await;
     });
 
     // Cancel and verify it stops within 2 seconds
