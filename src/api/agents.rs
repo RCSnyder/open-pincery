@@ -27,20 +27,23 @@ struct AgentResponse {
     name: String,
     status: String,
     is_enabled: bool,
-    webhook_secret: String,
+    disabled_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    webhook_secret: Option<String>,
     identity: Option<String>,
     work_list: Option<String>,
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl AgentResponse {
-    fn from_agent(a: agent::Agent, proj: Option<projection::AgentProjection>) -> Self {
+    fn from_agent(a: agent::Agent, proj: Option<projection::AgentProjection>, include_secret: bool) -> Self {
         Self {
             id: a.id,
             name: a.name,
             status: a.status,
             is_enabled: a.is_enabled,
-            webhook_secret: a.webhook_secret,
+            disabled_reason: a.disabled_reason,
+            webhook_secret: if include_secret { Some(a.webhook_secret) } else { None },
             identity: proj.as_ref().map(|p| p.identity.clone()),
             work_list: proj.as_ref().map(|p| p.work_list.clone()),
             created_at: a.created_at,
@@ -60,7 +63,7 @@ async fn create_agent(
     Json(body): Json<CreateAgent>,
 ) -> Result<(axum::http::StatusCode, Json<AgentResponse>), AppError> {
     let a = agent::create_agent(&state.pool, &body.name, auth.workspace_id, auth.user_id).await?;
-    Ok((axum::http::StatusCode::CREATED, Json(AgentResponse::from_agent(a, None))))
+    Ok((axum::http::StatusCode::CREATED, Json(AgentResponse::from_agent(a, None, true))))
 }
 
 async fn list_agents(
@@ -68,7 +71,7 @@ async fn list_agents(
     Extension(auth): Extension<AuthUser>,
 ) -> Result<Json<Vec<AgentResponse>>, AppError> {
     let agents = agent::list_agents(&state.pool, auth.workspace_id).await?;
-    Ok(Json(agents.into_iter().map(|a| AgentResponse::from_agent(a, None)).collect()))
+    Ok(Json(agents.into_iter().map(|a| AgentResponse::from_agent(a, None, false)).collect()))
 }
 
 async fn get_agent_handler(
@@ -79,7 +82,7 @@ async fn get_agent_handler(
         .await?
         .ok_or(AppError::NotFound("Agent not found".into()))?;
     let proj = projection::latest_projection(&state.pool, id).await?;
-    Ok(Json(AgentResponse::from_agent(a, proj)))
+    Ok(Json(AgentResponse::from_agent(a, proj, false)))
 }
 
 async fn update_agent_handler(
@@ -97,7 +100,7 @@ async fn update_agent_handler(
         body.is_enabled,
         disabled_reason,
     ).await?;
-    Ok(Json(AgentResponse::from_agent(a, None)))
+    Ok(Json(AgentResponse::from_agent(a, None, false)))
 }
 
 async fn delete_agent_handler(
@@ -105,5 +108,5 @@ async fn delete_agent_handler(
     Path(id): Path<Uuid>,
 ) -> Result<Json<AgentResponse>, AppError> {
     let a = agent::soft_delete_agent(&state.pool, id).await?;
-    Ok(Json(AgentResponse::from_agent(a, None)))
+    Ok(Json(AgentResponse::from_agent(a, None, false)))
 }

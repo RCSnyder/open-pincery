@@ -80,31 +80,31 @@ pub async fn auth_middleware(
 }
 
 fn extract_client_ip(req: &Request) -> IpAddr {
-    // Check X-Forwarded-For header first (for reverse proxies)
-    if let Some(forwarded) = req.headers().get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first_ip) = forwarded.split(',').next() {
-            if let Ok(ip) = first_ip.trim().parse::<IpAddr>() {
-                return ip;
-            }
-        }
-    }
-    // Fall back to connected peer address
+    // Use connected peer address only — do not trust X-Forwarded-For
+    // as self-hosted deployments typically run without a reverse proxy
     req.extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ci| ci.0.ip())
         .unwrap_or(IpAddr::from([127, 0, 0, 1]))
 }
 
+fn rate_limit_response() -> Response {
+    let mut resp = Response::new(axum::body::Body::from("Too Many Requests"));
+    *resp.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+    resp.headers_mut().insert("retry-after", "60".parse().unwrap());
+    resp
+}
+
 pub async fn unauth_rate_limit(
     State(state): State<AppState>,
     req: Request,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, Response> {
     let ip = extract_client_ip(&req);
     state
         .unauth_limiter
         .check_key(&ip)
-        .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?;
+        .map_err(|_| rate_limit_response())?;
     Ok(next.run(req).await)
 }
 
@@ -112,12 +112,12 @@ pub async fn auth_rate_limit(
     State(state): State<AppState>,
     req: Request,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, Response> {
     let ip = extract_client_ip(&req);
     state
         .auth_limiter
         .check_key(&ip)
-        .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?;
+        .map_err(|_| rate_limit_response())?;
     Ok(next.run(req).await)
 }
 

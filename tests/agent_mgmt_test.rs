@@ -144,4 +144,7 @@ async fn test_delete_agent() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["is_enabled"].as_bool().unwrap(), false);
+    assert_eq!(json["disabled_reason"].as_str().unwrap(), "deleted");
+    // webhook_secret must not be exposed on non-create responses
+    assert!(json.get("webhook_secret").is_none());
 }

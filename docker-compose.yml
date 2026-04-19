@@ -24,8 +24,8 @@ services:
       OPEN_PINCERY_HOST: "0.0.0.0"
       OPEN_PINCERY_PORT: "8080"
       OPEN_PINCERY_BOOTSTRAP_TOKEN: changeme
-      OPEN_PINCERY_LLM_PROVIDER: openai
-      OPEN_PINCERY_LLM_BASE_URL: https://api.openai.com/v1
+      LLM_API_BASE_URL: ${LLM_API_BASE_URL:?Set LLM_API_BASE_URL in .env}
+      LLM_API_KEY: ${LLM_API_KEY:?Set LLM_API_KEY in .env}
     depends_on:
       db:
         condition: service_healthy

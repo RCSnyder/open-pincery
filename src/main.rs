@@ -66,7 +66,7 @@ async fn main() {
 
     // Graceful shutdown: on SIGTERM/SIGINT, cancel all tasks then drain HTTP
     let server_shutdown = shutdown.clone();
-    axum::serve(listener, app)
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
             info!("Shutdown signal received, draining...");

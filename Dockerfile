@@ -18,7 +18,7 @@ RUN cargo build --release
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libssl3 \
+    ca-certificates curl libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/open-pincery /usr/local/bin/open-pincery
@@ -34,7 +34,5 @@ EXPOSE 8080
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
-
-RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 
 ENTRYPOINT ["open-pincery"]
