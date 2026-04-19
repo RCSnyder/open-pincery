@@ -1,0 +1,19 @@
+{
+  "//": "PostToolUse hook: auto-run rustfmt on any .rs file the agent edits so that `cargo fmt --check` never surfaces as a VERIFY-time failure. Also runs `cargo fmt --check` before any `git commit` to catch anything this hook missed.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "type": "command",
+        "command": "python .github/hooks/format_rust.py",
+        "timeout": 15
+      }
+    ],
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "python .github/hooks/precommit_fmt_check.py",
+        "timeout": 30
+      }
+    ]
+  }
+}
