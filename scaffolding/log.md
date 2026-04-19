@@ -144,6 +144,43 @@
 
 ## v2 RECONCILE — 2026-04-19T00:05Z
 
+- **Cosmetic**: 1 fix (test file count in log.md)
+- **Structural**: 11 fixes (design.md: webhook_secret field, static/ dir, docker-compose desc, AgentResponse shape, webhook response bodies, rate limiting impl details, phantom env vars, missing runtime config vars; readiness.md: governor crate references)
+- **Spec-violating**: None
+- **Changes**: scaffolding/design.md, scaffolding/readiness.md, scaffolding/log.md
+- **Next**: VERIFY
+
+## v2 VERIFY — 2026-04-19T00:06Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**:
+  - 25/25 tests pass across 14 test files
+  - All 15 ACs (AC-1 through AC-15) verified with real evidence
+  - All v2 truths (T-13 through T-19) hold
+  - No security issues (no secrets in source, parameterized SQL, constant-time HMAC, hashed session tokens)
+  - Deployment config correct (Dockerfile + docker-compose.yml)
+  - Tests are non-trivial (real DB, meaningful assertions, edge cases)
+  - Non-blocking notes: rate_limit_test could assert Retry-After header; no authenticated rate limit test; shutdown test only covers stale recovery cancellation
+- **Changes**: None (read-only verification)
+- **Retries**: 0
+- **Next**: DEPLOY
+
+## v2 DEPLOY — 2026-04-19T00:07Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**:
+  - 25/25 tests pass (full router exercised via `oneshot()`)
+  - README.md updated with v2 features, Docker Compose full-stack instructions, new API endpoints, rate limiting docs
+  - DELIVERY.md updated to v2 with Docker deployment, v2 changelog, updated known limitations
+  - Dockerfile with multi-stage build + healthcheck
+  - docker-compose.yml with app + postgres services
+  - .env.example present
+- **Changes**: Updated README.md, DELIVERY.md, scaffolding/log.md
+- **Retries**: 0
+- **Next**: DONE — v2 deployed as self_host_individual (local binary + Docker Compose)
+
+## v2 RECONCILE — 2026-04-19T00:05Z
+
 - **Structural drift fixed**:
   - design.md Agent struct: added missing `webhook_secret: String` field to match code
   - design.md directory structure: added `static/` directory (index.html, css/, js/) and migration `20260418000014_event_source_not_null.sql`; updated docker-compose.yml comment to "App + Postgres"

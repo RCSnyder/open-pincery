@@ -2,7 +2,7 @@
 
 **Open Pincery is an open-source multi-agent platform for durable, event-driven AI agents.** Each agent is a continuous entity with a stable identity, append-only event log, and wake/sleep lifecycle. Agents wake on messages, webhooks, or timers, work until done, and rest. Configure them by conversation. Orchestrate fleets via async messaging.
 
-> **Status:** v1 runtime implemented. CAS lifecycle, event log, LLM-powered wake/sleep cycles, maintenance projections, HTTP API, and PostgreSQL persistence are all functional.
+> **Status:** v2 runtime implemented. CAS lifecycle, event log, LLM-powered wake/sleep cycles, maintenance projections, HTTP API, PostgreSQL persistence, graceful shutdown, Docker Compose deployment, API rate limiting, webhook ingress with HMAC-SHA256, and agent management (PATCH/DELETE) are all functional.
 
 ## Why Another Agent Platform?
 
@@ -119,9 +119,9 @@ src/
   db.rs               # Pool creation + migrations
   error.rs            # Unified error type
   auth.rs             # Token hashing
-migrations/           # PostgreSQL schema (13 tables)
-tests/                # Integration tests (17 tests across 10 files)
-docker-compose.yml    # PostgreSQL for local dev
+migrations/           # PostgreSQL schema (16 migrations)
+tests/                # Integration tests (25 tests across 14 files)
+docker-compose.yml    # App + PostgreSQL (Docker deploy)
 docs/
   input/              # Architecture specs, TLA+ model, design docs
   reference/          # Audit reports, adoption plans
@@ -178,8 +178,21 @@ The platform's design practices are informed by emerging research in agentic sof
 
 ### 1. Start PostgreSQL
 
+**Option A — Docker Compose (full stack):**
+
 ```bash
+# Start both the app and PostgreSQL
+cp .env.example .env
+# Edit .env: set LLM_API_KEY and OPEN_PINCERY_BOOTSTRAP_TOKEN
 docker compose up -d
+```
+
+The app starts on `http://localhost:8080` with migrations applied automatically. Skip to step 4.
+
+**Option B — PostgreSQL only (development):**
+
+```bash
+docker compose up -d db
 ```
 
 This starts Postgres on `localhost:5432` with user/password/database all set to `open_pincery`.
@@ -258,17 +271,23 @@ curl http://localhost:8080/health
 
 ### API
 
-| Method | Path                       | Description                     |
-| ------ | -------------------------- | ------------------------------- |
-| GET    | `/health`                  | Health check (no auth required) |
-| POST   | `/api/bootstrap`           | One-time admin setup            |
-| POST   | `/api/agents`              | Create agent                    |
-| GET    | `/api/agents`              | List agents                     |
-| GET    | `/api/agents/:id`          | Agent detail with projections   |
-| POST   | `/api/agents/:id/messages` | Send message (triggers wake)    |
-| GET    | `/api/agents/:id/events`   | Event log                       |
+| Method | Path                          | Description                          |
+| ------ | ----------------------------- | ------------------------------------ |
+| GET    | `/health`                     | Health check (no auth required)      |
+| POST   | `/api/bootstrap`              | One-time admin setup                 |
+| POST   | `/api/agents`                 | Create agent (returns webhook_secret)|
+| GET    | `/api/agents`                 | List agents                          |
+| GET    | `/api/agents/:id`             | Agent detail with projections        |
+| PATCH  | `/api/agents/:id`             | Update agent name/enabled status     |
+| DELETE | `/api/agents/:id`             | Soft-delete (disable with reason)    |
+| POST   | `/api/agents/:id/messages`    | Send message (triggers wake)         |
+| GET    | `/api/agents/:id/events`      | Event log                            |
+| POST   | `/api/agents/:id/webhooks`    | Webhook ingress (HMAC-SHA256)        |
 
 All `/api/*` routes (except bootstrap) require `Authorization: Bearer <session_token>`.
+Webhook routes require `X-Signature` header with HMAC-SHA256 of the body.
+
+Rate limits: 10 requests/minute (unauthenticated), 60 requests/minute (authenticated). Exceeding the limit returns `429 Too Many Requests` with a `Retry-After` header.
 
 ### Tests
 
