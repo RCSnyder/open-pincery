@@ -1,0 +1,112 @@
+use sqlx::postgres::PgListener;
+use sqlx::PgPool;
+use std::sync::Arc;
+use tracing::{error, info, warn};
+
+use crate::config::Config;
+use crate::error::AppError;
+use crate::models::agent;
+use crate::runtime::{drain, llm::LlmClient, maintenance, wake_loop};
+
+/// Spawn the LISTEN/NOTIFY handler that triggers wakes.
+pub async fn start_listener(pool: PgPool, config: Arc<Config>, llm: Arc<LlmClient>) {
+    // We listen on a wildcard pattern — but PgListener requires exact channel names.
+    // Instead, we'll listen on a general channel and agents will NOTIFY on it.
+    // Actually, Postgres LISTEN doesn't support wildcards. We use a single channel.
+    let mut listener = match PgListener::connect_with(&pool).await {
+        Ok(l) => l,
+        Err(e) => {
+            error!("Failed to create PG listener: {e}");
+            return;
+        }
+    };
+
+    if let Err(e) = listener.listen("agent_wake").await {
+        error!("Failed to listen on agent_wake channel: {e}");
+        return;
+    }
+
+    info!("Background listener started on channel 'agent_wake'");
+
+    loop {
+        match listener.recv().await {
+            Ok(notification) => {
+                let payload = notification.payload().to_string();
+                info!(payload = %payload, "Received wake notification");
+
+                // Parse agent_id from payload
+                let agent_id = match uuid::Uuid::parse_str(&payload) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        warn!(payload = %payload, "Invalid agent_id in notification: {e}");
+                        continue;
+                    }
+                };
+
+                let pool = pool.clone();
+                let config = config.clone();
+                let llm = llm.clone();
+
+                tokio::spawn(async move {
+                    if let Err(e) = handle_wake(pool, config, llm, agent_id).await {
+                        error!(agent_id = %agent_id, error = %e, "Wake handler failed");
+                    }
+                });
+            }
+            Err(e) => {
+                error!("Listener error: {e}");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
+async fn handle_wake(
+    pool: PgPool,
+    config: Arc<Config>,
+    llm: Arc<LlmClient>,
+    agent_id: uuid::Uuid,
+) -> Result<(), AppError> {
+    // Attempt CAS acquisition
+    let acquired = agent::acquire_wake(&pool, agent_id).await?;
+    let agent_data = match acquired {
+        Some(a) => a,
+        None => {
+            info!(agent_id = %agent_id, "CAS acquisition failed (agent not asleep or already acquired)");
+            return Ok(());
+        }
+    };
+
+    let wake_id = agent_data.wake_id.unwrap();
+    let wake_started_at = agent_data.wake_started_at.unwrap();
+
+    // Run wake loop
+    let _reason = wake_loop::run_wake_loop(&pool, &llm, &config, agent_id, wake_id).await?;
+
+    // Transition to maintenance
+    agent::transition_to_maintenance(&pool, agent_id).await?;
+
+    // Run maintenance
+    maintenance::run_maintenance(&pool, &llm, agent_id, wake_id).await?;
+
+    // Drain check
+    let reacquired = drain::check_drain(&pool, agent_id, wake_started_at).await?;
+    if reacquired {
+        // Recursion: the new wake will be handled by a fresh task
+        let new_agent = agent::get_agent(&pool, agent_id)
+            .await?
+            .ok_or(AppError::NotFound("Agent not found after drain".into()))?;
+        if let (Some(new_wake_id), Some(_new_wake_started)) =
+            (new_agent.wake_id, new_agent.wake_started_at)
+        {
+            let _reason =
+                wake_loop::run_wake_loop(&pool, &llm, &config, agent_id, new_wake_id).await?;
+            agent::transition_to_maintenance(&pool, agent_id).await?;
+            maintenance::run_maintenance(&pool, &llm, agent_id, new_wake_id).await?;
+            // Final release — no further drain for simplicity in v1
+            agent::release_to_asleep(&pool, agent_id).await?;
+        }
+    }
+
+    Ok(())
+}

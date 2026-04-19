@@ -1,0 +1,20 @@
+# Rust
+/target
+*.rs.bk
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
+
+# General
+.env
+.DS_Store
+*.log
+
+# sqlx offline query data
+.sqlx/
