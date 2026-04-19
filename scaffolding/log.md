@@ -329,3 +329,11 @@
 - **Changes**: `scaffolding/design.md` (603 → 1006 lines).
 - **Retries**: 0
 - **Next**: ANALYZE.
+
+## v4 ANALYZE — 2026-04-19T06:00Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: readiness.md v4 section appended (~105 lines). Verdict: READY. 8 truths (T-24..T-31) covering non-root container, budget pre-CAS gate, atomic cost accounting, workspace-scoped rotation endpoint, pcy thin-binary layout, vanilla-JS-only UI, api.md stability contract, zero schema changes. Every AC-22..AC-27 has a Key Link chain and coverage-table row with concrete test file + runtime proof. 15 scope-reduction risks flagged. Build order locked: Dockerfile → budget → rotate → CLI → UI → docs. No clarifications needed.
+- **Changes**: `scaffolding/readiness.md` (194 → 299 lines).
+- **Retries**: 0
+- **Next**: BUILD slice 1 (AC-22 non-root Dockerfile).
