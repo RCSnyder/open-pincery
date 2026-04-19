@@ -9,6 +9,26 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U open_pincery"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgres://open_pincery:open_pincery@db:5432/open_pincery
+      OPEN_PINCERY_HOST: "0.0.0.0"
+      OPEN_PINCERY_PORT: "8080"
+      OPEN_PINCERY_BOOTSTRAP_TOKEN: changeme
+      OPEN_PINCERY_LLM_PROVIDER: openai
+      OPEN_PINCERY_LLM_BASE_URL: https://api.openai.com/v1
+    depends_on:
+      db:
+        condition: service_healthy
 
 volumes:
   pgdata:

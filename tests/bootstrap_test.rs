@@ -29,10 +29,7 @@ async fn test_bootstrap_flow() {
         event_window_limit: 200,
     };
 
-    let state = AppState {
-        pool: pool.clone(),
-        config: config.clone(),
-    };
+    let state = AppState::new(pool.clone(), config.clone());
 
     let app = api::router(state);
 
@@ -98,7 +95,7 @@ async fn test_bootstrap_wrong_token() {
         event_window_limit: 200,
     };
 
-    let state = AppState { pool, config };
+    let state = AppState::new(pool, config);
     let app = api::router(state);
 
     let req = Request::builder()

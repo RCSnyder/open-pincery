@@ -1,17 +1,24 @@
 use sqlx::PgPool;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use crate::config::Config;
 use crate::models::{agent, event};
 
 /// Periodically check for and recover stale wakes.
-pub async fn start_stale_recovery(pool: PgPool, config: Arc<Config>) {
+pub async fn start_stale_recovery(pool: PgPool, config: Arc<Config>, shutdown: CancellationToken) {
     let interval_secs = 60; // Check every minute
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
 
     loop {
-        interval.tick().await;
+        tokio::select! {
+            _ = shutdown.cancelled() => {
+                info!("Stale recovery shutting down");
+                return;
+            }
+            _ = interval.tick() => {}
+        }
 
         match agent::find_stale_agents(&pool, config.stale_wake_hours as i64).await {
             Ok(stale_agents) => {

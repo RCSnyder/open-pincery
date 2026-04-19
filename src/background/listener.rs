@@ -1,6 +1,7 @@
 use sqlx::postgres::PgListener;
 use sqlx::PgPool;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::config::Config;
@@ -9,7 +10,7 @@ use crate::models::agent;
 use crate::runtime::{drain, llm::LlmClient, maintenance, wake_loop};
 
 /// Spawn the LISTEN/NOTIFY handler that triggers wakes.
-pub async fn start_listener(pool: PgPool, config: Arc<Config>, llm: Arc<LlmClient>) {
+pub async fn start_listener(pool: PgPool, config: Arc<Config>, llm: Arc<LlmClient>, shutdown: CancellationToken) {
     // We listen on a wildcard pattern — but PgListener requires exact channel names.
     // Instead, we'll listen on a general channel and agents will NOTIFY on it.
     // Actually, Postgres LISTEN doesn't support wildcards. We use a single channel.
@@ -29,33 +30,40 @@ pub async fn start_listener(pool: PgPool, config: Arc<Config>, llm: Arc<LlmClien
     info!("Background listener started on channel 'agent_wake'");
 
     loop {
-        match listener.recv().await {
-            Ok(notification) => {
-                let payload = notification.payload().to_string();
-                info!(payload = %payload, "Received wake notification");
-
-                // Parse agent_id from payload
-                let agent_id = match uuid::Uuid::parse_str(&payload) {
-                    Ok(id) => id,
-                    Err(e) => {
-                        warn!(payload = %payload, "Invalid agent_id in notification: {e}");
-                        continue;
-                    }
-                };
-
-                let pool = pool.clone();
-                let config = config.clone();
-                let llm = llm.clone();
-
-                tokio::spawn(async move {
-                    if let Err(e) = handle_wake(pool, config, llm, agent_id).await {
-                        error!(agent_id = %agent_id, error = %e, "Wake handler failed");
-                    }
-                });
+        tokio::select! {
+            _ = shutdown.cancelled() => {
+                info!("Background listener shutting down");
+                return;
             }
-            Err(e) => {
-                error!("Listener error: {e}");
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            result = listener.recv() => {
+                match result {
+                    Ok(notification) => {
+                        let payload = notification.payload().to_string();
+                        info!(payload = %payload, "Received wake notification");
+
+                        let agent_id = match uuid::Uuid::parse_str(&payload) {
+                            Ok(id) => id,
+                            Err(e) => {
+                                warn!(payload = %payload, "Invalid agent_id in notification: {e}");
+                                continue;
+                            }
+                        };
+
+                        let pool = pool.clone();
+                        let config = config.clone();
+                        let llm = llm.clone();
+
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_wake(pool, config, llm, agent_id).await {
+                                error!(agent_id = %agent_id, error = %e, "Wake handler failed");
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        error!("Listener error: {e}");
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                }
             }
         }
     }

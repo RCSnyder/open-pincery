@@ -22,6 +22,7 @@ pub struct Agent {
     pub disabled_at: Option<DateTime<Utc>>,
     pub budget_limit_usd: Decimal,
     pub budget_used_usd: Decimal,
+    pub webhook_secret: String,
     pub created_at: DateTime<Utc>,
 }
 
@@ -172,4 +173,44 @@ pub async fn force_release(pool: &PgPool, agent_id: Uuid) -> Result<(), AppError
     .execute(pool)
     .await?;
     Ok(())
+}
+
+pub async fn update_agent(
+    pool: &PgPool,
+    id: Uuid,
+    name: Option<&str>,
+    is_enabled: Option<bool>,
+    disabled_reason: Option<&str>,
+) -> Result<Agent, AppError> {
+    let agent = sqlx::query_as::<_, Agent>(
+        "UPDATE agents SET
+           name = COALESCE($2, name),
+           is_enabled = COALESCE($3, is_enabled),
+           disabled_reason = CASE WHEN $3 = FALSE THEN $4 WHEN $3 = TRUE THEN NULL ELSE disabled_reason END,
+           disabled_at = CASE WHEN $3 = FALSE THEN NOW() WHEN $3 = TRUE THEN NULL ELSE disabled_at END
+         WHERE id = $1
+         RETURNING *"
+    )
+    .bind(id)
+    .bind(name)
+    .bind(is_enabled)
+    .bind(disabled_reason)
+    .fetch_one(pool)
+    .await?;
+    Ok(agent)
+}
+
+pub async fn soft_delete_agent(pool: &PgPool, id: Uuid) -> Result<Agent, AppError> {
+    let agent = sqlx::query_as::<_, Agent>(
+        "UPDATE agents SET
+           is_enabled = FALSE,
+           disabled_reason = 'deleted',
+           disabled_at = NOW()
+         WHERE id = $1
+         RETURNING *"
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await?;
+    Ok(agent)
 }

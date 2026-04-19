@@ -15,11 +15,19 @@ struct CreateAgent {
     name: String,
 }
 
+#[derive(Deserialize)]
+struct UpdateAgent {
+    name: Option<String>,
+    is_enabled: Option<bool>,
+}
+
 #[derive(Serialize)]
 struct AgentResponse {
     id: Uuid,
     name: String,
     status: String,
+    is_enabled: bool,
+    webhook_secret: String,
     identity: Option<String>,
     work_list: Option<String>,
     created_at: chrono::DateTime<chrono::Utc>,
@@ -31,6 +39,8 @@ impl AgentResponse {
             id: a.id,
             name: a.name,
             status: a.status,
+            is_enabled: a.is_enabled,
+            webhook_secret: a.webhook_secret,
             identity: proj.as_ref().map(|p| p.identity.clone()),
             work_list: proj.as_ref().map(|p| p.work_list.clone()),
             created_at: a.created_at,
@@ -41,7 +51,7 @@ impl AgentResponse {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/agents", post(create_agent).get(list_agents))
-        .route("/agents/{id}", get(get_agent_handler))
+        .route("/agents/{id}", get(get_agent_handler).patch(update_agent_handler).delete(delete_agent_handler))
 }
 
 async fn create_agent(
@@ -70,4 +80,30 @@ async fn get_agent_handler(
         .ok_or(AppError::NotFound("Agent not found".into()))?;
     let proj = projection::latest_projection(&state.pool, id).await?;
     Ok(Json(AgentResponse::from_agent(a, proj)))
+}
+
+async fn update_agent_handler(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<UpdateAgent>,
+) -> Result<Json<AgentResponse>, AppError> {
+    let disabled_reason = match body.is_enabled {
+        Some(false) => Some("disabled_by_user"),
+        _ => None,
+    };
+    let a = agent::update_agent(
+        &state.pool, id,
+        body.name.as_deref(),
+        body.is_enabled,
+        disabled_reason,
+    ).await?;
+    Ok(Json(AgentResponse::from_agent(a, None)))
+}
+
+async fn delete_agent_handler(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<AgentResponse>, AppError> {
+    let a = agent::soft_delete_agent(&state.pool, id).await?;
+    Ok(Json(AgentResponse::from_agent(a, None)))
 }
