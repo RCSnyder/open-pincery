@@ -64,7 +64,7 @@ pub async fn create_session(
     let session = sqlx::query_as::<_, UserSession>(
         "INSERT INTO user_sessions (user_id, session_token_hash, auth_provider, expires_at)
          VALUES ($1, $2, $3, NOW() + INTERVAL '30 days')
-         RETURNING *"
+         RETURNING id, user_id, session_token_hash, auth_provider, created_at, last_seen_at, expires_at, revoked_at"
     )
     .bind(user_id)
     .bind(token_hash)
@@ -79,7 +79,8 @@ pub async fn find_session_by_token_hash(
     token_hash: &str,
 ) -> Result<Option<UserSession>, AppError> {
     let session = sqlx::query_as::<_, UserSession>(
-        "SELECT * FROM user_sessions
+        "SELECT id, user_id, session_token_hash, auth_provider, created_at, last_seen_at, expires_at, revoked_at
+         FROM user_sessions
          WHERE session_token_hash = $1
            AND revoked_at IS NULL
            AND expires_at > NOW()"

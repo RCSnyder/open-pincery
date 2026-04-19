@@ -10,9 +10,11 @@ pub struct PromptTemplate {
     pub id: Uuid,
     pub name: String,
     pub version: i32,
-    pub content: String,
+    pub template: String,
     pub is_active: bool,
+    pub created_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
+    pub change_reason: Option<String>,
 }
 
 pub async fn find_active(pool: &PgPool, name: &str) -> Result<Option<PromptTemplate>, AppError> {

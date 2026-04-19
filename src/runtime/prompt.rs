@@ -23,7 +23,7 @@ pub async fn assemble_prompt(
         .await?
         .ok_or_else(|| AppError::Internal("Missing wake_system_prompt template".into()))?;
 
-    let mut system_prompt = template.content;
+    let mut system_prompt = template.template;
 
     // 2. Add current time
     system_prompt.push_str(&format!(
@@ -91,7 +91,6 @@ pub async fn assemble_prompt(
             "tool_result" => {
                 let output = ev
                     .tool_output
-                    .map(|v| v.as_str().unwrap_or("").to_string())
                     .or(ev.content)
                     .unwrap_or_default();
                 // Find matching tool_call event ID

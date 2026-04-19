@@ -1,11 +1,4 @@
-mod api;
-mod auth;
-mod background;
-mod config;
-mod db;
-mod error;
-mod models;
-mod runtime;
+use open_pincery::{api, background, config, db, runtime};
 
 use std::sync::Arc;
 use tracing::info;

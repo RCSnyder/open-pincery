@@ -109,8 +109,6 @@ pub async fn run_wake_loop(
         if let Some(tool_calls) = &choice.message.tool_calls {
             for tc in tool_calls {
                 // Record tool call event
-                let input_json: serde_json::Value =
-                    serde_json::from_str(&tc.function.arguments).unwrap_or_default();
                 event::append_event(
                     pool,
                     agent_id,
@@ -118,7 +116,7 @@ pub async fn run_wake_loop(
                     "agent",
                     Some(wake_id),
                     Some(&tc.function.name),
-                    Some(&input_json),
+                    Some(&tc.function.arguments),
                     None,
                     None,
                     None,
@@ -138,7 +136,7 @@ pub async fn run_wake_loop(
                             Some(wake_id),
                             Some("sleep"),
                             None,
-                            Some(&serde_json::json!("going to sleep")),
+                            Some("going to sleep"),
                             None,
                             None,
                         )
@@ -169,7 +167,7 @@ pub async fn run_wake_loop(
                             Some(wake_id),
                             Some(&tc.function.name),
                             None,
-                            Some(&serde_json::json!(output)),
+                            Some(&output),
                             None,
                             None,
                         )
@@ -184,7 +182,7 @@ pub async fn run_wake_loop(
                             Some(wake_id),
                             Some(&tc.function.name),
                             None,
-                            Some(&serde_json::json!({"error": err})),
+                            Some(&err),
                             None,
                             None,
                         )

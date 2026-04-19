@@ -13,8 +13,8 @@ pub struct Event {
     pub source: String,
     pub wake_id: Option<Uuid>,
     pub tool_name: Option<String>,
-    pub tool_input: Option<serde_json::Value>,
-    pub tool_output: Option<serde_json::Value>,
+    pub tool_input: Option<String>,
+    pub tool_output: Option<String>,
     pub content: Option<String>,
     pub termination_reason: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -27,8 +27,8 @@ pub async fn append_event(
     source: &str,
     wake_id: Option<Uuid>,
     tool_name: Option<&str>,
-    tool_input: Option<&serde_json::Value>,
-    tool_output: Option<&serde_json::Value>,
+    tool_input: Option<&str>,
+    tool_output: Option<&str>,
     content: Option<&str>,
     termination_reason: Option<&str>,
 ) -> Result<Event, AppError> {
@@ -93,7 +93,7 @@ pub async fn has_pending_events(
 ) -> Result<bool, AppError> {
     let count = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM events
-         WHERE agent_id = $1 AND created_at > $2 AND source = 'user'"
+         WHERE agent_id = $1 AND created_at > $2 AND source = 'human'"
     )
     .bind(agent_id)
     .bind(since)

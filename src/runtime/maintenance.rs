@@ -46,7 +46,7 @@ pub async fn run_maintenance(
     let messages = vec![
         ChatMessage {
             role: "system".into(),
-            content: Some(template.content),
+            content: Some(template.template),
             tool_calls: None,
             tool_call_id: None,
         },
