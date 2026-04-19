@@ -362,3 +362,77 @@ None — all three clarifications from scope.md have documented resolutions:
 1. LLM provider: generic OpenAI-compatible client with configurable base URL ✓
 2. Zerobox: deferred to Phase 2, shell tool uses basic subprocess ✓
 3. Constitution: default template shipped in seed migration ✓
+
+---
+
+## v2 Design Addendum — Operational Readiness
+
+### Architecture Changes
+
+No core architecture changes. v2 adds:
+
+1. **Shutdown signal handler** in `main.rs` — tokio signal listener for SIGTERM/SIGINT that triggers a `CancellationToken` shared across HTTP server, background listener, and stale recovery job. Axum's `with_graceful_shutdown` handles HTTP draining.
+
+2. **Rate limiting middleware** in `src/api/mod.rs` — tower-governor middleware providing per-IP rate limiting. Two tiers: bootstrap (10 req/min) and authenticated (60 req/min).
+
+3. **Webhook endpoint** in `src/api/webhooks.rs` — HMAC-SHA256 verified JSON ingress.
+
+4. **Agent management endpoints** in `src/api/agents.rs` — PATCH and DELETE routes.
+
+5. **Dockerfile** + updated `docker-compose.yml` — multi-stage build, healthcheck, app + postgres services.
+
+### New Files
+
+```
+Dockerfile                      # Multi-stage Rust build
+src/api/webhooks.rs             # Webhook ingress endpoint
+migrations/20260418000015_add_webhook_secrets.sql   # Per-agent webhook_secret column
+migrations/20260418000016_create_webhook_dedup.sql   # Idempotency key dedup table
+tests/shutdown_test.rs          # AC-11
+tests/rate_limit_test.rs        # AC-13
+tests/webhook_test.rs           # AC-14
+tests/agent_mgmt_test.rs        # AC-15
+```
+
+### New Interfaces
+
+```rust
+// Webhook verification
+pub fn verify_hmac(secret: &[u8], payload: &[u8], signature: &str) -> bool
+
+// Agent management
+pub async fn update_agent(pool: &PgPool, id: Uuid, name: Option<&str>, is_enabled: Option<bool>, disabled_reason: Option<&str>) -> Result<Agent>
+pub async fn soft_delete_agent(pool: &PgPool, id: Uuid) -> Result<Agent>
+```
+
+```
+PATCH /api/agents/:id
+  Headers: Authorization: Bearer <session_token>
+  Body: { "name"?: "string", "is_enabled"?: bool }
+  Response: 200 { id, name, status, is_enabled, ... }
+
+DELETE /api/agents/:id
+  Headers: Authorization: Bearer <session_token>
+  Response: 200 { id, name, status, is_enabled: false, disabled_reason: "deleted" }
+
+POST /api/agents/:id/webhooks
+  Headers: X-Webhook-Signature: sha256=<hex>, X-Idempotency-Key: <unique-id>
+  Body: { "content": "string", "source"?: "string" }
+  Response: 202 { event_id } (new) | 200 { event_id } (duplicate)
+  Error: 401 (invalid signature)
+```
+
+### New Config
+
+```
+RATE_LIMIT_PER_MINUTE=60           # Authenticated endpoint rate limit
+RATE_LIMIT_BOOTSTRAP_PER_MINUTE=10 # Bootstrap endpoint rate limit
+```
+
+### External Integrations (new)
+
+**Docker** — Build + runtime container. Error handling: healthcheck retries for Postgres readiness. Test strategy: manual (`docker compose up` + curl health).
+
+### Complexity Exceptions (v2)
+
+None new — all v2 additions are small, self-contained modules.

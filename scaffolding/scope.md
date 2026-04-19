@@ -89,20 +89,56 @@ $0 — runs on localhost with a local PostgreSQL instance. No cloud services req
 
 ## Deferred
 
-- **Webhook ingress** (HMAC verification, dedup, normalization) — Phase 2
-- **Inter-agent messaging** (send_message, cross-log recording, NOTIFY target) — Phase 2  
-- **Tool permission system** (yolo/supervised/locked modes, approval workflow) — v1 uses yolo mode only; approval gates are Phase 2
-- **Credential vault** (OneCLI integration, proxy injection, Zerobox secrets) — Phase 2
-- **Process sandboxing** (Zerobox per-tool isolation) — Phase 2
-- **Budget tracking** (per-agent USD limits, per-LLM-call cost tracking) — v1 tracks tokens but does not enforce budget caps
-- **Event collapse** (backpressure for burst events) — Phase 2
-- **Prompt injection defense** (scanning, canary tokens, rail pipeline) — Phase 2
-- **MCP server support** (discovery, registry, agent-built servers) — Phase 2
-- **Multi-tenancy** (org/workspace RBAC enforcement, policy sets, RLS) — v1 creates the schema but does not enforce RLS
-- **Dashboard / UI** — Phase 2 (API-first for v1)
-- **Greywall host sandbox** — Phase 2
-- **Enterprise auth** (Entra OIDC, generic OIDC, SCIM) — Phase 2
-- **SaaS features** (billing, subscriptions, abuse prevention) — Phase 2+
-- **Compile/lint/test/typecheck verification tools** — Phase 2
-- **Context character cap enforcement** — Phase 2 (iteration cap is v1)
-- **Docker Compose** — included for convenience but not the primary deployment method
+- **Inter-agent messaging** (send_message, cross-log recording, NOTIFY target) — Phase 3
+- **Credential vault** (OneCLI integration, proxy injection, Zerobox secrets) — Phase 3
+- **Process sandboxing** (Zerobox per-tool isolation) — Phase 3
+- **Budget enforcement** (per-agent USD limits, hard caps) — v2 tracks costs but does not enforce hard budget caps
+- **Event collapse** (backpressure for burst events) — Phase 3
+- **Prompt injection defense** (scanning, canary tokens, rail pipeline) — Phase 3
+- **MCP server support** (discovery, registry, agent-built servers) — Phase 3
+- **Multi-tenancy** (org/workspace RBAC enforcement, policy sets, RLS) — v2 creates the schema but does not enforce RLS
+- **Greywall host sandbox** — Phase 3
+- **Enterprise auth** (Entra OIDC, generic OIDC, SCIM) — Phase 3
+- **SaaS features** (billing, subscriptions, abuse prevention) — Phase 3+
+- **Compile/lint/test/typecheck verification tools** — Phase 3
+- **Context character cap enforcement** — Phase 3 (iteration cap is v1)
+
+---
+
+## v2 — Operational Readiness
+
+### Problem (v2)
+
+v1 delivered the core agent runtime but is not operationally ready for real self-hosted use. There is no graceful shutdown, no rate limiting, no way to run the full stack with `docker compose up`, and webhook-driven integrations are impossible. The UI exists but was not part of v1's acceptance criteria.
+
+### Changes from v1
+
+- Minor architecture changes: new middleware layer (rate limiting), shutdown signal handling, webhook endpoint, Dockerfile
+- No changes to existing core runtime (CAS lifecycle, wake loop, maintenance, drain check, event sourcing)
+- Existing v1 ACs remain satisfied; v2 appends new ACs
+
+### v2 Acceptance Criteria
+
+- **AC-11** (Graceful Shutdown): On SIGTERM/SIGINT, the server stops accepting new requests, waits up to 30 seconds for in-flight requests and active wake loops to complete, then exits cleanly. Background listener and stale recovery tasks are cancelled gracefully. Verified by starting the server, sending a message that triggers a wake, then sending SIGTERM and confirming the wake completes and the process exits with code 0.
+
+- **AC-12** (Docker Compose Full Stack): `docker compose up` starts both PostgreSQL and the Open Pincery binary from a multi-stage Dockerfile. The app waits for Postgres to be ready before starting. Verified by running `docker compose up` from a clean state and confirming the health endpoint returns `{"status":"ok"}` within 60 seconds.
+
+- **AC-13** (API Rate Limiting): All API endpoints enforce per-IP rate limiting (default: 60 requests/minute for authenticated endpoints, 10 requests/minute for bootstrap). When the limit is exceeded, the server returns HTTP 429 with a `Retry-After` header. Verified by sending 61 requests in rapid succession and confirming the 61st returns 429.
+
+- **AC-14** (Webhook Ingress): `POST /api/agents/:id/webhooks` accepts JSON payloads with HMAC-SHA256 signature verification via a per-agent webhook secret. Valid webhooks are recorded as `webhook_received` events and trigger wake acquisition via NOTIFY. Invalid signatures return 401. Duplicate webhooks (by idempotency key header) return 200 without re-processing. Verified by sending a signed webhook, confirming the event appears in the log, and sending the same webhook again confirming deduplication.
+
+- **AC-15** (Agent Management API): `PATCH /api/agents/:id` supports enabling/disabling agents and updating the name. `DELETE /api/agents/:id` soft-deletes an agent (sets `is_enabled = false`, `disabled_reason = 'deleted'`). Disabled agents reject wake acquisition attempts. Verified by disabling an agent, sending it a message, and confirming no wake occurs.
+
+### v2 Deployment Target
+
+Same as v1: `self_host_individual` — but now with Docker Compose as a first-class deployment method alongside bare-metal.
+
+### v2 Estimated Cost
+
+$0 — same as v1. Docker is optional; bare-metal still works.
+
+### v2 Deferred (from this iteration)
+
+- Webhook UI management (creating/rotating secrets via UI) — v3
+- Rate limit configuration per-workspace — v3
+- Health check page in UI — nice-to-have, not critical
