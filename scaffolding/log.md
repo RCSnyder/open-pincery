@@ -279,3 +279,19 @@
 - **Changes**: Modified: `Cargo.toml`, `src/api/{mod,health}.rs`, `src/background/{listener,stale}.rs`, `src/db.rs`, `src/main.rs`, `src/observability/{logging,metrics}.rs`, `src/runtime/wake_loop.rs`, `tests/{health,observability}_test.rs`, `docs/runbooks/db-restore.md`, `Cargo.lock`.
 - **Retries**: 0
 - **Next**: REVIEW (second pass) — expecting PASS.
+
+## RECONCILE — 2026-04-19T02:45Z
+
+- **Gate**: PASS (auto-fix)
+- **Evidence**: design.md and readiness.md realigned with shipped v3 code: `.cargo/config.toml` purpose corrected (net retry + cross-linker); `[profile.release]` acknowledged to live in Cargo.toml (stable-rust requirement); `metrics-exporter-prometheus` dependency snippet updated (no `http-listener` feature); `/ready` pseudo-code now shows 3 checks with per-task failing labels; AppState plumbing row split into `listener_alive`/`stale_alive` with `AliveGuard` reset-on-drop. Directory structure, interfaces, scope ACs, and log entries all match the code as of `ca92607`.
+- **Changes**: `scaffolding/design.md`, `scaffolding/readiness.md`.
+- **Retries**: 0
+- **Next**: REVIEW (second pass).
+
+## REVIEW (second pass) — 2026-04-19T03:00Z
+
+- **Gate**: PASS (attempt 2)
+- **Evidence**: REVIEW subagent verdict **PASS**. All 6 findings from first pass confirmed resolved with specific file+line citations (wake_loop.rs:14-34 WakeMetricsGuard, health.rs:22-82 3-check ready, api/mod.rs:29-41 per-task flags, listener.rs:24-32 + stale.rs:19-27 AliveGuard, logging.rs json_subscriber_for_writer + json_output_is_parseable_with_required_fields test, db-restore.md migration step). No new Critical/Required findings. Two FYI items noted non-blocking: JSON envelope nests `message` under `fields.message` (idiomatic tracing-subscriber shape); Prometheus recorder is process-global so a second install-test would panic — fine with `--test-threads=1`.
+- **Retries**: 1 (first pass FAIL, second pass PASS)
+- **Next**: VERIFY.
+
