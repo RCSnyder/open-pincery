@@ -1,4 +1,5 @@
 use sqlx::PgPool;
+use std::time::Instant;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -10,6 +11,29 @@ use crate::error::AppError;
 use crate::models::{agent, event, llm_call};
 use crate::observability::metrics as m;
 
+/// RAII guard that increments `ACTIVE_WAKES` on construction and, on drop,
+/// decrements the gauge and records `WAKE_DURATION`. Ensures no termination
+/// path can leak the active-wake count or skip the duration histogram.
+struct WakeMetricsGuard {
+    start: Instant,
+}
+
+impl WakeMetricsGuard {
+    fn new() -> Self {
+        metrics::gauge!(m::ACTIVE_WAKES).increment(1.0);
+        Self {
+            start: Instant::now(),
+        }
+    }
+}
+
+impl Drop for WakeMetricsGuard {
+    fn drop(&mut self) {
+        metrics::gauge!(m::ACTIVE_WAKES).decrement(1.0);
+        metrics::histogram!(m::WAKE_DURATION).record(self.start.elapsed().as_secs_f64());
+    }
+}
+
 /// Run the full wake loop for an agent that has already been CAS-acquired.
 pub async fn run_wake_loop(
     pool: &PgPool,
@@ -20,6 +44,7 @@ pub async fn run_wake_loop(
 ) -> Result<String, AppError> {
     info!(agent_id = %agent_id, wake_id = %wake_id, "Starting wake loop");
     metrics::counter!(m::WAKE_STARTED).increment(1);
+    let _wake_metrics = WakeMetricsGuard::new();
 
     // Record wake_start event
     event::append_event(

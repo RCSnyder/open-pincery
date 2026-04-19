@@ -17,6 +17,14 @@ pub async fn start_stale_recovery(
     shutdown: CancellationToken,
     alive: Arc<AtomicBool>,
 ) {
+    struct AliveGuard(Arc<AtomicBool>);
+    impl Drop for AliveGuard {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Relaxed);
+        }
+    }
+    let _guard = AliveGuard(alive.clone());
+
     let interval_secs = 60; // Check every minute
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
 

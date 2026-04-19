@@ -24,6 +24,10 @@ async fn metrics_endpoint_renders_counters() {
     metrics::counter!(m::WAKE_STARTED).increment(1);
     metrics::counter!(m::WAKE_COMPLETED, "reason" => "completed").increment(1);
     metrics::counter!(m::RATE_LIMIT_REJECTED).increment(3);
+    // Exercise the gauge + histogram so they appear in the scrape output.
+    metrics::gauge!(m::ACTIVE_WAKES).increment(1.0);
+    metrics::gauge!(m::ACTIVE_WAKES).decrement(1.0);
+    metrics::histogram!(m::WAKE_DURATION).record(0.25);
 
     // Scrape /metrics.
     let url = format!("http://{bound}/metrics");
@@ -50,6 +54,15 @@ async fn metrics_endpoint_renders_counters() {
     assert!(
         body.contains("reason=\"completed\""),
         "expected reason label on wake_completed:\n{body}"
+    );
+    // AC-18: active-wakes gauge + wake-duration histogram must render.
+    assert!(
+        body.contains("open_pincery_active_wakes"),
+        "expected active_wakes gauge in output:\n{body}"
+    );
+    assert!(
+        body.contains("open_pincery_wake_duration_seconds"),
+        "expected wake_duration histogram in output:\n{body}"
     );
 
     shutdown.cancel();

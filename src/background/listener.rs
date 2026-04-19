@@ -12,8 +12,9 @@ use crate::runtime::{drain, llm::LlmClient, maintenance, wake_loop};
 
 /// Spawn the LISTEN/NOTIFY handler that triggers wakes.
 ///
-/// `alive` is set to `true` after the LISTEN succeeds, signalling readiness
-/// (AC-19).
+/// `alive` is set to `true` after the LISTEN succeeds and back to `false`
+/// before the function returns (for any reason), so `/ready` (AC-19)
+/// accurately reflects the task's current state.
 pub async fn start_listener(
     pool: PgPool,
     config: Arc<Config>,
@@ -21,6 +22,15 @@ pub async fn start_listener(
     shutdown: CancellationToken,
     alive: Arc<AtomicBool>,
 ) {
+    // Guard: always clear `alive` when this function returns, no matter the path.
+    struct AliveGuard(Arc<AtomicBool>);
+    impl Drop for AliveGuard {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Relaxed);
+        }
+    }
+    let _guard = AliveGuard(alive.clone());
+
     // We listen on a wildcard pattern — but PgListener requires exact channel names.
     // Instead, we'll listen on a general channel and agents will NOTIFY on it.
     // Actually, Postgres LISTEN doesn't support wildcards. We use a single channel.

@@ -1,7 +1,8 @@
 //! AC-19: health/readiness split.
 //!
 //! - `/health` stays 200 purely when the process is up (liveness).
-//! - `/ready` returns 200 only when DB is reachable and background tasks
+//! - `/ready` returns 200 only when DB is reachable, migrations are
+//!   applied, and BOTH background tasks (listener + stale recovery)
 //!   have signalled alive; otherwise 503 with a `failing` field.
 
 mod common;
@@ -43,7 +44,7 @@ async fn json_body(resp: axum::response::Response) -> Value {
 async fn health_always_returns_200() {
     let pool = common::test_pool().await;
     let state = AppState::new(pool, test_config());
-    // Do NOT flip background_alive — health must still be 200.
+    // Do NOT flip either alive flag — health must still be 200.
     let app = api::router(state);
 
     let resp = app
@@ -62,10 +63,10 @@ async fn health_always_returns_200() {
 }
 
 #[tokio::test]
-async fn ready_503_when_background_tasks_not_alive() {
+async fn ready_503_when_both_background_tasks_not_alive() {
     let pool = common::test_pool().await;
     let state = AppState::new(pool, test_config());
-    // background_alive stays false — readiness must report the failure.
+    // Both flags stay false.
     let app = api::router(state);
 
     let resp = app
@@ -85,10 +86,57 @@ async fn ready_503_when_background_tasks_not_alive() {
 }
 
 #[tokio::test]
-async fn ready_200_when_db_and_background_alive() {
+async fn ready_503_when_only_listener_down() {
     let pool = common::test_pool().await;
     let state = AppState::new(pool, test_config());
-    state.background_alive.store(true, Ordering::Relaxed);
+    state.stale_alive.store(true, Ordering::Relaxed);
+    // listener_alive stays false.
+    let app = api::router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = json_body(resp).await;
+    assert_eq!(body["failing"], "background_task:listener");
+}
+
+#[tokio::test]
+async fn ready_503_when_only_stale_down() {
+    let pool = common::test_pool().await;
+    let state = AppState::new(pool, test_config());
+    state.listener_alive.store(true, Ordering::Relaxed);
+    // stale_alive stays false.
+    let app = api::router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = json_body(resp).await;
+    assert_eq!(body["failing"], "background_task:stale_recovery");
+}
+
+#[tokio::test]
+async fn ready_200_when_db_migrations_and_both_alive() {
+    let pool = common::test_pool().await;
+    let state = AppState::new(pool, test_config());
+    state.listener_alive.store(true, Ordering::Relaxed);
+    state.stale_alive.store(true, Ordering::Relaxed);
     let app = api::router(state);
 
     let resp = app
@@ -108,11 +156,10 @@ async fn ready_200_when_db_and_background_alive() {
 
 #[tokio::test]
 async fn ready_503_when_db_unreachable() {
-    // Build a state with a closed pool — the query should fail and `/ready`
-    // must report `failing: database`.
     let pool = common::test_pool().await;
     let state = AppState::new(pool.clone(), test_config());
-    state.background_alive.store(true, Ordering::Relaxed);
+    state.listener_alive.store(true, Ordering::Relaxed);
+    state.stale_alive.store(true, Ordering::Relaxed);
     pool.close().await;
     let app = api::router(state);
 

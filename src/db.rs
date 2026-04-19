@@ -8,6 +8,15 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
         .await
 }
 
+/// Compile-time list of migrations in ./migrations.
+pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
 pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
-    sqlx::migrate!("./migrations").run(pool).await
+    MIGRATOR.run(pool).await
+}
+
+/// Number of migrations the binary expects to have applied.
+/// Used by `/ready` (AC-19) to detect partially-applied schemas.
+pub fn expected_migration_count() -> usize {
+    MIGRATOR.iter().count()
 }

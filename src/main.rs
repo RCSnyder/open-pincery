@@ -33,7 +33,7 @@ async fn main() {
     let config = Arc::new(config);
     let shutdown = CancellationToken::new();
 
-    // Build API (holds the background_alive flag used by /ready).
+    // Build API (holds the per-task alive flags used by /ready).
     let state = api::AppState::new(pool.clone(), (*config).clone());
 
     // AC-18: optional Prometheus metrics server.
@@ -75,7 +75,7 @@ async fn main() {
     let bg_config = config.clone();
     let bg_llm = llm.clone();
     let bg_shutdown = shutdown.clone();
-    let bg_alive = state.background_alive.clone();
+    let bg_alive = state.listener_alive.clone();
     let listener_handle = tokio::spawn(async move {
         background::listener::start_listener(bg_pool, bg_config, bg_llm, bg_shutdown, bg_alive)
             .await;
@@ -84,7 +84,7 @@ async fn main() {
     let stale_pool = pool.clone();
     let stale_config = config.clone();
     let stale_shutdown = shutdown.clone();
-    let stale_alive = state.background_alive.clone();
+    let stale_alive = state.stale_alive.clone();
     let stale_handle = tokio::spawn(async move {
         background::stale::start_stale_recovery(
             stale_pool,

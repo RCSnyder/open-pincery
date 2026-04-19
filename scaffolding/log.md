@@ -248,3 +248,34 @@
 - **Changes**: New: `.github/workflows/release.yml`, `.cargo/config.toml`. Modified: `Cargo.toml` ([profile.release] block added).
 - **Retries**: 0
 - **Next**: REVIEW
+
+## REVIEW (first pass) — 2026-04-19T02:00Z
+
+- **Gate**: FAIL (attempt 1)
+- **Evidence**: REVIEW subagent returned 1 Critical + 5 Required findings against v3:
+  - **Critical**: AC-18 missing `ACTIVE_WAKES` gauge + `WAKE_DURATION` histogram (readiness.md truths explicitly required histogram).
+  - **Required #1**: `/ready` missing migration-applied check (2 of 3 required checks implemented).
+  - **Required #2**: Single shared `background_alive` cannot distinguish per-task failure; whichever task starts first flips it for both.
+  - **Required #3**: `alive` flag never cleared once set — shutdown/error does not downgrade readiness.
+  - **Required #4**: No AC-17 test that actually parses JSON-formatted log output.
+  - **Required #5**: `docs/runbooks/db-restore.md:45` referenced nonexistent `--migrate-only` CLI flag with `|| true` masking the error.
+  - Plus `Consider` findings: `panic = "abort"` changed fault-isolation semantics without justification; `metrics-exporter-prometheus` `http-listener` feature unused.
+- **Retries**: 1
+- **Next**: Fix all findings, re-run REVIEW.
+
+## REVIEW FIX — 2026-04-19T02:30Z
+
+- **Gate**: N/A (work phase feeding the next REVIEW attempt)
+- **Evidence**:
+  - **Critical fix (AC-18)**: `ACTIVE_WAKES` gauge + `WAKE_DURATION` histogram constants added to `src/observability/metrics.rs`. RAII `WakeMetricsGuard` in `src/runtime/wake_loop.rs` increments the gauge on construction and on `Drop` decrements the gauge + records the histogram with `Instant::now().elapsed()`. Every wake termination path (iteration_cap, llm_error, empty_response, sleep, completed) goes through Drop. `tests/observability_test.rs` extended to assert both metric names appear in the `/metrics` scrape.
+  - **Required #1 fix (migration check)**: `src/db.rs` exposes `pub static MIGRATOR` + `pub fn expected_migration_count()`. `ready()` now runs 3 checks: (1) `SELECT 1`, (2) `COUNT(*) FROM _sqlx_migrations WHERE success = TRUE >= expected_migration_count()` → 503 with `failing: "migrations"` + `expected`/`applied` fields, (3) both alive flags AND'd.
+  - **Required #2 fix (per-task flags)**: `AppState.background_alive` replaced with `listener_alive: Arc<AtomicBool>` + `stale_alive: Arc<AtomicBool>`. `/ready` reports `failing: "background_task:listener"` / `"background_task:stale_recovery"` / `"background_tasks"` depending on which combination is down. `src/main.rs` threads each flag to its own task.
+  - **Required #3 fix (reset on exit)**: Both `src/background/listener.rs` and `src/background/stale.rs` now construct an `AliveGuard(Arc<AtomicBool>)` at the top of the task body whose `Drop` impl stores `false`. Every return path — initial `PgListener::connect_with` error, `listen()` error, shutdown-cancelled, any panic in the loop — clears the flag.
+  - **Required #4 fix (AC-17 JSON assertion)**: `src/observability/logging.rs` exposes `json_subscriber_for_writer<W: MakeWriter>` for test injection. New unit test `json_output_is_parseable_with_required_fields` installs the JSON subscriber against a shared `Arc<Mutex<Vec<u8>>>` writer, emits `tracing::info!(target: "ac17_test", ...)`, parses every line as `serde_json::Value`, and asserts `timestamp`/`level`/`target`/`fields` are present and `fields.message` matches.
+  - **Required #5 fix (runbook)**: `docs/runbooks/db-restore.md` Path A step 4 replaced with startup-driven migration (`docker compose start app` + `docker compose logs --tail=50 app | grep -E "Migrations complete|migrate"`).
+  - **Consider fixes**: `panic = "abort"` removed from `[profile.release]` (restores unwind semantics so one task panic doesn't crash the multi-agent service); `metrics-exporter-prometheus` `http-listener` feature removed (unused — code uses hand-rolled axum `/metrics` server).
+  - Health test suite expanded: 4 → 6 tests (added `ready_503_when_only_listener_down`, `ready_503_when_only_stale_down`).
+  - `cargo check --all-targets` clean; `cargo build --tests` clean; full regression **33 passed / 0 failed** (`TEST_DATABASE_URL=...5433/open_pincery_test cargo test --all-targets -- --test-threads=1` → EXIT=0).
+- **Changes**: Modified: `Cargo.toml`, `src/api/{mod,health}.rs`, `src/background/{listener,stale}.rs`, `src/db.rs`, `src/main.rs`, `src/observability/{logging,metrics}.rs`, `src/runtime/wake_loop.rs`, `tests/{health,observability}_test.rs`, `docs/runbooks/db-restore.md`, `Cargo.lock`.
+- **Retries**: 0
+- **Next**: REVIEW (second pass) — expecting PASS.

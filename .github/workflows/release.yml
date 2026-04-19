@@ -18,11 +18,11 @@ name: release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 permissions:
-  contents: write   # publish release assets
-  id-token: write   # cosign keyless via GitHub OIDC
+  contents: write # publish release assets
+  id-token: write # cosign keyless via GitHub OIDC
 
 env:
   CARGO_TERM_COLOR: always
@@ -77,7 +77,7 @@ jobs:
 
       - name: Sign binary (keyless)
         env:
-          COSIGN_YES: 'true'
+          COSIGN_YES: "true"
         run: |
           set -euo pipefail
           cd dist
@@ -129,7 +129,7 @@ jobs:
 
       - name: Sign SBOM (keyless)
         env:
-          COSIGN_YES: 'true'
+          COSIGN_YES: "true"
         run: |
           set -euo pipefail
           cd dist

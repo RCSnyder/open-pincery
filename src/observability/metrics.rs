@@ -15,6 +15,13 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 
 pub const WAKE_STARTED: &str = "open_pincery_wake_started_total";
 pub const WAKE_COMPLETED: &str = "open_pincery_wake_completed_total";
+/// Number of wakes currently executing. Gauge — used by dashboards to alert
+/// when the system is stuck (e.g. always-high active count while completed
+/// counter stays flat).
+pub const ACTIVE_WAKES: &str = "open_pincery_active_wakes";
+/// End-to-end wake duration (seconds). Histogram — supports p50/p95/p99
+/// dashboards across all termination reasons.
+pub const WAKE_DURATION: &str = "open_pincery_wake_duration_seconds";
 pub const LLM_CALL: &str = "open_pincery_llm_call_total";
 pub const LLM_PROMPT_TOKENS: &str = "open_pincery_llm_prompt_tokens_total";
 pub const LLM_COMPLETION_TOKENS: &str = "open_pincery_llm_completion_tokens_total";

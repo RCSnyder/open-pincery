@@ -47,11 +47,13 @@ pg_restore --no-owner --no-acl \
   --dbname="$DATABASE_URL" \
   /var/backups/open-pincery/latest.dump
 
-# 4. Re-apply migrations in case the backup was older than the binary.
-docker compose run --rm app open-pincery --migrate-only || true
-
-# 5. Start the runtime and watch /ready.
+# 4. Start the runtime — migrations auto-apply on startup, so a
+#    backup older than the binary is brought forward automatically.
+#    Watch the logs for "Migrations complete" to confirm.
 docker compose start app
+docker compose logs --tail=50 app | grep -E "Migrations complete|migrate"
+
+# 5. Verify readiness.
 curl -fsS "$APP_URL/ready"
 ```
 

@@ -31,10 +31,12 @@ pub struct AppState {
     pub config: crate::config::Config,
     pub unauth_limiter: Arc<KeyedRateLimiter>,
     pub auth_limiter: Arc<KeyedRateLimiter>,
-    /// AC-19: set to `true` by each background task on startup. `/ready`
-    /// returns 503 if this is `false`. Currently a single flag because
-    /// all background tasks share startup fate; can be split per-task later.
-    pub background_alive: Arc<AtomicBool>,
+    /// AC-19: per-background-task liveness flags. Each task sets its own
+    /// flag to `true` when its main loop is serving, and back to `false`
+    /// when it exits (clean shutdown or error). `/ready` requires BOTH
+    /// to be `true`.
+    pub listener_alive: Arc<AtomicBool>,
+    pub stale_alive: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -138,7 +140,8 @@ impl AppState {
             config,
             unauth_limiter,
             auth_limiter,
-            background_alive: Arc::new(AtomicBool::new(false)),
+            listener_alive: Arc::new(AtomicBool::new(false)),
+            stale_alive: Arc::new(AtomicBool::new(false)),
         }
     }
 }
