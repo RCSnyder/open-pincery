@@ -1,0 +1,12 @@
+{
+  "//": "Auto-rustfmt any .rs file the agent just edited. Keeps `cargo fmt --check` from surfacing as a VERIFY failure.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "type": "command",
+        "command": "python .github/hooks/format_rust.py",
+        "timeout": 15
+      }
+    ]
+  }
+}

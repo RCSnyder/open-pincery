@@ -1,0 +1,12 @@
+{
+  "//": "Enforce the STOP/non-destructive rules from .github/copilot-instructions.md: ban `git reset --hard`, `git push --force`/`-f`, `git rebase`, `rm -rf`, `DROP TABLE`/`DELETE FROM` without WHERE, and `--no-verify`.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "python .github/hooks/block_destructive.py",
+        "timeout": 5
+      }
+    ]
+  }
+}

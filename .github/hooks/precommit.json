@@ -1,0 +1,12 @@
+{
+  "//": "Block `git commit` when `cargo fmt --check` fails — belt-and-braces in case PostToolUse rustfmt missed a file (e.g. edits done in the terminal, not through the agent).",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "python .github/hooks/precommit_fmt_check.py",
+        "timeout": 30
+      }
+    ]
+  }
+}
