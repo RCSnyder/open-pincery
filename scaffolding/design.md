@@ -52,7 +52,7 @@ A single Rust binary that runs as a long-lived service process. Three concurrent
 open-pincery/
 ├── Cargo.toml
 ├── .env.example
-├── docker-compose.yml          # Postgres for dev
+├── docker-compose.yml          # App + Postgres (dev and Docker deploy)
 ├── migrations/
 │   ├── 20260418000001_create_users.sql
 │   ├── 20260418000002_create_organizations.sql
@@ -66,7 +66,8 @@ open-pincery/
 │   ├── 20260418000010_create_llm_calls.sql
 │   ├── 20260418000011_create_tool_audit.sql
 │   ├── 20260418000012_create_sessions.sql
-│   └── 20260418000013_create_auth_audit.sql
+│   ├── 20260418000013_create_auth_audit.sql
+│   └── 20260418000014_event_source_not_null.sql
 ├── src/
 │   ├── main.rs                 # Entry point: config, pool, server, background tasks
 │   ├── lib.rs                  # Crate root: public module declarations
@@ -101,6 +102,13 @@ open-pincery/
 │       ├── mod.rs
 │       ├── listener.rs         # LISTEN/NOTIFY handler, wake trigger
 │       └── stale.rs            # Stale wake recovery job
+├── static/
+│   ├── index.html              # Dashboard SPA entry point
+│   ├── css/
+│   │   └── style.css
+│   └── js/
+│       ├── api.js
+│       └── app.js
 └── tests/
     ├── common/
     │   └── mod.rs              # Test helpers (DB setup, fixtures)
@@ -141,6 +149,7 @@ pub struct Agent {
     pub disabled_at: Option<DateTime<Utc>>,
     pub budget_limit_usd: Decimal,
     pub budget_used_usd: Decimal,
+    pub webhook_secret: String,
     pub created_at: DateTime<Utc>,
 }
 
@@ -287,15 +296,15 @@ POST /api/bootstrap
 POST /api/agents
   Headers: Authorization: Bearer <session_token>
   Body: { "name": "string" }
-  Response: 201 { id, name, status, created_at }
+  Response: 201 { id, name, status, is_enabled, disabled_reason?, webhook_secret, identity?, work_list?, created_at }
 
 GET /api/agents
   Headers: Authorization: Bearer <session_token>
-  Response: 200 [ { id, name, status, created_at } ]
+  Response: 200 [ { id, name, status, is_enabled, disabled_reason?, identity?, work_list?, created_at } ]
 
 GET /api/agents/:id
   Headers: Authorization: Bearer <session_token>
-  Response: 200 { id, name, status, identity, work_list, wake_id, created_at }
+  Response: 200 { id, name, status, is_enabled, disabled_reason?, identity?, work_list?, created_at }
 
 POST /api/agents/:id/messages
   Headers: Authorization: Bearer <session_token>
@@ -322,6 +331,11 @@ LLM_API_BASE_URL=https://openrouter.ai/api/v1
 LLM_API_KEY=<api-key>
 LLM_MODEL=anthropic/claude-sonnet-4-20250514
 LLM_MAINTENANCE_MODEL=anthropic/claude-sonnet-4-20250514
+MAX_PROMPT_CHARS=100000            # Character budget for prompt assembly
+ITERATION_CAP=50                   # Max wake loop iterations per wake
+STALE_WAKE_HOURS=2                 # Hours before a wake is considered stale
+WAKE_SUMMARY_LIMIT=20              # Max wake summaries included in prompt
+EVENT_WINDOW_LIMIT=200             # Max recent events included in prompt
 RUST_LOG=open_pincery=info
 ```
 
@@ -373,7 +387,7 @@ No core architecture changes. v2 adds:
 
 1. **Shutdown signal handler** in `main.rs` — tokio signal listener for SIGTERM/SIGINT that triggers a `CancellationToken` shared across HTTP server, background listener, and stale recovery job. Axum's `with_graceful_shutdown` handles HTTP draining.
 
-2. **Rate limiting middleware** in `src/api/mod.rs` — tower-governor middleware providing per-IP rate limiting. Two tiers: bootstrap (10 req/min) and authenticated (60 req/min).
+2. **Rate limiting middleware** in `src/api/mod.rs` — custom axum middleware using the `governor` crate directly, providing per-IP rate limiting via `RateLimiter<IpAddr, DashMapStateStore<IpAddr>, DefaultClock>`. Two tiers: bootstrap (10 req/min) and authenticated (60 req/min). Returns `Response` with `Retry-After` header on 429.
 
 3. **Webhook endpoint** in `src/api/webhooks.rs` — HMAC-SHA256 verified JSON ingress.
 
@@ -409,25 +423,22 @@ pub async fn soft_delete_agent(pool: &PgPool, id: Uuid) -> Result<Agent>
 PATCH /api/agents/:id
   Headers: Authorization: Bearer <session_token>
   Body: { "name"?: "string", "is_enabled"?: bool }
-  Response: 200 { id, name, status, is_enabled, ... }
+  Response: 200 { id, name, status, is_enabled, disabled_reason?, identity?, work_list?, created_at }
 
 DELETE /api/agents/:id
   Headers: Authorization: Bearer <session_token>
-  Response: 200 { id, name, status, is_enabled: false, disabled_reason: "deleted" }
+  Response: 200 { id, name, status, is_enabled: false, disabled_reason: "deleted", created_at }
 
 POST /api/agents/:id/webhooks
   Headers: X-Webhook-Signature: sha256=<hex>, X-Idempotency-Key: <unique-id>
   Body: { "content": "string", "source"?: "string" }
-  Response: 202 { event_id } (new) | 200 { event_id } (duplicate)
+  Response: 202 { status: "accepted" } (new) | 200 { status: "duplicate" } (duplicate)
   Error: 401 (invalid signature)
 ```
 
 ### New Config
 
-```
-RATE_LIMIT_PER_MINUTE=60           # Authenticated endpoint rate limit
-RATE_LIMIT_BOOTSTRAP_PER_MINUTE=10 # Bootstrap endpoint rate limit
-```
+Rate limits are hardcoded in `AppState::new()` (10 req/min bootstrap, 60 req/min authenticated). No env var overrides in v2; configurable rate limits deferred to v3.
 
 ### External Integrations (new)
 

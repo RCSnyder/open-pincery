@@ -48,7 +48,7 @@ READY
 
 - **L-11** AC-11 → `main.rs` (tokio signal handler + `CancellationToken`) + axum `with_graceful_shutdown` + `background/listener.rs` + `background/stale.rs` (token-aware loops) → `tests/shutdown_test.rs` → Runtime proof: start server, trigger a wake via message, send SIGTERM, confirm wake completes and process exits with code 0 within 30s
 - **L-12** AC-12 → `Dockerfile` (multi-stage build) + `docker-compose.yml` (app + postgres services, healthcheck) → Manual verification → Runtime proof: `docker compose up` from clean state, curl `GET /health` returns `{"status":"ok"}` within 60s
-- **L-13** AC-13 → `api/mod.rs` (tower-governor middleware, two rate-limit tiers) + `config.rs` (`RATE_LIMIT_PER_MINUTE`, `RATE_LIMIT_BOOTSTRAP_PER_MINUTE`) → `tests/rate_limit_test.rs` → Runtime proof: send 61 requests in rapid succession to an authenticated endpoint, confirm 61st returns 429 with `Retry-After` header
+- **L-13** AC-13 → `api/mod.rs` (custom `governor` middleware with `RateLimiter<IpAddr, DashMapStateStore<IpAddr, DefaultClock>>`, two rate-limit tiers hardcoded in `AppState::new()`) → `tests/rate_limit_test.rs` → Runtime proof: send 61 requests in rapid succession to an authenticated endpoint, confirm 61st returns 429 with `Retry-After` header
 - **L-14** AC-14 → `api/webhooks.rs` (HMAC-SHA256 verify, idempotency dedup) + `models/agent.rs` (`webhook_secret` column) + migration `add_webhook_secrets.sql` + migration `create_webhook_dedup.sql` + `models/event.rs` (append `webhook_received` event) → `tests/webhook_test.rs` → Runtime proof: send signed webhook → confirm `webhook_received` event in log + wake triggered; resend same webhook → confirm 200 without duplicate event; send bad signature → confirm 401
 - **L-15** AC-15 → `api/agents.rs` (PATCH + DELETE handlers) + `models/agent.rs` (`update_agent`, `soft_delete_agent`) → `tests/agent_mgmt_test.rs` → Runtime proof: PATCH to disable agent → send message → confirm no wake occurs; PATCH to rename → confirm name changed; DELETE → confirm `is_enabled = false` and `disabled_reason = 'deleted'`
 
@@ -114,7 +114,7 @@ READY
 
 - **Webhook dedup TTL**: The dedup table stores idempotency keys but scope does not specify a retention window. **Bounded assumption**: keys are stored indefinitely for v2; a TTL cleanup job is deferred to v3. This does not change AC-14's pass/fail — deduplication works regardless of retention policy.
 
-- **Rate limit scope (per-IP vs per-token)**: AC-13 says "per-IP." This means unauthenticated and authenticated requests from the same IP share no state — they are tracked on separate middleware instances with different limits. **Bounded assumption**: tower-governor keyed by `ConnectInfo<SocketAddr>` peer IP, two `GovernorLayer` instances with distinct configs.
+- **Rate limit scope (per-IP vs per-token)**: AC-13 says "per-IP." This means unauthenticated and authenticated requests from the same IP share no state — they are tracked on separate middleware instances with different limits. **Bounded assumption**: `governor::RateLimiter<IpAddr, DashMapStateStore<IpAddr>, DefaultClock>` keyed by `ConnectInfo<SocketAddr>` peer IP, two `KeyedRateLimiter` instances with hardcoded configs in `AppState::new()`. Configurable rate limits deferred to v3.
 
 - **Shutdown signal on Windows**: SIGTERM/SIGINT are Unix signals. On Windows, `tokio::signal::ctrl_c()` covers Ctrl+C. **Bounded assumption**: v2 uses `tokio::signal::ctrl_c()` for cross-platform support plus Unix-specific SIGTERM handling behind `#[cfg(unix)]`. This does not change AC-11's pass/fail — the test verifies the behavior, not the signal type.
 
@@ -141,7 +141,7 @@ READY
 
 12. **AC-12 — Docker Compose** (v2 Slice 2): Create `Dockerfile` (multi-stage: builder with cargo-chef + runtime with Debian slim). Update `docker-compose.yml` to add app service with healthcheck, depends_on postgres with condition `service_healthy`, env vars. Files: `Dockerfile`, `docker-compose.yml`. No Rust code changes. Manual verification only.
 
-13. **AC-13 — Rate Limiting** (v2 Slice 3): Add `tower-governor` to `Cargo.toml`. Create two `GovernorLayer` configs in `api/mod.rs` — one for bootstrap (10/min), one for authenticated (60/min). Apply as tower middleware layers on the respective route groups. Files: `api/mod.rs`, `config.rs`, `Cargo.toml`. Test: `rate_limit_test.rs`.
+13. **AC-13 — Rate Limiting** (v2 Slice 3): Add `governor` to `Cargo.toml`. Create two `KeyedRateLimiter` instances in `AppState::new()` with hardcoded limits (10/min bootstrap, 60/min auth). Implement `unauth_rate_limit` and `auth_rate_limit` as custom axum middleware functions in `api/mod.rs` that return `Response` with `Retry-After` header on 429. Files: `api/mod.rs`, `Cargo.toml`. Test: `rate_limit_test.rs`.
 
 14. **AC-14 — Webhook Ingress** (v2 Slice 4): Create `api/webhooks.rs` with HMAC-SHA256 verification, idempotency dedup lookup/insert, event append + NOTIFY. Add two migrations: `add_webhook_secrets.sql` (add `webhook_secret` column to agents), `create_webhook_dedup.sql` (idempotency key table). Register route in `api/mod.rs`. Add `hmac` + `sha2` crates (sha2 already present). Files: `api/webhooks.rs`, `api/mod.rs`, 2 migrations, `models/agent.rs` (expose webhook_secret in create). Test: `webhook_test.rs`.
 
