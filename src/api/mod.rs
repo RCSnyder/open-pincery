@@ -95,6 +95,7 @@ fn extract_client_ip(req: &Request) -> IpAddr {
 }
 
 fn rate_limit_response() -> Response {
+    metrics::counter!(crate::observability::metrics::RATE_LIMIT_REJECTED).increment(1);
     let mut resp = Response::new(axum::body::Body::from("Too Many Requests"));
     *resp.status_mut() = StatusCode::TOO_MANY_REQUESTS;
     resp.headers_mut().insert("retry-after", "60".parse().unwrap());

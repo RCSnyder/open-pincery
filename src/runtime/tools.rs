@@ -3,6 +3,7 @@ use serde_json::json;
 use tracing::info;
 
 use super::llm::{ToolCallRequest, ToolDefinition, FunctionDef};
+use crate::observability::metrics as m;
 
 pub enum ToolResult {
     Output(String),
@@ -74,6 +75,7 @@ struct PlanArgs {
 pub async fn dispatch_tool(tool_call: &ToolCallRequest) -> ToolResult {
     let name = &tool_call.function.name;
     let args = &tool_call.function.arguments;
+    metrics::counter!(m::TOOL_CALL, "tool" => name.clone()).increment(1);
 
     match name.as_str() {
         "shell" => {

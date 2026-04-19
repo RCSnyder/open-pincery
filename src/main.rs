@@ -36,6 +36,40 @@ async fn main() {
     // Build API (holds the background_alive flag used by /ready).
     let state = api::AppState::new(pool.clone(), (*config).clone());
 
+    // AC-18: optional Prometheus metrics server.
+    // If METRICS_ADDR is set (e.g. "127.0.0.1:9090"), install a recorder and
+    // spawn the /metrics endpoint on that address. Otherwise, the metrics
+    // macros sprinkled through the runtime are no-ops.
+    let metrics_handle = if let Ok(addr_str) = std::env::var("METRICS_ADDR") {
+        match addr_str.parse::<std::net::SocketAddr>() {
+            Ok(addr) => {
+                let handle = open_pincery::observability::metrics::install_recorder();
+                match open_pincery::observability::server::spawn_metrics_server(
+                    addr,
+                    handle,
+                    shutdown.clone(),
+                )
+                .await
+                {
+                    Ok((jh, bound)) => {
+                        info!(addr = %bound, "Metrics endpoint enabled");
+                        Some(jh)
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to bind metrics server — continuing without /metrics");
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(addr = %addr_str, error = %e, "Invalid METRICS_ADDR — metrics disabled");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Start background tasks
     let bg_pool = pool.clone();
     let bg_config = config.clone();
@@ -80,6 +114,9 @@ async fn main() {
     let _ = tokio::time::timeout(drain_timeout, async {
         let _ = listener_handle.await;
         let _ = stale_handle.await;
+        if let Some(jh) = metrics_handle {
+            let _ = jh.await;
+        }
     })
     .await;
 

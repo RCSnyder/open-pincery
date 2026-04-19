@@ -8,6 +8,7 @@ use super::tools::{self, ToolResult};
 use crate::config::Config;
 use crate::error::AppError;
 use crate::models::{agent, event, llm_call};
+use crate::observability::metrics as m;
 
 /// Run the full wake loop for an agent that has already been CAS-acquired.
 pub async fn run_wake_loop(
@@ -18,6 +19,7 @@ pub async fn run_wake_loop(
     wake_id: Uuid,
 ) -> Result<String, AppError> {
     info!(agent_id = %agent_id, wake_id = %wake_id, "Starting wake loop");
+    metrics::counter!(m::WAKE_STARTED).increment(1);
 
     // Record wake_start event
     event::append_event(
@@ -163,6 +165,7 @@ pub async fn run_wake_loop(
                             Some(&termination_reason),
                         )
                         .await?;
+                        metrics::counter!(m::WAKE_COMPLETED, "reason" => termination_reason.clone()).increment(1);
                         return Ok(termination_reason);
                     }
                     ToolResult::Output(output) => {
@@ -223,5 +226,6 @@ pub async fn run_wake_loop(
     .await?;
 
     info!(agent_id = %agent_id, wake_id = %wake_id, reason = %termination_reason, "Wake loop ended");
+    metrics::counter!(m::WAKE_COMPLETED, "reason" => termination_reason.clone()).increment(1);
     Ok(termination_reason)
 }

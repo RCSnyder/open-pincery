@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::observability::metrics as m;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
@@ -126,6 +128,11 @@ impl LlmClient {
                         let body = resp.json::<ChatResponse>().await.map_err(|e| {
                             crate::error::AppError::Internal(format!("LLM response parse error: {e}"))
                         })?;
+                        metrics::counter!(m::LLM_CALL).increment(1);
+                        if let Some(u) = body.usage.as_ref() {
+                            metrics::counter!(m::LLM_PROMPT_TOKENS).increment(u.prompt_tokens.max(0) as u64);
+                            metrics::counter!(m::LLM_COMPLETION_TOKENS).increment(u.completion_tokens.max(0) as u64);
+                        }
                         return Ok(body);
                     }
                     let status = resp.status();

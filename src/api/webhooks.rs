@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::api::AppState;
 use crate::models::{agent, event};
+use crate::observability::metrics as m;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -116,5 +117,6 @@ async fn receive_webhook(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    metrics::counter!(m::WEBHOOK_RECEIVED).increment(1);
     Ok((StatusCode::ACCEPTED, axum::Json(serde_json::json!({"status": "accepted"}))))
 }
