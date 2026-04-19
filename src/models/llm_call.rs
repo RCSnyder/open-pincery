@@ -28,7 +28,7 @@ pub struct LlmCall {
 pub async fn insert_llm_call(
     pool: &PgPool,
     agent_id: Uuid,
-    wake_id: Option<Uuid>,
+    wake_id: Uuid,
     model: &str,
     call_type: &str,
     input_tokens: Option<i32>,

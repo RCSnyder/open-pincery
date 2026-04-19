@@ -74,6 +74,20 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .merge(bootstrap::router())
+        .route("/health", axum::routing::get(health_check))
         .nest("/api", authed)
         .with_state(state)
+}
+
+async fn health_check(
+    State(state): State<AppState>,
+) -> axum::Json<serde_json::Value> {
+    let db_ok = sqlx::query_scalar::<_, i32>("SELECT 1")
+        .fetch_one(&state.pool)
+        .await
+        .is_ok();
+    axum::Json(serde_json::json!({
+        "status": if db_ok { "ok" } else { "degraded" },
+        "db": if db_ok { "connected" } else { "disconnected" }
+    }))
 }

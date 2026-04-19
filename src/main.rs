@@ -56,12 +56,6 @@ async fn main() {
 
     let app = api::router(state);
 
-    // Health endpoint
-    let app = app.route(
-        "/health",
-        axum::routing::get(|| async { axum::Json(serde_json::json!({"status": "ok"})) }),
-    );
-
     let addr = format!("{}:{}", config.host, config.port);
     info!(addr = %addr, "Starting server");
 

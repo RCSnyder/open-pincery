@@ -12,6 +12,7 @@ pub struct AgentProjection {
     pub identity: String,
     pub work_list: String,
     pub version: i32,
+    pub wake_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -30,16 +31,18 @@ pub async fn insert_projection(
     identity: &str,
     work_list: &str,
     version: i32,
+    wake_id: Option<Uuid>,
 ) -> Result<AgentProjection, AppError> {
     let proj = sqlx::query_as::<_, AgentProjection>(
-        "INSERT INTO agent_projections (agent_id, identity, work_list, version)
-         VALUES ($1, $2, $3, $4)
+        "INSERT INTO agent_projections (agent_id, identity, work_list, version, wake_id)
+         VALUES ($1, $2, $3, $4, $5)
          RETURNING *"
     )
     .bind(agent_id)
     .bind(identity)
     .bind(work_list)
     .bind(version)
+    .bind(wake_id)
     .fetch_one(pool)
     .await?;
     Ok(proj)

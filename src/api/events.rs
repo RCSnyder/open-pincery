@@ -18,6 +18,7 @@ struct EventQuery {
 #[derive(Serialize)]
 struct EventsResponse {
     events: Vec<Event>,
+    total: i64,
 }
 
 pub fn router() -> Router<AppState> {
@@ -31,5 +32,6 @@ async fn get_events(
 ) -> Result<Json<EventsResponse>, AppError> {
     let limit = params.limit.unwrap_or(100).min(1000);
     let events = event::recent_events(&state.pool, agent_id, limit).await?;
-    Ok(Json(EventsResponse { events }))
+    let total = events.len() as i64;
+    Ok(Json(EventsResponse { events, total }))
 }

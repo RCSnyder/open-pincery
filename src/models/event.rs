@@ -93,7 +93,7 @@ pub async fn has_pending_events(
 ) -> Result<bool, AppError> {
     let count = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM events
-         WHERE agent_id = $1 AND created_at > $2 AND source = 'human'"
+         WHERE agent_id = $1 AND created_at > $2 AND event_type = 'message_received'"
     )
     .bind(agent_id)
     .bind(since)

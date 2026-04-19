@@ -77,7 +77,7 @@ pub async fn run_wake_loop(
         llm_call::insert_llm_call(
             pool,
             agent_id,
-            Some(wake_id),
+            wake_id,
             &llm.model,
             "wake_loop",
             usage.map(|u| u.prompt_tokens),

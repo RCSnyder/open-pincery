@@ -121,7 +121,8 @@ async fn execute_shell(command: &str) -> ToolResult {
             );
             // Truncate to prevent massive outputs
             let truncated = if combined.len() > 50000 {
-                format!("{}...[truncated]", &combined[..50000])
+                let boundary = combined.floor_char_boundary(50000);
+                format!("{}...[truncated]", &combined[..boundary])
             } else {
                 combined
             };

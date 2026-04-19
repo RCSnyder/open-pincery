@@ -74,7 +74,7 @@ pub async fn run_maintenance(
     llm_call::insert_llm_call(
         pool,
         agent_id,
-        Some(wake_id),
+        wake_id,
         &llm.maintenance_model,
         "maintenance",
         usage.map(|u| u.prompt_tokens),
@@ -111,6 +111,7 @@ pub async fn run_maintenance(
                     identity,
                     &work_list,
                     current_version + 1,
+                    Some(wake_id),
                 )
                 .await?;
 
@@ -124,6 +125,7 @@ pub async fn run_maintenance(
                 let truncated: String = text.chars().take(500).collect();
                 projection::insert_projection(
                     pool, agent_id, current_identity, current_work_list, current_version + 1,
+                    Some(wake_id),
                 ).await?;
                 projection::insert_wake_summary(pool, agent_id, wake_id, &truncated).await?;
             }
