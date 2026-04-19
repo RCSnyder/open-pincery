@@ -77,6 +77,7 @@ pub async fn run_maintenance(
         wake_id,
         &llm.maintenance_model,
         "maintenance",
+        None,
         usage.map(|u| u.prompt_tokens),
         usage.map(|u| u.completion_tokens),
         None,

@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -32,6 +33,7 @@ pub async fn insert_llm_call(
     wake_id: Uuid,
     model: &str,
     call_type: &str,
+    cost_usd: Option<Decimal>,
     input_tokens: Option<i32>,
     output_tokens: Option<i32>,
     _duration_ms: Option<i32>,
@@ -59,8 +61,8 @@ pub async fn insert_llm_call(
     };
 
     let row: (Uuid,) = sqlx::query_as(
-        "INSERT INTO llm_calls (agent_id, wake_id, call_type, model, prompt_hash, response_hash, prompt_tokens, completion_tokens, total_tokens)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           "INSERT INTO llm_calls (agent_id, wake_id, call_type, model, prompt_hash, response_hash, prompt_tokens, completion_tokens, total_tokens, cost_usd)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          RETURNING id"
     )
     .bind(agent_id)
@@ -72,6 +74,7 @@ pub async fn insert_llm_call(
     .bind(input_tokens)
     .bind(output_tokens)
     .bind(total)
+    .bind(cost_usd)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -97,6 +100,16 @@ pub async fn insert_llm_call(
             break;
         }
     }
+
+    sqlx::query(
+        "UPDATE agents
+         SET budget_used_usd = budget_used_usd + COALESCE($1, 0)
+         WHERE id = $2",
+    )
+    .bind(cost_usd)
+    .bind(agent_id)
+    .execute(&mut *tx)
+    .await?;
 
     tx.commit().await.map_err(AppError::Database)?;
     Ok(call_id)

@@ -1,3 +1,4 @@
+use rust_decimal::Decimal;
 use sqlx::postgres::PgListener;
 use sqlx::PgPool;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,7 +8,7 @@ use tracing::{error, info, warn};
 
 use crate::config::Config;
 use crate::error::AppError;
-use crate::models::agent;
+use crate::models::{agent, event};
 use crate::runtime::{drain, llm::LlmClient, maintenance, wake_loop};
 
 /// Spawn the LISTEN/NOTIFY handler that triggers wakes.
@@ -96,6 +97,43 @@ async fn handle_wake(
     llm: Arc<LlmClient>,
     agent_id: uuid::Uuid,
 ) -> Result<(), AppError> {
+    // AC-23: Enforce hard budget caps before CAS wake acquisition.
+    let candidate = agent::get_agent(&pool, agent_id)
+        .await?
+        .ok_or(AppError::NotFound("Agent not found for wake".into()))?;
+
+    if candidate.budget_limit_usd > Decimal::ZERO
+        && candidate.budget_used_usd >= candidate.budget_limit_usd
+    {
+        let payload = serde_json::json!({
+            "limit_usd": candidate.budget_limit_usd,
+            "used_usd": candidate.budget_used_usd,
+        })
+        .to_string();
+
+        event::append_event(
+            &pool,
+            agent_id,
+            "budget_exceeded",
+            "runtime",
+            None,
+            None,
+            None,
+            None,
+            Some(&payload),
+            None,
+        )
+        .await?;
+
+        info!(
+            agent_id = %agent_id,
+            limit_usd = %candidate.budget_limit_usd,
+            used_usd = %candidate.budget_used_usd,
+            "Skipping wake due to budget cap"
+        );
+        return Ok(());
+    }
+
     // Attempt CAS acquisition
     let acquired = agent::acquire_wake(&pool, agent_id).await?;
     let agent_data = match acquired {

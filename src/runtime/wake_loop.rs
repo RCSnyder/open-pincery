@@ -119,6 +119,7 @@ pub async fn run_wake_loop(
             wake_id,
             &llm.model,
             "wake_loop",
+            None,
             usage.map(|u| u.prompt_tokens),
             usage.map(|u| u.completion_tokens),
             None,
