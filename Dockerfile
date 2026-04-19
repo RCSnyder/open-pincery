@@ -21,11 +21,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/open-pincery /usr/local/bin/open-pincery
-COPY --from=builder /app/migrations /app/migrations
-COPY --from=builder /app/static /app/static
+# Non-root runtime user (AC-22)
+RUN groupadd --system --gid 10001 pcy \
+ && useradd --system --uid 10001 --gid pcy --home-dir /app --shell /usr/sbin/nologin pcy
+
+COPY --from=builder --chown=pcy:pcy /app/target/release/open-pincery /usr/local/bin/open-pincery
+COPY --from=builder --chown=pcy:pcy /app/migrations /app/migrations
+COPY --from=builder --chown=pcy:pcy /app/static /app/static
 
 WORKDIR /app
+USER pcy
 
 ENV OPEN_PINCERY_HOST=0.0.0.0
 ENV OPEN_PINCERY_PORT=8080
