@@ -2,7 +2,7 @@
 
 **Open Pincery is an open-source multi-agent platform for durable, event-driven AI agents.** Each agent is a continuous entity with a stable identity, append-only event log, and wake/sleep lifecycle. Agents wake on messages, webhooks, or timers, work until done, and rest. Configure them by conversation. Orchestrate fleets via async messaging.
 
-> **Status:** v2 runtime implemented. CAS lifecycle, event log, LLM-powered wake/sleep cycles, maintenance projections, HTTP API, PostgreSQL persistence, graceful shutdown, Docker Compose deployment, API rate limiting, webhook ingress with HMAC-SHA256, and agent management (PATCH/DELETE) are all functional.
+> **Status:** v3 runtime implemented. Full v1 + v2 feature set (CAS lifecycle, event log, LLM-powered wake/sleep, maintenance projections, HTTP API, PostgreSQL persistence, graceful shutdown, Docker Compose, rate limiting, HMAC webhook ingress, agent management) plus v3 operational polish: structured JSON logging (`LOG_FORMAT=json`), Prometheus `/metrics` endpoint (`METRICS_ADDR=...`), `/health` + `/ready` split with per-subsystem failure reporting, GitHub Actions CI (fmt + clippy + tests + cargo-deny), signed release workflow with CycloneDX SBOMs (cosign keyless), and five operator runbooks under `docs/runbooks/`.
 
 ## Why Another Agent Platform?
 
@@ -266,23 +266,47 @@ curl http://localhost:8080/api/agents/AGENT_ID/events \
 
 ```bash
 curl http://localhost:8080/health
-# Returns: {"status":"ok","db":"connected"}
+# {"status":"ok"}
+
+curl http://localhost:8080/ready
+# 200 {"status":"ready"} when DB is reachable, migrations are applied, and
+# both background tasks (LISTEN/NOTIFY + stale recovery) are alive.
+# Otherwise 503 with {"status":"not_ready","failing":"database" |
+#   "migrations" | "background_task:listener" |
+#   "background_task:stale_recovery" | "background_tasks"}.
 ```
+
+### 7. Observability (optional)
+
+- **Structured logs**: set `LOG_FORMAT=json` to emit one JSON object per line
+  (`timestamp`, `level`, `target`, `fields.message`, plus span context) for
+  ingestion into Loki, Vector, Elastic, etc. Any other value produces
+  human-readable output.
+- **Prometheus metrics**: set `METRICS_ADDR=127.0.0.1:9090` to spawn a
+  separate `/metrics` endpoint. Exposes counters for wakes, LLM calls,
+  tokens consumed, tool calls, webhook deliveries, rate-limit rejections;
+  a gauge for active wakes; and a histogram of wake durations. Leave unset
+  to disable metrics entirely (zero cost).
+- **Operator runbooks**: see [`docs/runbooks/`](docs/runbooks/) for
+  diagnostic + remediation playbooks (stale wakes, DB restore, migration
+  rollback, rate-limit tuning, webhook debugging).
 
 ### API
 
-| Method | Path                       | Description                           |
-| ------ | -------------------------- | ------------------------------------- |
-| GET    | `/health`                  | Health check (no auth required)       |
-| POST   | `/api/bootstrap`           | One-time admin setup                  |
-| POST   | `/api/agents`              | Create agent (returns webhook_secret) |
-| GET    | `/api/agents`              | List agents                           |
-| GET    | `/api/agents/:id`          | Agent detail with projections         |
-| PATCH  | `/api/agents/:id`          | Update agent name/enabled status      |
-| DELETE | `/api/agents/:id`          | Soft-delete (disable with reason)     |
-| POST   | `/api/agents/:id/messages` | Send message (triggers wake)          |
-| GET    | `/api/agents/:id/events`   | Event log                             |
-| POST   | `/api/agents/:id/webhooks` | Webhook ingress (HMAC-SHA256)         |
+| Method | Path                       | Description                            |
+| ------ | -------------------------- | -------------------------------------- |
+| GET    | `/health`                  | Liveness (always 200 while serving)    |
+| GET    | `/ready`                   | Readiness (DB + migrations + bg tasks) |
+| GET    | `/metrics`                 | Prometheus scrape (opt-in, own port)   |
+| POST   | `/api/bootstrap`           | One-time admin setup                   |
+| POST   | `/api/agents`              | Create agent (returns webhook_secret)  |
+| GET    | `/api/agents`              | List agents                            |
+| GET    | `/api/agents/:id`          | Agent detail with projections          |
+| PATCH  | `/api/agents/:id`          | Update agent name/enabled status       |
+| DELETE | `/api/agents/:id`          | Soft-delete (disable with reason)      |
+| POST   | `/api/agents/:id/messages` | Send message (triggers wake)           |
+| GET    | `/api/agents/:id/events`   | Event log                              |
+| POST   | `/api/agents/:id/webhooks` | Webhook ingress (HMAC-SHA256)          |
 
 All `/api/*` routes (except bootstrap) require `Authorization: Bearer <session_token>`.
 Webhook routes require `X-Signature` header with HMAC-SHA256 of the body.

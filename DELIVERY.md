@@ -1,8 +1,8 @@
-# DELIVERY.md — Open Pincery v2
+# DELIVERY.md — Open Pincery v3
 
 ## What Was Built
 
-A multi-agent platform runtime implementing the Open Pincery architecture: event-sourced agents with CAS lifecycle management, LLM-powered wake/sleep cycles, maintenance projections, HTTP API, graceful shutdown, Docker Compose deployment, API rate limiting, webhook ingress, and agent management. Single-binary Rust server backed by PostgreSQL.
+A multi-agent platform runtime implementing the Open Pincery architecture: event-sourced agents with CAS lifecycle management, LLM-powered wake/sleep cycles, maintenance projections, HTTP API, graceful shutdown, Docker Compose deployment, API rate limiting, webhook ingress, agent management, structured JSON logging, Prometheus metrics, health/readiness split, CI pipeline, signed release artifacts with SBOMs, and operator runbooks. Single-binary Rust server backed by PostgreSQL.
 
 ## How to Use It
 
@@ -43,17 +43,24 @@ A multi-agent platform runtime implementing the Open Pincery architecture: event
 - AC-14: Webhook ingress with HMAC-SHA256 verification and idempotency dedup
 - AC-15: PATCH/DELETE agent management endpoints
 
-## Known Limitations
+## v3 Changes (from v2)
 
-- **No sandboxing**: Shell tool runs with host privileges (Phase 3: Zerobox container isolation)
-- **No inter-agent messaging**: Single-agent operation only (Phase 3)
+- AC-16: CI workflow (`.github/workflows/ci.yml`) running fmt + clippy + tests (against Postgres 16 service container) + `cargo deny check` on every push/PR. `deny.toml` enforces license allow-list and denies unknown registries/git sources.
+- AC-17: Structured JSON logging. Set `LOG_FORMAT=json` to emit one JSON object per line (`timestamp`, `level`, `target`, `fields.message` + span context) for log pipelines; unset for human-readable output.
+- AC-18: Prometheus `/metrics` endpoint (opt-in via `METRICS_ADDR`, served on its own port). Eight counters (`open_pincery_wake_started_total`, `open_pincery_wake_completed_total{reason}`, `open_pincery_llm_call_total`, `open_pincery_llm_prompt_tokens_total`, `open_pincery_llm_completion_tokens_total`, `open_pincery_tool_call_total`, `open_pincery_webhook_received_total`, `open_pincery_rate_limit_rejected_total`) + `open_pincery_active_wakes` gauge + `open_pincery_wake_duration_seconds` histogram.
+- AC-19: Split `/health` (liveness — always 200 while the process serves HTTP) from `/ready` (readiness — 200 only when DB reachable AND all migrations applied AND both background tasks alive). 503 responses name the failing subsystem in a `failing` field.
+- AC-20: Tag-triggered signed release workflow (`.github/workflows/release.yml`). Builds `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` binaries with LTO + strip + codegen-units=1 (`[profile.release]` in `Cargo.toml`), generates CycloneDX SBOM, signs binary + SBOM with cosign keyless (GitHub OIDC), publishes via `softprops/action-gh-release`. Prerelease auto-detected from `-rc/-beta/-alpha` tag suffixes.
+- AC-21: Five operator runbooks under `docs/runbooks/` — stale wake triage, DB restore, migration rollback, rate-limit tuning, webhook debugging. Each includes Symptom / Diagnostic Commands / Remediation / Escalation sections with concrete copy-paste commands.
+
+- **No sandboxing**: Shell tool runs with host privileges (future: Zerobox container isolation)
+- **No inter-agent messaging**: Single-agent operation only
 - **Single workspace**: Multi-tenancy schema exists but not enforced in API authorization
-- **No UI beyond health page**: API-first interface with minimal status page
+- **No UI beyond status page**: API-first interface
 - **Webhook secrets**: Only visible on agent creation — if lost, requires database access to retrieve
 - **Rate limiting is in-process**: Not shared across multiple server instances
-- **cargo-audit**: Dependency vulnerability scan deferred
-
-## Infrastructure
+- **Metrics recorder is process-global**: Only one Prometheus recorder per process; unit tests that install a recorder must run single-threaded.
+- **Release workflow not yet exercised**: `cosign verify-blob` against a real tagged artifact will happen on first `v*` tag push.
+- **Dockerfile runs as root**: No `USER` directive yet; acceptable for self-host single-operator deployments.
 
 - **Runtime**: Single Rust binary (~15MB release), or Docker image
 - **Database**: PostgreSQL 16 (16 migration files)

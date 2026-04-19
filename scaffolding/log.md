@@ -295,3 +295,21 @@
 - **Retries**: 1 (first pass FAIL, second pass PASS)
 - **Next**: VERIFY.
 
+## VERIFY — 2026-04-19T03:30Z
+
+- **Gate**: PASS (attempt 2)
+- **Evidence**: VERIFY subagent returned structured report. First pass **FAIL** on a single fmt regression (`src/observability/logging.rs` single-line `assert!` exceeded rustfmt max_width). Fixed with `cargo fmt --all` → commit `d853a20`. Verified post-fix: `cargo fmt --all -- --check` EXIT=0, `cargo clippy --all-targets -- -D warnings` EXIT=0, full regression **33 passed / 0 failed** EXIT=0. All 21 ACs (AC-1..AC-21) individually verified with evidence: 15 via targeted tests + source inspection, 6 via live `cargo run` probes (AC-6 POST /api/bootstrap 201, AC-7 message-triggered wake observed in metrics within 3s, AC-10 bootstrap against empty DB, AC-17 11 JSON lines parsed as valid JSON with required fields, AC-18 `/metrics` scrape showed `wake_started_total`, `wake_completed_total{reason=...}`, `active_wakes`, `wake_duration_seconds` with quantiles, AC-19 `/health` 200 + `/ready` 200). Security audit clean (secrets env-gated, HMAC constant-time, no SQL injection). Deployment config verified (Dockerfile, docker-compose.yml, ci.yml, release.yml, deny.toml, .cargo/config.toml, Cargo.toml profile.release). Two FYI items non-blocking.
+- **Retries**: 1 (first pass FAIL on fmt, second pass PASS)
+- **Next**: DEPLOY.
+
+## DEPLOY — 2026-04-19T04:00Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: v3 targets `self_host_individual` — the deliverable is the source repo + Docker Compose stack + signed-release workflow, not a hosted URL. DEPLOY artifacts:
+  - `README.md` updated: status line now reflects v3; added `/ready` example with all 5 `failing` modes; added "Observability (optional)" section covering `LOG_FORMAT=json`, `METRICS_ADDR`, and runbooks; API table includes `/ready` and `/metrics`.
+  - `DELIVERY.md` updated to v3: title, what-was-built paragraph, new v3 Changes section (AC-16..AC-21 each with one-paragraph summary), Known Limitations section updated (removed stale "cargo-audit deferred" — now wired via cargo-deny in CI; added metrics-recorder global / Dockerfile-runs-as-root / release-workflow-not-exercised).
+  - Release pipeline (`.github/workflows/release.yml`) ready; first tagged release (`v0.3.0-rc1` or similar) will exercise cosign keyless signing + SBOM publication.
+  - Final regression: 33 tests pass, 0 fail, EXIT=0. Clippy clean. Fmt clean.
+- **Changes**: `README.md`, `DELIVERY.md`, `scaffolding/log.md`.
+- **Retries**: 0
+- **Next**: v3 complete. Await iteration signal (ITERATE on new inputs).
