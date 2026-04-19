@@ -601,3 +601,406 @@ None. All additions are small, isolated modules. `src/observability/mod.rs` + `l
 ### Open Questions (v3)
 
 None. All choices are final.
+
+---
+
+# v4 Addendum — Usable Self-Host
+
+This section is additive. Every prior v1/v2/v3 interface, file path, and data shape remains in effect except where explicitly replaced below.
+
+## v4 Architecture Delta
+
+```text
+┌─────────────────────────────────────────────────────────────────────┐
+│  Same runtime binary (open-pincery) — axum server + background jobs │
+│                                                                     │
+│  New file-level additions:                                          │
+│    src/api/webhook_rotate.rs        (AC-24 endpoint handler)        │
+│    src/api_client.rs                (shared HTTP client: CLI + tests) │
+│    src/cli/mod.rs                   (CLI entrypoint, command dispatch) │
+│    src/cli/config.rs                (~/.config/open-pincery/config.toml) │
+│    src/cli/commands/{agent,budget,events,message,status,bootstrap,login}.rs │
+│    src/bin/pcy.rs                   (thin: open_pincery::cli::run())│
+│                                                                     │
+│  Modified:                                                          │
+│    src/background/listener.rs       (+budget check before acquire)  │
+│    src/runtime/llm.rs or llm_call.rs (cost_usd → agents.budget_used_usd) │
+│    src/api/mod.rs                   (register webhook_rotate route) │
+│    Cargo.toml                       (clap dep, [[bin]] pcy entry)   │
+│    Dockerfile                       (USER pcy, chown /app)          │
+│    static/index.html                (real SPA root)                 │
+│    static/app.js                    (new — UI logic)                │
+│    static/style.css                 (new — minimal reset + utility) │
+│                                                                     │
+│  New docs:                                                          │
+│    docs/api.md                      (HTTP API contract, AC-27)      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## v4 Directory Structure (delta only)
+
+```
+src/
+  api/
+    webhook_rotate.rs        # NEW — POST /api/agents/:id/webhook/rotate (AC-24)
+  api_client.rs              # NEW — reusable HTTP client (CLI, tests)
+  bin/
+    pcy.rs                   # NEW — CLI entrypoint binary (AC-25)
+  cli/
+    mod.rs                   # NEW — argument parsing + dispatch
+    config.rs                # NEW — read/write ~/.config/open-pincery/config.toml
+    commands/
+      mod.rs                 # NEW — re-exports
+      bootstrap.rs           # NEW — pcy bootstrap
+      login.rs               # NEW — pcy login --token ...
+      agent.rs               # NEW — pcy agent {create,list,show,disable,rotate-secret}
+      message.rs             # NEW — pcy message
+      events.rs              # NEW — pcy events [--tail --since]
+      budget.rs              # NEW — pcy budget {set,show,reset}
+      status.rs              # NEW — pcy status
+static/
+  index.html                 # REPLACED — single SPA entry with 5 hash-routed views
+  app.js                     # NEW — all UI logic (~350 lines target)
+  style.css                  # NEW — minimal reset + utility classes (~80 lines target)
+docs/
+  api.md                     # NEW — AC-27 HTTP API contract
+tests/
+  budget_test.rs             # NEW — AC-23 integration test
+  webhook_rotate_test.rs     # NEW — AC-24 integration test
+  cli_e2e_test.rs            # NEW — AC-25 end-to-end test (invokes pcy binary)
+  ui_smoke_test.rs           # NEW — AC-26 UI smoke (serves files + probes routes)
+```
+
+## v4 Interfaces
+
+### AC-22 — Non-root Dockerfile runtime stage
+
+```dockerfile
+# Stage 2: Runtime (revised)
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root user for runtime (AC-22)
+RUN groupadd --system --gid 10001 pcy \
+ && useradd --system --uid 10001 --gid pcy --home-dir /app --shell /usr/sbin/nologin pcy
+
+COPY --from=builder --chown=pcy:pcy /app/target/release/open-pincery /usr/local/bin/open-pincery
+COPY --from=builder --chown=pcy:pcy /app/migrations /app/migrations
+COPY --from=builder --chown=pcy:pcy /app/static /app/static
+
+WORKDIR /app
+USER pcy
+
+ENV OPEN_PINCERY_HOST=0.0.0.0
+ENV OPEN_PINCERY_PORT=8080
+EXPOSE 8080
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+ENTRYPOINT ["open-pincery"]
+```
+
+Note: `pcy` username collides with the CLI binary name; this is intentional (short, memorable) and fine because the container user never interacts with the CLI — the CLI runs on the operator's host.
+
+### AC-23 — Budget enforcement
+
+Insertion point is `src/background/listener.rs::trigger_wake`, **before** `agent::acquire_wake`:
+
+```rust
+// src/background/listener.rs (around line 99, before CAS acquire)
+
+let candidate = agent::get_agent(&pool, agent_id).await?
+    .ok_or(AppError::NotFound("agent disappeared".into()))?;
+
+if candidate.budget_limit_usd > dec!(0)
+    && candidate.budget_used_usd >= candidate.budget_limit_usd
+{
+    // Append budget_exceeded event without acquiring — agent stays asleep.
+    let payload = serde_json::json!({
+        "limit_usd": candidate.budget_limit_usd,
+        "used_usd":  candidate.budget_used_usd,
+    });
+    event::append_event(
+        &pool, agent_id, "budget_exceeded", "runtime",
+        None, None, None, None, Some(payload.to_string()), None,
+    ).await?;
+    info!(agent_id = %agent_id, "Budget exceeded; refusing wake");
+    return Ok(());
+}
+
+// Normal path: CAS acquire, then run_wake_loop as before
+let acquired = agent::acquire_wake(&pool, agent_id).await?;
+```
+
+And at the LLM call record site (`src/runtime/llm.rs` or wherever `llm_call::record_call` is invoked with `cost_usd`):
+
+```rust
+// In the same transaction as llm_call insert:
+let mut tx = pool.begin().await?;
+sqlx::query!("INSERT INTO llm_calls (..., cost_usd, ...) VALUES (...)").execute(&mut *tx).await?;
+sqlx::query!(
+    "UPDATE agents SET budget_used_usd = budget_used_usd + $1 WHERE id = $2",
+    cost_usd, agent_id,
+).execute(&mut *tx).await?;
+tx.commit().await?;
+```
+
+Decision: `budget_limit_usd = 0` = unlimited. `NULL` is not used (schema has `NOT NULL DEFAULT 10.0`). To set unlimited operators run `UPDATE agents SET budget_limit_usd = 0`.
+
+### AC-24 — Webhook rotation endpoint
+
+```rust
+// src/api/webhook_rotate.rs — NEW
+
+pub async fn rotate_webhook_secret(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthUser>,
+    Path(agent_id): Path<Uuid>,
+) -> Result<Json<RotateResponse>, AppError> {
+    // 1. Verify agent belongs to auth.workspace_id (404 if not)
+    // 2. Generate 32 random bytes, base64-encode
+    let new_secret = base64::engine::general_purpose::STANDARD_NO_PAD
+        .encode(rand::random::<[u8; 32]>());
+    // 3. Atomic update
+    sqlx::query!(
+        "UPDATE agents SET webhook_secret = $1 WHERE id = $2 AND workspace_id = $3",
+        new_secret, agent_id, auth.workspace_id,
+    ).execute(&state.pool).await?;
+    // 4. Append event (no secret in payload)
+    event::append_event(
+        &state.pool, agent_id, "webhook_secret_rotated", "api",
+        None, None, None, None, None, None,
+    ).await?;
+    Ok(Json(RotateResponse { webhook_secret: new_secret }))
+}
+
+#[derive(Serialize)]
+pub struct RotateResponse { webhook_secret: String }
+```
+
+Route registered in `src/api/agents.rs::router()`:
+
+```rust
+.route("/agents/{id}/webhook/rotate", post(webhook_rotate::rotate_webhook_secret))
+```
+
+### AC-25 — `pcy` CLI
+
+Cargo.toml:
+
+```toml
+[[bin]]
+name = "pcy"
+path = "src/bin/pcy.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+toml = "0.9"
+dirs = "6"
+```
+
+`src/bin/pcy.rs`:
+
+```rust
+fn main() -> std::process::ExitCode {
+    open_pincery::cli::run()
+}
+```
+
+`src/cli/mod.rs`:
+
+```rust
+#[derive(clap::Parser)]
+#[command(name = "pcy", version, about = "Open Pincery operator CLI")]
+struct Cli {
+    /// Override OPEN_PINCERY_URL
+    #[arg(long, global = true)]
+    url: Option<String>,
+    /// Override cached session token
+    #[arg(long, global = true)]
+    token: Option<String>,
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+    Bootstrap { #[arg(long, env = "OPEN_PINCERY_BOOTSTRAP_TOKEN")] install_token: String },
+    Login { #[arg(long)] token: String },
+    Agent { #[command(subcommand)] action: AgentAction },
+    Message { agent: String, text: String },
+    Events { agent: String, #[arg(long)] tail: bool, #[arg(long)] since: Option<i64> },
+    Budget { #[command(subcommand)] action: BudgetAction },
+    Status,
+}
+
+pub fn run() -> std::process::ExitCode { /* parse + dispatch */ }
+```
+
+Config file (`~/.config/open-pincery/config.toml` — platform-appropriate via `dirs::config_dir()`):
+
+```toml
+url = "http://localhost:8080"
+token = "<session-token>"
+```
+
+Shared HTTP client (`src/api_client.rs`) — reused by CLI, tests, and future consumers:
+
+```rust
+pub struct Client {
+    base: String,
+    token: Option<String>,
+    http: reqwest::Client,
+}
+
+impl Client {
+    pub fn new(base: String, token: Option<String>) -> Self { /* ... */ }
+    pub async fn bootstrap(&self, install_token: &str) -> Result<BootstrapResponse>;
+    pub async fn list_agents(&self) -> Result<Vec<AgentSummary>>;
+    pub async fn create_agent(&self, name: &str) -> Result<AgentDetail>;
+    pub async fn get_agent(&self, id: Uuid) -> Result<AgentDetail>;
+    pub async fn send_message(&self, id: Uuid, text: &str) -> Result<()>;
+    pub async fn list_events(&self, id: Uuid, since: Option<i64>) -> Result<Vec<EventRow>>;
+    pub async fn rotate_secret(&self, id: Uuid) -> Result<String>;
+    pub async fn set_enabled(&self, id: Uuid, enabled: bool) -> Result<()>;
+    pub async fn set_budget(&self, id: Uuid, limit_usd: Decimal) -> Result<()>;
+    pub async fn ready(&self) -> Result<ReadyStatus>;
+}
+```
+
+### AC-26 — Vanilla JS UI
+
+Hash-routed SPA. No build step. No framework. No external dependencies (no CDN fetches).
+
+`static/index.html` (shell):
+
+```html
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Open Pincery</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header id="nav"></header>
+  <main id="app"></main>
+  <script src="/app.js"></script>
+</body>
+</html>
+```
+
+`static/app.js` (structure):
+
+```javascript
+// Routes: #/login, #/agents, #/agents/:id, #/agents/:id/settings
+// Single-file module. Exposes only `window.addEventListener('hashchange', render)`.
+
+const API = '';                                    // same-origin
+const TOKEN_KEY = 'open-pincery.token';
+
+async function api(path, opts = {}) {
+  const token = localStorage.getItem(TOKEN_KEY);
+  const headers = { 'content-type': 'application/json', ...(opts.headers || {}) };
+  if (token) headers.authorization = `Bearer ${token}`;
+  const res = await fetch(API + path, { ...opts, headers });
+  if (res.status === 401) { location.hash = '#/login'; throw new Error('unauthorized'); }
+  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  return res.status === 204 ? null : res.json();
+}
+
+function render() { /* route dispatch */ }
+function viewLogin() { /* ... */ }
+function viewAgentList() { /* ... */ }
+function viewAgentDetail(id) { /* live event poll loop */ }
+function viewAgentSettings(id) { /* rotate + budget */ }
+
+window.addEventListener('hashchange', render);
+window.addEventListener('DOMContentLoaded', render);
+```
+
+Event stream: `GET /api/agents/:id/events?since=<last_seen_id>` polled every 4s with exponential backoff on failure (4s → 8s → 16s → 32s cap). Caller remembers last-seen event id in module-local state (not `localStorage` — intentionally ephemeral).
+
+CSS: a ~80-line reset + utility classes (no flex/grid framework, direct rules). Accessible defaults (`prefers-color-scheme`, min contrast).
+
+### AC-27 — `docs/api.md` API contract
+
+Structure:
+
+```markdown
+# Open Pincery HTTP API v4
+
+Stability: v4 → v5 compatible. Endpoints may be added; **none will be removed or
+renamed**, and documented request/response field types will not change
+incompatibly without a major version bump. Undocumented fields are not part
+of the contract and may appear or disappear.
+
+## Authentication
+...
+
+## Endpoints
+
+### POST /api/bootstrap
+...
+
+### POST /api/agents
+...
+
+### GET /api/agents
+...
+
+<one section per endpoint the CLI or UI calls>
+```
+
+## v4 Data Model
+
+No schema changes. Existing columns already sufficient:
+
+| Column | Table | Used by |
+|--------|-------|---------|
+| `budget_limit_usd` (NUMERIC, default 10.0) | `agents` | AC-23 |
+| `budget_used_usd` (NUMERIC, default 0) | `agents` | AC-23 |
+| `webhook_secret` (TEXT) | `agents` | AC-24 |
+| `cost_usd` (NUMERIC) | `llm_calls` | AC-23 (increments `agents.budget_used_usd`) |
+
+New event types (append-only convention, no schema change):
+
+- `budget_exceeded` — `source='runtime'`, payload `{"limit_usd":…,"used_usd":…}`
+- `webhook_secret_rotated` — `source='api'`, no payload
+
+## v4 External Integrations
+
+No new outbound integrations. All changes are internal or inbound (CLI, browser).
+
+| Integration | Failure mode | Test strategy |
+|---|---|---|
+| `pcy` CLI → HTTP API | network error, auth failure, 4xx, 5xx — exit non-zero with stderr message | Real HTTP against live test server in `cli_e2e_test.rs` |
+| Browser UI → HTTP API | fetch error, 401 → redirect to login, 5xx → render banner | `ui_smoke_test.rs` loads served files + probes routes |
+
+## v4 Observability
+
+No changes to the observability stack. New events (`budget_exceeded`, `webhook_secret_rotated`) appear in the existing event log and are queryable via existing `GET /api/agents/:id/events`. No new metrics; `budget_exceeded` rate is observable as a label dimension on existing event counters if desired (deferred).
+
+## v4 Complexity Exceptions
+
+- **`static/app.js`** may exceed the 300-line soft limit (target ≤400 lines) because splitting a single-file vanilla SPA into modules without a build step means `<script type="module">` with CORS and relative-import tax. The single-file approach is intentionally chosen to keep deployment artifact-free.
+- **`src/cli/mod.rs` + submodules** are a second binary in the same crate. Total CLI code budget: 600 lines across `src/cli/**`. If it grows past that in v5, extract to a workspace member.
+
+## v4 Open Questions
+
+None. All interfaces, file paths, and test strategies are final.
+
+## v4 Test Strategy
+
+| AC | Test file | Kind | Notes |
+|---|---|---|---|
+| AC-22 | `tests/docker_nonroot_test.sh` (shell, gated by `DOCKER_AVAILABLE=1`) | Integration | Skipped in CI without Docker; documented in runbook |
+| AC-23 | `tests/budget_test.rs` | Integration | DB fixture + real wake attempt; asserts event + no llm_calls row |
+| AC-24 | `tests/webhook_rotate_test.rs` | Integration | Two-secret HMAC flow |
+| AC-25 | `tests/cli_e2e_test.rs` | End-to-end | Uses `assert_cmd` or spawns `cargo run --bin pcy` against a live test server |
+| AC-26 | `tests/ui_smoke_test.rs` | Smoke | Serves files through the axum router, asserts `index.html` is reachable, grep-asserts the app.js loads `/api/agents` on list view; full-browser headless-chrome optional, gated by env |
+| AC-27 | REVIEW subagent pass | Document review | Subagent cross-checks every CLI/UI call against `docs/api.md` and every endpoint in `src/api/` against the doc |

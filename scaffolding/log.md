@@ -321,3 +321,11 @@
 - **Changes**: `scaffolding/scope.md` (199 → 264 lines).
 - **Retries**: 0
 - **Next**: DESIGN.
+
+## v4 DESIGN — 2026-04-19T05:30Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: design.md v4 addendum appended (603 → 1006 lines). Covers all 6 ACs with: non-root Dockerfile stage 2 (UID 10001 user pcy, chown /app), AC-23 integration at src/background/listener.rs pre-CAS (with atomic cost_usd increment in llm_calls transaction), webhook_rotate.rs endpoint registered under existing auth_middleware, `pcy` CLI layout (src/bin/pcy.rs + src/cli/{mod,config,commands/*}.rs + src/api_client.rs shared HTTP client), vanilla JS UI layout (static/{index.html,app.js,style.css}, hash-routed 5 views, 4s long-poll), docs/api.md structure. No schema changes (uses existing agents.budget_{limit,used}_usd columns). No new external integrations. Complexity exception: static/app.js may reach ~400 lines (single-file intentional for artifact-free deploy). Open questions: none.
+- **Changes**: `scaffolding/design.md` (603 → 1006 lines).
+- **Retries**: 0
+- **Next**: ANALYZE.
