@@ -19,7 +19,7 @@ pub async fn run_maintenance(
         .await?
         .ok_or_else(|| AppError::Internal("Missing maintenance_prompt template".into()))?;
 
-    // Gather recent events for context 
+    // Gather recent events for context
     let events = event::recent_events(pool, agent_id, 50).await?;
     let mut event_summary = String::new();
     for ev in events.iter().rev() {
@@ -124,9 +124,14 @@ pub async fn run_maintenance(
                 warn!(agent_id = %agent_id, "Maintenance LLM returned non-JSON, preserving current projection");
                 let truncated: String = text.chars().take(500).collect();
                 projection::insert_projection(
-                    pool, agent_id, current_identity, current_work_list, current_version + 1,
+                    pool,
+                    agent_id,
+                    current_identity,
+                    current_work_list,
+                    current_version + 1,
                     Some(wake_id),
-                ).await?;
+                )
+                .await?;
                 projection::insert_wake_summary(pool, agent_id, wake_id, &truncated).await?;
             }
         }

@@ -7,10 +7,18 @@ use open_pincery::models::{agent, user, workspace};
 async fn test_stale_agent_detection_and_recovery() {
     let pool = common::test_pool().await;
 
-    let u = user::create_local_admin(&pool, "stale@test.com", "Stale").await.unwrap();
-    let org = workspace::create_organization(&pool, "stale", "stale", u.id).await.unwrap();
-    let ws = workspace::create_workspace(&pool, org.id, "stale", "stale", u.id).await.unwrap();
-    let a = agent::create_agent(&pool, "stale-agent", ws.id, u.id).await.unwrap();
+    let u = user::create_local_admin(&pool, "stale@test.com", "Stale")
+        .await
+        .unwrap();
+    let org = workspace::create_organization(&pool, "stale", "stale", u.id)
+        .await
+        .unwrap();
+    let ws = workspace::create_workspace(&pool, org.id, "stale", "stale", u.id)
+        .await
+        .unwrap();
+    let a = agent::create_agent(&pool, "stale-agent", ws.id, u.id)
+        .await
+        .unwrap();
 
     // Acquire wake
     agent::acquire_wake(&pool, a.id).await.unwrap();

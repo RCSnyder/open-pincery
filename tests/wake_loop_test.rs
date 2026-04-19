@@ -1,10 +1,10 @@
 mod common;
 
+use open_pincery::config::Config;
 use open_pincery::models::{agent, event, user, workspace};
 use open_pincery::runtime::{llm::LlmClient, wake_loop};
-use open_pincery::config::Config;
-use wiremock::{Mock, MockServer, ResponseTemplate};
 use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn test_config(iteration_cap: i32) -> Config {
     Config {
@@ -29,15 +29,34 @@ fn test_config(iteration_cap: i32) -> Config {
 async fn test_wake_loop_sleep_termination() {
     let pool = common::test_pool().await;
 
-    let u = user::create_local_admin(&pool, "wake@test.com", "Wake").await.unwrap();
-    let org = workspace::create_organization(&pool, "wake", "wake", u.id).await.unwrap();
-    let ws = workspace::create_workspace(&pool, org.id, "wake", "wake", u.id).await.unwrap();
-    let a = agent::create_agent(&pool, "wake-agent", ws.id, u.id).await.unwrap();
+    let u = user::create_local_admin(&pool, "wake@test.com", "Wake")
+        .await
+        .unwrap();
+    let org = workspace::create_organization(&pool, "wake", "wake", u.id)
+        .await
+        .unwrap();
+    let ws = workspace::create_workspace(&pool, org.id, "wake", "wake", u.id)
+        .await
+        .unwrap();
+    let a = agent::create_agent(&pool, "wake-agent", ws.id, u.id)
+        .await
+        .unwrap();
 
     // Add a message
     event::append_event(
-        &pool, a.id, "message_received", "human", None, None, None, None, Some("hello"), None,
-    ).await.unwrap();
+        &pool,
+        a.id,
+        "message_received",
+        "human",
+        None,
+        None,
+        None,
+        None,
+        Some("hello"),
+        None,
+    )
+    .await
+    .unwrap();
 
     // Acquire wake
     let acquired = agent::acquire_wake(&pool, a.id).await.unwrap().unwrap();
@@ -81,12 +100,17 @@ async fn test_wake_loop_sleep_termination() {
         "test-model".into(),
     );
 
-    let reason = wake_loop::run_wake_loop(&pool, &llm, &config, a.id, wake_id).await.unwrap();
+    let reason = wake_loop::run_wake_loop(&pool, &llm, &config, a.id, wake_id)
+        .await
+        .unwrap();
     assert_eq!(reason, "sleep");
 
     // Verify wake_end event was recorded
     let events = event::recent_events(&pool, a.id, 100).await.unwrap();
-    let wake_ends: Vec<_> = events.iter().filter(|e| e.event_type == "wake_end").collect();
+    let wake_ends: Vec<_> = events
+        .iter()
+        .filter(|e| e.event_type == "wake_end")
+        .collect();
     assert_eq!(wake_ends.len(), 1);
     assert_eq!(wake_ends[0].termination_reason.as_deref(), Some("sleep"));
 }
@@ -96,14 +120,33 @@ async fn test_wake_loop_sleep_termination() {
 async fn test_wake_loop_iteration_cap() {
     let pool = common::test_pool().await;
 
-    let u = user::create_local_admin(&pool, "cap@test.com", "Cap").await.unwrap();
-    let org = workspace::create_organization(&pool, "cap", "cap", u.id).await.unwrap();
-    let ws = workspace::create_workspace(&pool, org.id, "cap", "cap", u.id).await.unwrap();
-    let a = agent::create_agent(&pool, "cap-agent", ws.id, u.id).await.unwrap();
+    let u = user::create_local_admin(&pool, "cap@test.com", "Cap")
+        .await
+        .unwrap();
+    let org = workspace::create_organization(&pool, "cap", "cap", u.id)
+        .await
+        .unwrap();
+    let ws = workspace::create_workspace(&pool, org.id, "cap", "cap", u.id)
+        .await
+        .unwrap();
+    let a = agent::create_agent(&pool, "cap-agent", ws.id, u.id)
+        .await
+        .unwrap();
 
     event::append_event(
-        &pool, a.id, "message_received", "human", None, None, None, None, Some("hello"), None,
-    ).await.unwrap();
+        &pool,
+        a.id,
+        "message_received",
+        "human",
+        None,
+        None,
+        None,
+        None,
+        Some("hello"),
+        None,
+    )
+    .await
+    .unwrap();
 
     let acquired = agent::acquire_wake(&pool, a.id).await.unwrap().unwrap();
     let wake_id = acquired.wake_id.unwrap();
@@ -124,6 +167,8 @@ async fn test_wake_loop_iteration_cap() {
         "test-model".into(),
     );
 
-    let reason = wake_loop::run_wake_loop(&pool, &llm, &config, a.id, wake_id).await.unwrap();
+    let reason = wake_loop::run_wake_loop(&pool, &llm, &config, a.id, wake_id)
+        .await
+        .unwrap();
     assert_eq!(reason, "iteration_cap");
 }

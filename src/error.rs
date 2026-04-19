@@ -30,7 +30,10 @@ impl IntoResponse for AppError {
         let (status, message) = match &self {
             Self::Database(e) => {
                 tracing::error!("Database error: {e}");
-                (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error. Check server logs.")
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal database error. Check server logs.",
+                )
             }
             Self::NotFound(msg) => (StatusCode::NOT_FOUND, msg.as_str()),
             Self::Conflict(msg) => (StatusCode::CONFLICT, msg.as_str()),
@@ -38,7 +41,10 @@ impl IntoResponse for AppError {
             Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.as_str()),
             Self::Internal(msg) => {
                 tracing::error!("Internal error: {msg}");
-                (StatusCode::INTERNAL_SERVER_ERROR, "Internal error. Check server logs.")
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal error. Check server logs.",
+                )
             }
         };
 

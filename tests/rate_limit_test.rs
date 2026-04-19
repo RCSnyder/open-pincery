@@ -40,7 +40,9 @@ async fn test_unauth_rate_limit() {
             .uri("/api/bootstrap")
             .header("content-type", "application/json")
             .header("authorization", "Bearer wrong-token")
-            .body(Body::from(r#"{"email":"test@test.com","display_name":"Test"}"#))
+            .body(Body::from(
+                r#"{"email":"test@test.com","display_name":"Test"}"#,
+            ))
             .unwrap();
 
         let resp = app.clone().oneshot(req).await.unwrap();

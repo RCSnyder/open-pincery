@@ -84,7 +84,12 @@ pub struct LlmClient {
 }
 
 impl LlmClient {
-    pub fn new(base_url: String, api_key: String, model: String, maintenance_model: String) -> Self {
+    pub fn new(
+        base_url: String,
+        api_key: String,
+        model: String,
+        maintenance_model: String,
+    ) -> Self {
         Self {
             http: reqwest::Client::new(),
             base_url,
@@ -126,12 +131,16 @@ impl LlmClient {
                 Ok(resp) => {
                     if resp.status().is_success() {
                         let body = resp.json::<ChatResponse>().await.map_err(|e| {
-                            crate::error::AppError::Internal(format!("LLM response parse error: {e}"))
+                            crate::error::AppError::Internal(format!(
+                                "LLM response parse error: {e}"
+                            ))
                         })?;
                         metrics::counter!(m::LLM_CALL).increment(1);
                         if let Some(u) = body.usage.as_ref() {
-                            metrics::counter!(m::LLM_PROMPT_TOKENS).increment(u.prompt_tokens.max(0) as u64);
-                            metrics::counter!(m::LLM_COMPLETION_TOKENS).increment(u.completion_tokens.max(0) as u64);
+                            metrics::counter!(m::LLM_PROMPT_TOKENS)
+                                .increment(u.prompt_tokens.max(0) as u64);
+                            metrics::counter!(m::LLM_COMPLETION_TOKENS)
+                                .increment(u.completion_tokens.max(0) as u64);
                         }
                         return Ok(body);
                     }

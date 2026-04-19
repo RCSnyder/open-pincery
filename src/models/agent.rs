@@ -35,7 +35,7 @@ pub async fn create_agent(
     let agent = sqlx::query_as::<_, Agent>(
         "INSERT INTO agents (name, workspace_id, owner_id)
          VALUES ($1, $2, $3)
-         RETURNING *"
+         RETURNING *",
     )
     .bind(name)
     .bind(workspace_id)
@@ -46,18 +46,16 @@ pub async fn create_agent(
 }
 
 pub async fn get_agent(pool: &PgPool, id: Uuid) -> Result<Option<Agent>, AppError> {
-    let agent = sqlx::query_as::<_, Agent>(
-        "SELECT * FROM agents WHERE id = $1"
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
+    let agent = sqlx::query_as::<_, Agent>("SELECT * FROM agents WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
     Ok(agent)
 }
 
 pub async fn list_agents(pool: &PgPool, workspace_id: Uuid) -> Result<Vec<Agent>, AppError> {
     let agents = sqlx::query_as::<_, Agent>(
-        "SELECT * FROM agents WHERE workspace_id = $1 ORDER BY created_at DESC"
+        "SELECT * FROM agents WHERE workspace_id = $1 ORDER BY created_at DESC",
     )
     .bind(workspace_id)
     .fetch_all(pool)
@@ -75,7 +73,7 @@ pub async fn acquire_wake(pool: &PgPool, agent_id: Uuid) -> Result<Option<Agent>
              wake_started_at = NOW(),
              wake_iteration_count = 0
          WHERE id = $1 AND status = 'asleep' AND is_enabled = TRUE
-         RETURNING *"
+         RETURNING *",
     )
     .bind(agent_id)
     .fetch_optional(pool)
@@ -84,11 +82,14 @@ pub async fn acquire_wake(pool: &PgPool, agent_id: Uuid) -> Result<Option<Agent>
 }
 
 /// CAS: Transition from awake → maintenance.
-pub async fn transition_to_maintenance(pool: &PgPool, agent_id: Uuid) -> Result<Option<Agent>, AppError> {
+pub async fn transition_to_maintenance(
+    pool: &PgPool,
+    agent_id: Uuid,
+) -> Result<Option<Agent>, AppError> {
     let agent = sqlx::query_as::<_, Agent>(
         "UPDATE agents SET status = 'maintenance'
          WHERE id = $1 AND status = 'awake'
-         RETURNING *"
+         RETURNING *",
     )
     .bind(agent_id)
     .fetch_optional(pool)
@@ -105,7 +106,7 @@ pub async fn release_to_asleep(pool: &PgPool, agent_id: Uuid) -> Result<Option<A
              wake_started_at = NULL,
              wake_iteration_count = 0
          WHERE id = $1 AND status = 'maintenance'
-         RETURNING *"
+         RETURNING *",
     )
     .bind(agent_id)
     .fetch_optional(pool)
@@ -122,7 +123,7 @@ pub async fn drain_reacquire(pool: &PgPool, agent_id: Uuid) -> Result<Option<Age
              wake_started_at = NOW(),
              wake_iteration_count = 0
          WHERE id = $1 AND status = 'maintenance' AND is_enabled = TRUE
-         RETURNING *"
+         RETURNING *",
     )
     .bind(agent_id)
     .fetch_optional(pool)
@@ -136,7 +137,7 @@ pub async fn increment_iteration(pool: &PgPool, agent_id: Uuid) -> Result<i32, A
         "UPDATE agents
          SET wake_iteration_count = wake_iteration_count + 1
          WHERE id = $1
-         RETURNING wake_iteration_count"
+         RETURNING wake_iteration_count",
     )
     .bind(agent_id)
     .fetch_one(pool)
@@ -150,7 +151,7 @@ pub async fn find_stale_agents(pool: &PgPool, stale_hours: i64) -> Result<Vec<Ag
         "SELECT * FROM agents
          WHERE status IN ('awake', 'maintenance')
            AND wake_started_at < NOW() - make_interval(hours => $1::int)
-        "
+        ",
     )
     .bind(stale_hours as i32)
     .fetch_all(pool)
@@ -167,7 +168,7 @@ pub async fn force_release(pool: &PgPool, agent_id: Uuid) -> Result<(), AppError
              wake_started_at = NULL,
              wake_iteration_count = 0
          WHERE id = $1
-           AND status IN ('awake', 'maintenance')"
+           AND status IN ('awake', 'maintenance')",
     )
     .bind(agent_id)
     .execute(pool)
@@ -207,7 +208,7 @@ pub async fn soft_delete_agent(pool: &PgPool, id: Uuid) -> Result<Agent, AppErro
            disabled_reason = 'deleted',
            disabled_at = NOW()
          WHERE id = $1
-         RETURNING *"
+         RETURNING *",
     )
     .bind(id)
     .fetch_one(pool)

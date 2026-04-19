@@ -31,7 +31,6 @@ async fn send_message(
     Extension(_auth): Extension<AuthUser>,
     Json(body): Json<SendMessage>,
 ) -> Result<(StatusCode, Json<MessageResponse>), AppError> {
-
     let ev = event::append_event(
         &state.pool,
         agent_id,
@@ -51,7 +50,10 @@ async fn send_message(
         .bind(agent_id.to_string())
         .execute(&state.pool)
         .await
-        .map_err(|e| AppError::Database(e))?;
+        .map_err(AppError::Database)?;
 
-    Ok((StatusCode::ACCEPTED, Json(MessageResponse { event_id: ev.id })))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(MessageResponse { event_id: ev.id }),
+    ))
 }

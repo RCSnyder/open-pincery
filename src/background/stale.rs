@@ -31,7 +31,7 @@ pub async fn start_stale_recovery(
             _ = interval.tick() => {}
         }
 
-        match agent::find_stale_agents(&pool, config.stale_wake_hours as i64).await {
+        match agent::find_stale_agents(&pool, config.stale_wake_hours).await {
             Ok(stale_agents) => {
                 for a in stale_agents {
                     info!(agent_id = %a.id, wake_id = ?a.wake_id, "Recovering stale agent");
@@ -40,10 +40,18 @@ pub async fn start_stale_recovery(
                     } else {
                         // Record stale_wake_recovery event
                         let _ = event::append_event(
-                            &pool, a.id, "stale_wake_recovery", "system",
-                            a.wake_id, None, None, None,
-                            Some("Agent recovered from stale wake"), None,
-                        ).await;
+                            &pool,
+                            a.id,
+                            "stale_wake_recovery",
+                            "system",
+                            a.wake_id,
+                            None,
+                            None,
+                            None,
+                            Some("Agent recovered from stale wake"),
+                            None,
+                        )
+                        .await;
                     }
                 }
             }

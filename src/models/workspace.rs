@@ -36,7 +36,7 @@ pub async fn create_organization(
     let org = sqlx::query_as::<_, Organization>(
         "INSERT INTO organizations (name, slug, created_by)
          VALUES ($1, $2, $3)
-         RETURNING *"
+         RETURNING *",
     )
     .bind(name)
     .bind(slug)
@@ -56,7 +56,7 @@ pub async fn create_workspace(
     let ws = sqlx::query_as::<_, Workspace>(
         "INSERT INTO workspaces (organization_id, name, slug, created_by)
          VALUES ($1, $2, $3, $4)
-         RETURNING *"
+         RETURNING *",
     )
     .bind(org_id)
     .bind(name)
@@ -75,7 +75,7 @@ pub async fn add_org_membership(
 ) -> Result<(), AppError> {
     sqlx::query(
         "INSERT INTO organization_memberships (organization_id, user_id, role)
-         VALUES ($1, $2, $3)"
+         VALUES ($1, $2, $3)",
     )
     .bind(org_id)
     .bind(user_id)
@@ -93,7 +93,7 @@ pub async fn add_workspace_membership(
 ) -> Result<(), AppError> {
     sqlx::query(
         "INSERT INTO workspace_memberships (workspace_id, user_id, role)
-         VALUES ($1, $2, $3)"
+         VALUES ($1, $2, $3)",
     )
     .bind(ws_id)
     .bind(user_id)
@@ -111,7 +111,7 @@ pub async fn find_workspace_for_user(
         "SELECT w.* FROM workspaces w
          JOIN workspace_memberships wm ON wm.workspace_id = w.id
          WHERE wm.user_id = $1 AND wm.status = 'active'
-         LIMIT 1"
+         LIMIT 1",
     )
     .bind(user_id)
     .fetch_optional(pool)

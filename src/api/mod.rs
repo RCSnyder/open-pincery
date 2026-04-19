@@ -5,11 +5,7 @@ use axum::{
     response::Response,
     Router,
 };
-use governor::{
-    clock::DefaultClock,
-    state::keyed::DashMapStateStore,
-    Quota, RateLimiter,
-};
+use governor::{clock::DefaultClock, state::keyed::DashMapStateStore, Quota, RateLimiter};
 use sqlx::PgPool;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU32;
@@ -98,7 +94,8 @@ fn rate_limit_response() -> Response {
     metrics::counter!(crate::observability::metrics::RATE_LIMIT_REJECTED).increment(1);
     let mut resp = Response::new(axum::body::Body::from("Too Many Requests"));
     *resp.status_mut() = StatusCode::TOO_MANY_REQUESTS;
-    resp.headers_mut().insert("retry-after", "60".parse().unwrap());
+    resp.headers_mut()
+        .insert("retry-after", "60".parse().unwrap());
     resp
 }
 
@@ -130,12 +127,12 @@ pub async fn auth_rate_limit(
 
 impl AppState {
     pub fn new(pool: PgPool, config: crate::config::Config) -> Self {
-        let unauth_limiter = Arc::new(RateLimiter::keyed(
-            Quota::per_minute(NonZeroU32::new(10).unwrap()),
-        ));
-        let auth_limiter = Arc::new(RateLimiter::keyed(
-            Quota::per_minute(NonZeroU32::new(60).unwrap()),
-        ));
+        let unauth_limiter = Arc::new(RateLimiter::keyed(Quota::per_minute(
+            NonZeroU32::new(10).unwrap(),
+        )));
+        let auth_limiter = Arc::new(RateLimiter::keyed(Quota::per_minute(
+            NonZeroU32::new(60).unwrap(),
+        )));
         Self {
             pool,
             config,
@@ -151,17 +148,26 @@ pub fn router(state: AppState) -> Router {
         .merge(agents::router())
         .merge(messages::router())
         .merge(events::router())
-        .layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware))
-        .layer(axum::middleware::from_fn_with_state(state.clone(), auth_rate_limit));
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth_rate_limit,
+        ));
 
     let unauthed = Router::new()
         .merge(bootstrap::router())
         .nest("/api", webhooks::router())
-        .layer(axum::middleware::from_fn_with_state(state.clone(), unauth_rate_limit));
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            unauth_rate_limit,
+        ));
 
     // Serve static UI files, falling back to index.html for SPA routing
-    let static_files = ServeDir::new("static")
-        .not_found_service(ServeFile::new("static/index.html"));
+    let static_files =
+        ServeDir::new("static").not_found_service(ServeFile::new("static/index.html"));
 
     Router::new()
         .route("/health", axum::routing::get(health::health))

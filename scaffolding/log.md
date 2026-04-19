@@ -27,7 +27,7 @@
 ## BUILD — 2026-04-18T00:03Z
 
 - **Gate**: PASS (attempt 1)
-- **Evidence**: 
+- **Evidence**:
   - Code compiles with 0 errors, 0 warnings
   - 15 integration tests pass across 10 test files (serial execution)
   - All 10 ACs have corresponding tests:
@@ -122,7 +122,7 @@
     - AC-15: agent_mgmt_test (PATCH rename/disable, DELETE soft-delete)
   - Cargo.lock present
   - No hardcoded secrets in source
-- **Changes**: 5 vertical slices implemented. New files: api/webhooks.rs, Dockerfile, 2 migrations, 4 test files. Modified: main.rs, api/mod.rs, api/agents.rs, models/agent.rs, background/*.rs, Cargo.toml, docker-compose.yml, tests/common/mod.rs.
+- **Changes**: 5 vertical slices implemented. New files: api/webhooks.rs, Dockerfile, 2 migrations, 4 test files. Modified: main.rs, api/mod.rs, api/agents.rs, models/agent.rs, background/\*.rs, Cargo.toml, docker-compose.yml, tests/common/mod.rs.
 - **Retries**: 0
 - **Next**: REVIEW
 
@@ -196,3 +196,41 @@
   - log.md v2 BUILD: corrected "15 test files" → "14 test files" (common/mod.rs is a helper, not a test file)
 - **Documents updated**: `scaffolding/design.md`, `scaffolding/readiness.md`, `scaffolding/log.md`
 - **Confidence**: REPAIRED
+
+## v3 EXPAND — 2026-04-19T01:00Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: scope.md v3 appended with 6 ACs (AC-16..AC-21) spanning CI, JSON logging, Prometheus metrics, health/ready split, release hygiene + SBOM, operator runbooks. Derived from docs/input gap analysis + critical audit (scoped down from initial 7-AC OTEL-heavy draft).
+- **Changes**: Updated `scaffolding/scope.md`
+- **Retries**: 0
+- **Next**: DESIGN
+
+## v3 DESIGN — 2026-04-19T01:01Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: design.md v3 addendum (592 lines total) with metrics taxonomy, endpoint split, CI pipeline topology, release workflow with signed SBOM, observability layer module layout.
+- **Changes**: Updated `scaffolding/design.md`
+- **Retries**: 0
+- **Next**: ANALYZE
+
+## v3 ANALYZE — 2026-04-19T01:02Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: readiness.md v3 appended with Truths T-18..T-23, coverage rows for AC-16..AC-21 (each with planned test + runtime proof), scope reduction risks, build order. Verdict: READY.
+- **Changes**: Updated `scaffolding/readiness.md`
+- **Retries**: 0
+- **Next**: BUILD
+
+## v3 BUILD — 2026-04-19T01:03Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**:
+  - Slice 1 (AC-17 JSON logging): `src/observability/{mod,logging}.rs` with `init_logging()` + 3 unit tests
+  - Slice 2 (AC-19 health split): `src/api/health.rs` with `/health` (pure liveness) + `/ready` (DB + `background_alive` atomic); `AppState.background_alive: Arc<AtomicBool>` threaded into listener + stale tasks; `tests/health_test.rs` 4 tests
+  - Slice 3 (AC-18 Prometheus metrics): `src/observability/{metrics,server}.rs` with canonical metric name constants (WAKE_STARTED/COMPLETED, LLM_CALL, LLM_PROMPT_TOKENS/COMPLETION_TOKENS, TOOL_CALL, WEBHOOK_RECEIVED, RATE_LIMIT_REJECTED) + metrics HTTP server; instrumentation in wake_loop, llm, tools, webhooks, api/mod; `tests/observability_test.rs` 1 test; `METRICS_ADDR` env opt-in
+  - Slice 4 (AC-16 CI): `.github/workflows/ci.yml` with fmt/clippy/test (Postgres 16 service container)/deny jobs; `deny.toml` with license allowlist + `unknown-registry/git = "deny"`; fixed 9 clippy issues across `api/messages.rs`, `background/stale.rs`, `models/{event,llm_call}.rs`, `runtime/wake_loop.rs`, `tests/agent_mgmt_test.rs`; `cargo clippy --all-targets -- -D warnings` exits 0; `cargo fmt --all -- --check` exits 0
+  - Slice 5 (AC-21 runbooks): 5 runbooks under `docs/runbooks/` (stale-wake-triage, db-restore, migration-rollback, rate-limit-tuning, webhook-debugging) each with Symptom/Diagnostic Commands/Remediation/Escalation
+  - Full regression: **30 tests pass, 0 failed** (`TEST_DATABASE_URL=...5433/open_pincery_test cargo test -- --test-threads=1` → EXIT=0)
+- **Changes**: New files: `src/observability/{mod,logging,metrics,server}.rs`, `src/api/health.rs`, `.github/workflows/ci.yml`, `deny.toml`, `tests/{health,observability}_test.rs`, `docs/runbooks/*.md`. Modified: `src/api/{mod,webhooks,messages}.rs`, `src/background/{listener,stale}.rs`, `src/models/{event,llm_call}.rs`, `src/runtime/{wake_loop,llm,tools}.rs`, `src/main.rs`, `src/lib.rs`, `tests/agent_mgmt_test.rs`, `Cargo.toml`.
+- **Retries**: 0
+- **Next**: Slice 6 (AC-20 release+SBOM), then REVIEW

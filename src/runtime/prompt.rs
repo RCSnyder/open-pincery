@@ -34,10 +34,7 @@ pub async fn assemble_prompt(
     // 3. Add agent identity and work list from latest projection
     if let Some(proj) = projection::latest_projection(pool, agent_id).await? {
         system_prompt.push_str(&format!("\n\n## Identity\n{}", proj.identity));
-        system_prompt.push_str(&format!(
-            "\n\n## Work List\n{}",
-            proj.work_list.clone()
-        ));
+        system_prompt.push_str(&format!("\n\n## Work List\n{}", proj.work_list.clone()));
     }
 
     // 4. Add wake summaries
@@ -91,10 +88,7 @@ pub async fn assemble_prompt(
                 }
             }
             "tool_result" => {
-                let output = ev
-                    .tool_output
-                    .or(ev.content)
-                    .unwrap_or_default();
+                let output = ev.tool_output.or(ev.content).unwrap_or_default();
                 // Find matching tool_call event ID
                 let tool_call_id = last_tool_call_id.take().unwrap_or_default();
                 messages.push(ChatMessage {

@@ -14,8 +14,7 @@ pub fn is_json_format() -> bool {
 /// Install the global tracing subscriber exactly once.
 /// Safe to call only from `main`. Honours `RUST_LOG` and `LOG_FORMAT`.
 pub fn init_logging() {
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     if is_json_format() {
         tracing_subscriber::fmt()
@@ -23,9 +22,7 @@ pub fn init_logging() {
             .json()
             .init();
     } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
-            .init();
+        tracing_subscriber::fmt().with_env_filter(env_filter).init();
     }
 }
 

@@ -37,7 +37,7 @@ pub async fn create_local_admin(
     let user = sqlx::query_as::<_, User>(
         "INSERT INTO users (email, display_name, auth_provider, auth_subject)
          VALUES ($1, $2, 'local_admin', 'bootstrap')
-         RETURNING *"
+         RETURNING *",
     )
     .bind(email)
     .bind(display_name)

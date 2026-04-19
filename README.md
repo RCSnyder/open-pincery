@@ -271,18 +271,18 @@ curl http://localhost:8080/health
 
 ### API
 
-| Method | Path                          | Description                          |
-| ------ | ----------------------------- | ------------------------------------ |
-| GET    | `/health`                     | Health check (no auth required)      |
-| POST   | `/api/bootstrap`              | One-time admin setup                 |
-| POST   | `/api/agents`                 | Create agent (returns webhook_secret)|
-| GET    | `/api/agents`                 | List agents                          |
-| GET    | `/api/agents/:id`             | Agent detail with projections        |
-| PATCH  | `/api/agents/:id`             | Update agent name/enabled status     |
-| DELETE | `/api/agents/:id`             | Soft-delete (disable with reason)    |
-| POST   | `/api/agents/:id/messages`    | Send message (triggers wake)         |
-| GET    | `/api/agents/:id/events`      | Event log                            |
-| POST   | `/api/agents/:id/webhooks`    | Webhook ingress (HMAC-SHA256)        |
+| Method | Path                       | Description                           |
+| ------ | -------------------------- | ------------------------------------- |
+| GET    | `/health`                  | Health check (no auth required)       |
+| POST   | `/api/bootstrap`           | One-time admin setup                  |
+| POST   | `/api/agents`              | Create agent (returns webhook_secret) |
+| GET    | `/api/agents`              | List agents                           |
+| GET    | `/api/agents/:id`          | Agent detail with projections         |
+| PATCH  | `/api/agents/:id`          | Update agent name/enabled status      |
+| DELETE | `/api/agents/:id`          | Soft-delete (disable with reason)     |
+| POST   | `/api/agents/:id/messages` | Send message (triggers wake)          |
+| GET    | `/api/agents/:id/events`   | Event log                             |
+| POST   | `/api/agents/:id/webhooks` | Webhook ingress (HMAC-SHA256)         |
 
 All `/api/*` routes (except bootstrap) require `Authorization: Bearer <session_token>`.
 Webhook routes require `X-Signature` header with HMAC-SHA256 of the body.

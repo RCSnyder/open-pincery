@@ -36,7 +36,7 @@ pub async fn insert_projection(
     let proj = sqlx::query_as::<_, AgentProjection>(
         "INSERT INTO agent_projections (agent_id, identity, work_list, version, wake_id)
          VALUES ($1, $2, $3, $4, $5)
-         RETURNING *"
+         RETURNING *",
     )
     .bind(agent_id)
     .bind(identity)
@@ -56,7 +56,7 @@ pub async fn latest_projection(
         "SELECT * FROM agent_projections
          WHERE agent_id = $1
          ORDER BY version DESC
-         LIMIT 1"
+         LIMIT 1",
     )
     .bind(agent_id)
     .fetch_optional(pool)
@@ -73,7 +73,7 @@ pub async fn insert_wake_summary(
     let ws = sqlx::query_as::<_, WakeSummary>(
         "INSERT INTO wake_summaries (agent_id, wake_id, summary)
          VALUES ($1, $2, $3)
-         RETURNING *"
+         RETURNING *",
     )
     .bind(agent_id)
     .bind(wake_id)
@@ -92,7 +92,7 @@ pub async fn recent_wake_summaries(
         "SELECT * FROM wake_summaries
          WHERE agent_id = $1
          ORDER BY created_at DESC
-         LIMIT $2"
+         LIMIT $2",
     )
     .bind(agent_id)
     .bind(limit)

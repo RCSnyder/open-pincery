@@ -10,10 +10,18 @@ async fn test_cas_lifecycle_happy_path() {
     let pool = common::test_pool().await;
 
     // Setup: create user, org, workspace, agent
-    let u = user::create_local_admin(&pool, "test@test.com", "Test").await.unwrap();
-    let org = workspace::create_organization(&pool, "test", "test", u.id).await.unwrap();
-    let ws = workspace::create_workspace(&pool, org.id, "test", "test", u.id).await.unwrap();
-    let a = agent::create_agent(&pool, "test-agent", ws.id, u.id).await.unwrap();
+    let u = user::create_local_admin(&pool, "test@test.com", "Test")
+        .await
+        .unwrap();
+    let org = workspace::create_organization(&pool, "test", "test", u.id)
+        .await
+        .unwrap();
+    let ws = workspace::create_workspace(&pool, org.id, "test", "test", u.id)
+        .await
+        .unwrap();
+    let a = agent::create_agent(&pool, "test-agent", ws.id, u.id)
+        .await
+        .unwrap();
 
     assert_eq!(a.status, "asleep");
 
@@ -46,10 +54,18 @@ async fn test_cas_lifecycle_happy_path() {
 async fn test_cas_invalid_transitions() {
     let pool = common::test_pool().await;
 
-    let u = user::create_local_admin(&pool, "test2@test.com", "Test2").await.unwrap();
-    let org = workspace::create_organization(&pool, "test2", "test2", u.id).await.unwrap();
-    let ws = workspace::create_workspace(&pool, org.id, "test2", "test2", u.id).await.unwrap();
-    let a = agent::create_agent(&pool, "test-agent-2", ws.id, u.id).await.unwrap();
+    let u = user::create_local_admin(&pool, "test2@test.com", "Test2")
+        .await
+        .unwrap();
+    let org = workspace::create_organization(&pool, "test2", "test2", u.id)
+        .await
+        .unwrap();
+    let ws = workspace::create_workspace(&pool, org.id, "test2", "test2", u.id)
+        .await
+        .unwrap();
+    let a = agent::create_agent(&pool, "test-agent-2", ws.id, u.id)
+        .await
+        .unwrap();
 
     // Can't transition to maintenance from asleep
     let bad = agent::transition_to_maintenance(&pool, a.id).await.unwrap();

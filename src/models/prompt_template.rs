@@ -19,7 +19,7 @@ pub struct PromptTemplate {
 
 pub async fn find_active(pool: &PgPool, name: &str) -> Result<Option<PromptTemplate>, AppError> {
     let tmpl = sqlx::query_as::<_, PromptTemplate>(
-        "SELECT * FROM prompt_templates WHERE name = $1 AND is_active = TRUE"
+        "SELECT * FROM prompt_templates WHERE name = $1 AND is_active = TRUE",
     )
     .bind(name)
     .fetch_optional(pool)

@@ -36,14 +36,22 @@ struct AgentResponse {
 }
 
 impl AgentResponse {
-    fn from_agent(a: agent::Agent, proj: Option<projection::AgentProjection>, include_secret: bool) -> Self {
+    fn from_agent(
+        a: agent::Agent,
+        proj: Option<projection::AgentProjection>,
+        include_secret: bool,
+    ) -> Self {
         Self {
             id: a.id,
             name: a.name,
             status: a.status,
             is_enabled: a.is_enabled,
             disabled_reason: a.disabled_reason,
-            webhook_secret: if include_secret { Some(a.webhook_secret) } else { None },
+            webhook_secret: if include_secret {
+                Some(a.webhook_secret)
+            } else {
+                None
+            },
             identity: proj.as_ref().map(|p| p.identity.clone()),
             work_list: proj.as_ref().map(|p| p.work_list.clone()),
             created_at: a.created_at,
@@ -54,7 +62,12 @@ impl AgentResponse {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/agents", post(create_agent).get(list_agents))
-        .route("/agents/{id}", get(get_agent_handler).patch(update_agent_handler).delete(delete_agent_handler))
+        .route(
+            "/agents/{id}",
+            get(get_agent_handler)
+                .patch(update_agent_handler)
+                .delete(delete_agent_handler),
+        )
 }
 
 async fn create_agent(
@@ -63,7 +76,10 @@ async fn create_agent(
     Json(body): Json<CreateAgent>,
 ) -> Result<(axum::http::StatusCode, Json<AgentResponse>), AppError> {
     let a = agent::create_agent(&state.pool, &body.name, auth.workspace_id, auth.user_id).await?;
-    Ok((axum::http::StatusCode::CREATED, Json(AgentResponse::from_agent(a, None, true))))
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(AgentResponse::from_agent(a, None, true)),
+    ))
 }
 
 async fn list_agents(
@@ -71,7 +87,12 @@ async fn list_agents(
     Extension(auth): Extension<AuthUser>,
 ) -> Result<Json<Vec<AgentResponse>>, AppError> {
     let agents = agent::list_agents(&state.pool, auth.workspace_id).await?;
-    Ok(Json(agents.into_iter().map(|a| AgentResponse::from_agent(a, None, false)).collect()))
+    Ok(Json(
+        agents
+            .into_iter()
+            .map(|a| AgentResponse::from_agent(a, None, false))
+            .collect(),
+    ))
 }
 
 async fn get_agent_handler(
@@ -95,11 +116,13 @@ async fn update_agent_handler(
         _ => None,
     };
     let a = agent::update_agent(
-        &state.pool, id,
+        &state.pool,
+        id,
         body.name.as_deref(),
         body.is_enabled,
         disabled_reason,
-    ).await?;
+    )
+    .await?;
     Ok(Json(AgentResponse::from_agent(a, None, false)))
 }
 

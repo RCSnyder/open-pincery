@@ -47,7 +47,12 @@ async fn health_always_returns_200() {
     let app = api::router(state);
 
     let resp = app
-        .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -64,7 +69,12 @@ async fn ready_503_when_background_tasks_not_alive() {
     let app = api::router(state);
 
     let resp = app
-        .oneshot(Request::builder().uri("/ready").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -82,7 +92,12 @@ async fn ready_200_when_db_and_background_alive() {
     let app = api::router(state);
 
     let resp = app
-        .oneshot(Request::builder().uri("/ready").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -102,7 +117,12 @@ async fn ready_503_when_db_unreachable() {
     let app = api::router(state);
 
     let resp = app
-        .oneshot(Request::builder().uri("/ready").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 

@@ -77,7 +77,8 @@ async fn main() {
     let bg_shutdown = shutdown.clone();
     let bg_alive = state.background_alive.clone();
     let listener_handle = tokio::spawn(async move {
-        background::listener::start_listener(bg_pool, bg_config, bg_llm, bg_shutdown, bg_alive).await;
+        background::listener::start_listener(bg_pool, bg_config, bg_llm, bg_shutdown, bg_alive)
+            .await;
     });
 
     let stale_pool = pool.clone();
@@ -85,7 +86,13 @@ async fn main() {
     let stale_shutdown = shutdown.clone();
     let stale_alive = state.background_alive.clone();
     let stale_handle = tokio::spawn(async move {
-        background::stale::start_stale_recovery(stale_pool, stale_config, stale_shutdown, stale_alive).await;
+        background::stale::start_stale_recovery(
+            stale_pool,
+            stale_config,
+            stale_shutdown,
+            stale_alive,
+        )
+        .await;
     });
 
     let app = api::router(state);
@@ -99,14 +106,17 @@ async fn main() {
 
     // Graceful shutdown: on SIGTERM/SIGINT, cancel all tasks then drain HTTP
     let server_shutdown = shutdown.clone();
-    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-        .with_graceful_shutdown(async move {
-            shutdown_signal().await;
-            info!("Shutdown signal received, draining...");
-            server_shutdown.cancel();
-        })
-        .await
-        .expect("Server error");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        info!("Shutdown signal received, draining...");
+        server_shutdown.cancel();
+    })
+    .await
+    .expect("Server error");
 
     // Wait for background tasks to finish (up to 30 seconds)
     info!("Waiting for background tasks to finish (up to 30s)...");
@@ -128,9 +138,8 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("Failed to install SIGTERM handler");
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler");
         tokio::select! {
             _ = ctrl_c => {},
             _ = sigterm.recv() => {},

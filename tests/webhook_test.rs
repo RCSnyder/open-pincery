@@ -42,10 +42,18 @@ fn compute_hmac(secret: &str, payload: &[u8]) -> String {
 async fn test_webhook_valid_signature() {
     let pool = common::test_pool().await;
 
-    let u = user::create_local_admin(&pool, "wh@test.com", "WH").await.unwrap();
-    let org = workspace::create_organization(&pool, "wh", "wh", u.id).await.unwrap();
-    let ws = workspace::create_workspace(&pool, org.id, "wh", "wh", u.id).await.unwrap();
-    let a = agent::create_agent(&pool, "wh-agent", ws.id, u.id).await.unwrap();
+    let u = user::create_local_admin(&pool, "wh@test.com", "WH")
+        .await
+        .unwrap();
+    let org = workspace::create_organization(&pool, "wh", "wh", u.id)
+        .await
+        .unwrap();
+    let ws = workspace::create_workspace(&pool, org.id, "wh", "wh", u.id)
+        .await
+        .unwrap();
+    let a = agent::create_agent(&pool, "wh-agent", ws.id, u.id)
+        .await
+        .unwrap();
 
     let state = AppState::new(pool.clone(), test_config());
     let app = api::router(state);
@@ -75,10 +83,18 @@ async fn test_webhook_valid_signature() {
 async fn test_webhook_bad_signature() {
     let pool = common::test_pool().await;
 
-    let u = user::create_local_admin(&pool, "wh2@test.com", "WH2").await.unwrap();
-    let org = workspace::create_organization(&pool, "wh2", "wh2", u.id).await.unwrap();
-    let ws = workspace::create_workspace(&pool, org.id, "wh2", "wh2", u.id).await.unwrap();
-    let a = agent::create_agent(&pool, "wh-agent2", ws.id, u.id).await.unwrap();
+    let u = user::create_local_admin(&pool, "wh2@test.com", "WH2")
+        .await
+        .unwrap();
+    let org = workspace::create_organization(&pool, "wh2", "wh2", u.id)
+        .await
+        .unwrap();
+    let ws = workspace::create_workspace(&pool, org.id, "wh2", "wh2", u.id)
+        .await
+        .unwrap();
+    let a = agent::create_agent(&pool, "wh-agent2", ws.id, u.id)
+        .await
+        .unwrap();
 
     let state = AppState::new(pool.clone(), test_config());
     let app = api::router(state);
@@ -89,7 +105,10 @@ async fn test_webhook_bad_signature() {
         .method("POST")
         .uri(format!("/api/agents/{}/webhooks", a.id))
         .header("content-type", "application/json")
-        .header("x-webhook-signature", "sha256=0000000000000000000000000000000000000000000000000000000000000000")
+        .header(
+            "x-webhook-signature",
+            "sha256=0000000000000000000000000000000000000000000000000000000000000000",
+        )
         .header("x-idempotency-key", "key-bad")
         .body(Body::from(payload))
         .unwrap();
@@ -103,10 +122,18 @@ async fn test_webhook_bad_signature() {
 async fn test_webhook_idempotency_dedup() {
     let pool = common::test_pool().await;
 
-    let u = user::create_local_admin(&pool, "wh3@test.com", "WH3").await.unwrap();
-    let org = workspace::create_organization(&pool, "wh3", "wh3", u.id).await.unwrap();
-    let ws = workspace::create_workspace(&pool, org.id, "wh3", "wh3", u.id).await.unwrap();
-    let a = agent::create_agent(&pool, "wh-agent3", ws.id, u.id).await.unwrap();
+    let u = user::create_local_admin(&pool, "wh3@test.com", "WH3")
+        .await
+        .unwrap();
+    let org = workspace::create_organization(&pool, "wh3", "wh3", u.id)
+        .await
+        .unwrap();
+    let ws = workspace::create_workspace(&pool, org.id, "wh3", "wh3", u.id)
+        .await
+        .unwrap();
+    let a = agent::create_agent(&pool, "wh-agent3", ws.id, u.id)
+        .await
+        .unwrap();
 
     let state = AppState::new(pool.clone(), test_config());
     let app = api::router(state);
@@ -143,6 +170,13 @@ async fn test_webhook_idempotency_dedup() {
 
     // Verify only one event was created
     let events = event::recent_events(&pool, a.id, 100).await.unwrap();
-    let webhook_events: Vec<_> = events.iter().filter(|e| e.event_type == "webhook_received").collect();
-    assert_eq!(webhook_events.len(), 1, "Should have exactly 1 webhook event, not duplicated");
+    let webhook_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.event_type == "webhook_received")
+        .collect();
+    assert_eq!(
+        webhook_events.len(),
+        1,
+        "Should have exactly 1 webhook event, not duplicated"
+    );
 }

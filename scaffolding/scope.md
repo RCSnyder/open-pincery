@@ -34,16 +34,16 @@ This is the foundation that every other feature (webhooks, multi-tenancy, approv
 
 ## Stack
 
-| Concern | Choice | Source |
-|---------|--------|--------|
-| Runtime | Rust | preferences.md |
-| Database | PostgreSQL | preferences.md |
-| HTTP/API | axum | preferences.md |
-| Async | tokio | preferences.md |
-| SQL | sqlx (compile-time checked) | preferences.md |
-| Serialization | serde + serde_json | preferences.md |
-| HTTP client | reqwest | preferences.md (LLM API calls) |
-| Logging | tracing + tracing-subscriber | Standard Rust ecosystem |
+| Concern       | Choice                       | Source                         |
+| ------------- | ---------------------------- | ------------------------------ |
+| Runtime       | Rust                         | preferences.md                 |
+| Database      | PostgreSQL                   | preferences.md                 |
+| HTTP/API      | axum                         | preferences.md                 |
+| Async         | tokio                        | preferences.md                 |
+| SQL           | sqlx (compile-time checked)  | preferences.md                 |
+| Serialization | serde + serde_json           | preferences.md                 |
+| HTTP client   | reqwest                      | preferences.md (LLM API calls) |
+| Logging       | tracing + tracing-subscriber | Standard Rust ecosystem        |
 
 ## Deployment Target
 

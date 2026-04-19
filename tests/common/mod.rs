@@ -2,8 +2,9 @@ use sqlx::PgPool;
 
 /// Create a test database pool. Requires TEST_DATABASE_URL env var.
 pub async fn test_pool() -> PgPool {
-    let url = std::env::var("TEST_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://open_pincery:open_pincery@localhost:5432/open_pincery_test".into());
+    let url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
+        "postgres://open_pincery:open_pincery@localhost:5432/open_pincery_test".into()
+    });
 
     let pool = PgPool::connect(&url)
         .await

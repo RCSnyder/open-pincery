@@ -373,6 +373,7 @@ Phase 2 additions: Prometheus metrics endpoint, OpenTelemetry tracing, Grafana d
 ## Open Questions
 
 None — all three clarifications from scope.md have documented resolutions:
+
 1. LLM provider: generic OpenAI-compatible client with configurable base URL ✓
 2. Zerobox: deferred to Phase 2, shell tool uses basic subprocess ✓
 3. Constitution: default template shipped in seed migration ✓
@@ -555,25 +556,25 @@ pub async fn ready(State(app): State<AppState>) -> impl IntoResponse {
 
 ### Integration Points
 
-| Change | Where | Why |
-|---|---|---|
-| Replace `tracing_subscriber::fmt::init()` in `main.rs` | `src/main.rs` | AC-17 toggle |
-| Record counters inside existing runtime code | `src/runtime/wake_loop.rs`, `src/runtime/maintenance.rs`, `src/runtime/llm.rs`, `src/runtime/tools.rs`, `src/api/webhooks.rs`, `src/api/mod.rs` rate limit branch | AC-18 — one-line `metrics::counter!()` calls at existing natural points |
-| Move `/health` handler out of `main.rs`, add `/ready` | `src/api/health.rs` | AC-19 |
-| Add `background_alive: Arc<AtomicBool>` to `AppState` | `src/lib.rs` | AC-19 — readiness depends on it |
-| Conditionally spawn metrics server | `src/main.rs` | AC-18 — only when `METRICS_ADDR` set |
+| Change                                                 | Where                                                                                                                                                             | Why                                                                     |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Replace `tracing_subscriber::fmt::init()` in `main.rs` | `src/main.rs`                                                                                                                                                     | AC-17 toggle                                                            |
+| Record counters inside existing runtime code           | `src/runtime/wake_loop.rs`, `src/runtime/maintenance.rs`, `src/runtime/llm.rs`, `src/runtime/tools.rs`, `src/api/webhooks.rs`, `src/api/mod.rs` rate limit branch | AC-18 — one-line `metrics::counter!()` calls at existing natural points |
+| Move `/health` handler out of `main.rs`, add `/ready`  | `src/api/health.rs`                                                                                                                                               | AC-19                                                                   |
+| Add `background_alive: Arc<AtomicBool>` to `AppState`  | `src/lib.rs`                                                                                                                                                      | AC-19 — readiness depends on it                                         |
+| Conditionally spawn metrics server                     | `src/main.rs`                                                                                                                                                     | AC-18 — only when `METRICS_ADDR` set                                    |
 
 ### External Integrations (new)
 
-| Integration | Failure mode | Test strategy |
-|---|---|---|
-| GitHub Actions (CI + release) | Workflow turns red | Real run on a feature branch — manual gate |
-| cosign keyless (sigstore) | Signing step fails; release still publishes unsigned if step is `continue-on-error: false` (it is not) → release fails cleanly | Manual verification on first release tag |
-| Prometheus scraper (optional, operator-supplied) | None — we're the producer | Smoke test with `curl` in `observability_test.rs` |
+| Integration                                      | Failure mode                                                                                                                   | Test strategy                                     |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------- |
+| GitHub Actions (CI + release)                    | Workflow turns red                                                                                                             | Real run on a feature branch — manual gate        |
+| cosign keyless (sigstore)                        | Signing step fails; release still publishes unsigned if step is `continue-on-error: false` (it is not) → release fails cleanly | Manual verification on first release tag          |
+| Prometheus scraper (optional, operator-supplied) | None — we're the producer                                                                                                      | Smoke test with `curl` in `observability_test.rs` |
 
 ### Observability
 
-v3 *is* the observability story. After v3:
+v3 _is_ the observability story. After v3:
 
 - **Logs**: stderr/stdout, optionally JSON (AC-17)
 - **Metrics**: Prometheus pull on opt-in port (AC-18)

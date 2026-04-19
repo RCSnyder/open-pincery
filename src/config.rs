@@ -29,7 +29,10 @@ impl Config {
             llm_api_base_url: require_env("LLM_API_BASE_URL")?,
             llm_api_key: require_env("LLM_API_KEY")?,
             llm_model: env_or("LLM_MODEL", "anthropic/claude-sonnet-4-20250514"),
-            llm_maintenance_model: env_or("LLM_MAINTENANCE_MODEL", "anthropic/claude-sonnet-4-20250514"),
+            llm_maintenance_model: env_or(
+                "LLM_MAINTENANCE_MODEL",
+                "anthropic/claude-sonnet-4-20250514",
+            ),
             max_prompt_chars: env_or("MAX_PROMPT_CHARS", "100000")
                 .parse()
                 .map_err(|e| format!("Invalid MAX_PROMPT_CHARS: {e}"))?,

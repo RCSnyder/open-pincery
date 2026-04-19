@@ -23,9 +23,18 @@ pub async fn run_wake_loop(
 
     // Record wake_start event
     event::append_event(
-        pool, agent_id, "wake_start", "agent", Some(wake_id),
-        None, None, None, None, None,
-    ).await?;
+        pool,
+        agent_id,
+        "wake_start",
+        "agent",
+        Some(wake_id),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
 
     #[allow(unused_assignments)]
     let mut termination_reason = String::new();
@@ -35,7 +44,7 @@ pub async fn run_wake_loop(
         let current = agent::get_agent(pool, agent_id)
             .await?
             .ok_or(AppError::NotFound("Agent disappeared".into()))?;
-        if current.wake_iteration_count >= config.iteration_cap as i32 {
+        if current.wake_iteration_count >= config.iteration_cap {
             termination_reason = "iteration_cap".to_string();
             warn!(agent_id = %agent_id, "Hit iteration cap");
             break;
@@ -45,8 +54,8 @@ pub async fn run_wake_loop(
         let assembled = prompt::assemble_prompt(
             pool,
             agent_id,
-            config.event_window_limit as i64,
-            config.wake_summary_limit as i64,
+            config.event_window_limit,
+            config.wake_summary_limit,
             config.max_prompt_chars,
         )
         .await?;
@@ -61,7 +70,10 @@ pub async fn run_wake_loop(
         messages.extend(assembled.messages);
 
         // Call LLM
-        let response = match llm.chat(messages.clone(), Some(assembled.tools), None).await {
+        let response = match llm
+            .chat(messages.clone(), Some(assembled.tools), None)
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 warn!(agent_id = %agent_id, error = %e, "LLM call failed");

@@ -77,7 +77,7 @@ async fn receive_webhook(
             "INSERT INTO webhook_dedup (idempotency_key, agent_id)
              VALUES ($1, $2)
              ON CONFLICT (idempotency_key, agent_id) DO NOTHING
-             RETURNING TRUE"
+             RETURNING TRUE",
         )
         .bind(key)
         .bind(agent_id)
@@ -87,13 +87,16 @@ async fn receive_webhook(
 
         if inserted.is_none() {
             // Duplicate — return 200 OK without creating a new event
-            return Ok((StatusCode::OK, axum::Json(serde_json::json!({"status": "duplicate"}))));
+            return Ok((
+                StatusCode::OK,
+                axum::Json(serde_json::json!({"status": "duplicate"})),
+            ));
         }
     }
 
     // Parse payload
-    let payload: WebhookPayload = serde_json::from_slice(&body)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let payload: WebhookPayload =
+        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let source = payload.source.as_deref().unwrap_or("webhook");
 
@@ -103,7 +106,10 @@ async fn receive_webhook(
         agent_id,
         "webhook_received",
         source,
-        None, None, None, None,
+        None,
+        None,
+        None,
+        None,
         Some(&payload.content),
         None,
     )
@@ -118,5 +124,8 @@ async fn receive_webhook(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     metrics::counter!(m::WEBHOOK_RECEIVED).increment(1);
-    Ok((StatusCode::ACCEPTED, axum::Json(serde_json::json!({"status": "accepted"}))))
+    Ok((
+        StatusCode::ACCEPTED,
+        axum::Json(serde_json::json!({"status": "accepted"})),
+    ))
 }

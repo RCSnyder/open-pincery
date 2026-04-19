@@ -39,7 +39,9 @@ async fn test_update_agent() {
         .uri("/api/bootstrap")
         .header(header::AUTHORIZATION, "Bearer test-token")
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(r#"{"email":"mgmt@test.com","display_name":"Mgmt"}"#))
+        .body(Body::from(
+            r#"{"email":"mgmt@test.com","display_name":"Mgmt"}"#,
+        ))
         .unwrap();
 
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -77,7 +79,7 @@ async fn test_update_agent() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["name"].as_str().unwrap(), "renamed-agent");
-    assert_eq!(json["is_enabled"].as_bool().unwrap(), true);
+    assert!(json["is_enabled"].as_bool().unwrap());
 
     // PATCH — disable agent
     let req = Request::builder()
@@ -92,7 +94,7 @@ async fn test_update_agent() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["is_enabled"].as_bool().unwrap(), false);
+    assert!(!json["is_enabled"].as_bool().unwrap());
 }
 
 /// AC-15: DELETE /api/agents/:id soft-deletes (disables with reason "deleted").
@@ -108,7 +110,9 @@ async fn test_delete_agent() {
         .uri("/api/bootstrap")
         .header(header::AUTHORIZATION, "Bearer test-token")
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(r#"{"email":"del@test.com","display_name":"Del"}"#))
+        .body(Body::from(
+            r#"{"email":"del@test.com","display_name":"Del"}"#,
+        ))
         .unwrap();
 
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -143,7 +147,7 @@ async fn test_delete_agent() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["is_enabled"].as_bool().unwrap(), false);
+    assert!(!json["is_enabled"].as_bool().unwrap());
     assert_eq!(json["disabled_reason"].as_str().unwrap(), "deleted");
     // webhook_secret must not be exposed on non-create responses
     assert!(json.get("webhook_secret").is_none());

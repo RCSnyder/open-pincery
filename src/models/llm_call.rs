@@ -25,6 +25,7 @@ pub struct LlmCall {
     pub created_at: DateTime<Utc>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn insert_llm_call(
     pool: &PgPool,
     agent_id: Uuid,
@@ -36,13 +37,19 @@ pub async fn insert_llm_call(
     _duration_ms: Option<i32>,
     prompts: &[(String, String)], // (role, content)
 ) -> Result<Uuid, AppError> {
-    let mut tx = pool.begin().await.map_err(|e| AppError::Database(e))?;
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
 
     // Compute simple hashes for audit trail
-    let prompt_text: String = prompts.iter().map(|(r, c)| format!("{r}:{c}")).collect::<Vec<_>>().join("\n");
+    let prompt_text: String = prompts
+        .iter()
+        .map(|(r, c)| format!("{r}:{c}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     let prompt_hash = format!("{:016x}", {
         let mut h: u64 = 0;
-        for b in prompt_text.as_bytes() { h = h.wrapping_mul(31).wrapping_add(*b as u64); }
+        for b in prompt_text.as_bytes() {
+            h = h.wrapping_mul(31).wrapping_add(*b as u64);
+        }
         h
     });
     let response_hash = "pending".to_string();
@@ -73,9 +80,10 @@ pub async fn insert_llm_call(
     for (i, (_role, content)) in prompts.iter().enumerate() {
         if i == 0 {
             // First prompt is system, rest are messages
-            let messages: Vec<serde_json::Value> = prompts[1..].iter().map(|(r, c)| {
-                serde_json::json!({"role": r, "content": c})
-            }).collect();
+            let messages: Vec<serde_json::Value> = prompts[1..]
+                .iter()
+                .map(|(r, c)| serde_json::json!({"role": r, "content": c}))
+                .collect();
             sqlx::query(
                 "INSERT INTO llm_call_prompts (llm_call_id, system_prompt, messages_json, response_text)
                  VALUES ($1, $2, $3, $4)"
@@ -90,6 +98,6 @@ pub async fn insert_llm_call(
         }
     }
 
-    tx.commit().await.map_err(|e| AppError::Database(e))?;
+    tx.commit().await.map_err(AppError::Database)?;
     Ok(call_id)
 }

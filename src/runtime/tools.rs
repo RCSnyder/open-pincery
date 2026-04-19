@@ -2,7 +2,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tracing::info;
 
-use super::llm::{ToolCallRequest, ToolDefinition, FunctionDef};
+use super::llm::{FunctionDef, ToolCallRequest, ToolDefinition};
 use crate::observability::metrics as m;
 
 pub enum ToolResult {
@@ -105,11 +105,7 @@ pub async fn dispatch_tool(tool_call: &ToolCallRequest) -> ToolResult {
 async fn execute_shell(command: &str) -> ToolResult {
     use tokio::process::Command;
 
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .output()
-        .await;
+    let output = Command::new("sh").arg("-c").arg(command).output().await;
 
     match output {
         Ok(out) => {

@@ -20,6 +20,7 @@ pub struct Event {
     pub created_at: DateTime<Utc>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn append_event(
     pool: &PgPool,
     agent_id: Uuid,
@@ -60,7 +61,7 @@ pub async fn recent_events(
         "SELECT * FROM events
          WHERE agent_id = $1
          ORDER BY created_at DESC
-         LIMIT $2"
+         LIMIT $2",
     )
     .bind(agent_id)
     .bind(limit)
@@ -77,7 +78,7 @@ pub async fn events_since(
     let events = sqlx::query_as::<_, Event>(
         "SELECT * FROM events
          WHERE agent_id = $1 AND created_at > $2
-         ORDER BY created_at ASC"
+         ORDER BY created_at ASC",
     )
     .bind(agent_id)
     .bind(since)
@@ -93,7 +94,7 @@ pub async fn has_pending_events(
 ) -> Result<bool, AppError> {
     let count = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM events
-         WHERE agent_id = $1 AND created_at > $2 AND event_type = 'message_received'"
+         WHERE agent_id = $1 AND created_at > $2 AND event_type = 'message_received'",
     )
     .bind(agent_id)
     .bind(since)

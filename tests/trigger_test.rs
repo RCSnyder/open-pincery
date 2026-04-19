@@ -8,14 +8,23 @@ use sqlx::postgres::PgListener;
 async fn test_notify_on_message() {
     let pool = common::test_pool().await;
 
-    let u = user::create_local_admin(&pool, "trig@test.com", "Trig").await.unwrap();
-    let org = workspace::create_organization(&pool, "trig", "trig", u.id).await.unwrap();
-    let ws = workspace::create_workspace(&pool, org.id, "trig", "trig", u.id).await.unwrap();
-    let a = agent::create_agent(&pool, "trig-agent", ws.id, u.id).await.unwrap();
+    let u = user::create_local_admin(&pool, "trig@test.com", "Trig")
+        .await
+        .unwrap();
+    let org = workspace::create_organization(&pool, "trig", "trig", u.id)
+        .await
+        .unwrap();
+    let ws = workspace::create_workspace(&pool, org.id, "trig", "trig", u.id)
+        .await
+        .unwrap();
+    let a = agent::create_agent(&pool, "trig-agent", ws.id, u.id)
+        .await
+        .unwrap();
 
     // Set up listener
-    let db_url = std::env::var("TEST_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://open_pincery:open_pincery@localhost:5432/open_pincery_test".into());
+    let db_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
+        "postgres://open_pincery:open_pincery@localhost:5432/open_pincery_test".into()
+    });
     let mut listener = PgListener::connect(&db_url).await.unwrap();
     listener.listen("agent_wake").await.unwrap();
 
@@ -27,13 +36,10 @@ async fn test_notify_on_message() {
         .unwrap();
 
     // Receive notification
-    let notification = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        listener.recv(),
-    )
-    .await
-    .expect("Timed out waiting for notification")
-    .expect("Failed to receive notification");
+    let notification = tokio::time::timeout(std::time::Duration::from_secs(5), listener.recv())
+        .await
+        .expect("Timed out waiting for notification")
+        .expect("Failed to receive notification");
 
     assert_eq!(notification.payload(), a.id.to_string());
 }
