@@ -447,3 +447,146 @@ Rate limits are hardcoded in `AppState::new()` (10 req/min bootstrap, 60 req/min
 ### Complexity Exceptions (v2)
 
 None new — all v2 additions are small, self-contained modules.
+
+---
+
+## v3 Design Addendum — Operational Observability & Release Hygiene
+
+### Scope
+
+Additive only. No runtime behaviour changes. Six new concerns:
+
+1. **CI workflow** (AC-16) — GitHub Actions fmt/clippy/test/deny gate
+2. **JSON logging toggle** (AC-17) — `LOG_FORMAT` env var switches `tracing-subscriber` format
+3. **Metrics listener** (AC-18) — separate HTTP port serving Prometheus text, opt-in via `METRICS_ADDR`
+4. **Health / readiness split** (AC-19) — `/health` stays liveness-only, new `/ready` does dependency checks
+5. **Release workflow + SBOM** (AC-20) — GitHub Actions tag-triggered build, CycloneDX SBOM, cosign keyless signing
+6. **Runbooks** (AC-21) — five `docs/runbooks/*.md` files, each with Symptom / Diagnostic / Remediation / Escalation
+
+### New Files
+
+```
+.github/
+  workflows/
+    ci.yml                       # AC-16: fmt, clippy, test (with Postgres service), cargo-deny
+    release.yml                  # AC-20: tag build + SBOM + cosign sign + GitHub Release
+.cargo/
+  config.toml                    # AC-20: release profile with LTO + strip
+deny.toml                        # AC-16: cargo-deny config (advisories + licenses + bans + sources)
+src/
+  observability/
+    mod.rs                       # AC-17/18: logging init + metrics init + metrics handle type
+    logging.rs                   # AC-17: init_logging() — human vs JSON toggle
+    metrics.rs                   # AC-18: init_metrics() — PrometheusHandle + metric name constants
+    server.rs                    # AC-18: spawn_metrics_server(addr, handle) — separate axum app
+  api/
+    health.rs                    # AC-19: /health (liveness) + /ready (DB + migrations + tasks)
+docs/
+  runbooks/
+    stale-wake-triage.md         # AC-21
+    db-restore.md                # AC-21
+    migration-rollback.md        # AC-21
+    rate-limit-tuning.md         # AC-21
+    webhook-debugging.md         # AC-21
+tests/
+  observability_test.rs          # AC-17 + AC-18: JSON log format + metrics endpoint smoke
+  health_test.rs                 # AC-19: /health stays 200 when DB unreachable; /ready flips
+```
+
+### New Dependencies (Cargo.toml)
+
+```toml
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }
+```
+
+Both are maintained by the `tokio-rs/tracing`-adjacent ecosystem, lightweight, no transitive heavy deps. The `metrics` facade is crate-local (no runtime overhead when unused); the exporter only activates when `METRICS_ADDR` is set. No new dependency for logging — `tracing-subscriber` already has `json` feature enabled in Cargo.toml.
+
+No new runtime dependencies for CI / release — those are pure GitHub Actions YAML.
+
+### New Interfaces
+
+```rust
+// src/observability/logging.rs
+pub fn init_logging() {
+    let json = std::env::var("LOG_FORMAT").ok().as_deref() == Some("json");
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    if json {
+        tracing_subscriber::fmt().with_env_filter(env_filter).json().init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    }
+}
+
+// src/observability/metrics.rs
+pub struct MetricsState { pub handle: PrometheusHandle }
+
+pub fn init_metrics() -> MetricsState { /* PrometheusBuilder::new().install_recorder() */ }
+
+// Canonical metric names (counters unless noted)
+pub const WAKE_STARTED: &str = "open_pincery_wake_started_total";
+pub const WAKE_COMPLETED: &str = "open_pincery_wake_completed_total";   // labels: reason
+pub const LLM_CALL: &str = "open_pincery_llm_call_total";
+pub const LLM_PROMPT_TOKENS: &str = "open_pincery_llm_prompt_tokens_total";
+pub const LLM_COMPLETION_TOKENS: &str = "open_pincery_llm_completion_tokens_total";
+pub const TOOL_CALL: &str = "open_pincery_tool_call_total";             // labels: tool
+pub const WEBHOOK_RECEIVED: &str = "open_pincery_webhook_received_total";
+pub const RATE_LIMIT_REJECTED: &str = "open_pincery_rate_limit_rejected_total";
+pub const ACTIVE_WAKES: &str = "open_pincery_active_wakes";             // gauge
+pub const WAKE_DURATION: &str = "open_pincery_wake_duration_seconds";   // histogram
+
+// src/observability/server.rs
+pub async fn spawn_metrics_server(addr: SocketAddr, handle: PrometheusHandle, cancel: CancellationToken) -> Result<()>
+// Binds a separate axum Router with only GET /metrics → handle.render()
+
+// src/api/health.rs
+pub async fn health() -> impl IntoResponse { (StatusCode::OK, Json(json!({"status":"ok"}))) }
+
+pub async fn ready(State(app): State<AppState>) -> impl IntoResponse {
+    // Check 1: DB round-trip
+    if sqlx::query("SELECT 1").execute(&app.pool).await.is_err() {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"status":"not_ready","failing":"database"})));
+    }
+    // Check 2: expected migration count matches
+    // Check 3: app.background_alive flag (set by listener + stale tasks)
+    (StatusCode::OK, Json(json!({"status":"ready"})))
+}
+```
+
+### Integration Points
+
+| Change | Where | Why |
+|---|---|---|
+| Replace `tracing_subscriber::fmt::init()` in `main.rs` | `src/main.rs` | AC-17 toggle |
+| Record counters inside existing runtime code | `src/runtime/wake_loop.rs`, `src/runtime/maintenance.rs`, `src/runtime/llm.rs`, `src/runtime/tools.rs`, `src/api/webhooks.rs`, `src/api/mod.rs` rate limit branch | AC-18 — one-line `metrics::counter!()` calls at existing natural points |
+| Move `/health` handler out of `main.rs`, add `/ready` | `src/api/health.rs` | AC-19 |
+| Add `background_alive: Arc<AtomicBool>` to `AppState` | `src/lib.rs` | AC-19 — readiness depends on it |
+| Conditionally spawn metrics server | `src/main.rs` | AC-18 — only when `METRICS_ADDR` set |
+
+### External Integrations (new)
+
+| Integration | Failure mode | Test strategy |
+|---|---|---|
+| GitHub Actions (CI + release) | Workflow turns red | Real run on a feature branch — manual gate |
+| cosign keyless (sigstore) | Signing step fails; release still publishes unsigned if step is `continue-on-error: false` (it is not) → release fails cleanly | Manual verification on first release tag |
+| Prometheus scraper (optional, operator-supplied) | None — we're the producer | Smoke test with `curl` in `observability_test.rs` |
+
+### Observability
+
+v3 *is* the observability story. After v3:
+
+- **Logs**: stderr/stdout, optionally JSON (AC-17)
+- **Metrics**: Prometheus pull on opt-in port (AC-18)
+- **Health**: `/health` and `/ready` endpoints (AC-19)
+- **Release provenance**: signed artifacts + SBOM (AC-20)
+- **Operator runbooks**: written down, not tribal (AC-21)
+
+Traces (OTEL) explicitly deferred to v4+.
+
+### Complexity Exceptions (v3)
+
+None. All additions are small, isolated modules. `src/observability/mod.rs` + `logging.rs` + `metrics.rs` + `server.rs` together should fit under 300 lines.
+
+### Open Questions (v3)
+
+None. All choices are final.

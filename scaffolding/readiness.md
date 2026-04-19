@@ -160,3 +160,63 @@ READY
 ### v2 Exceptions
 
 - **v2 Slice 1 (Graceful Shutdown) touches 4 files**: `main.rs`, `background/listener.rs`, `background/stale.rs`, `Cargo.toml`. The `CancellationToken` must be threaded into every long-running task, making this inherently cross-cutting. Each file change is small (adding token parameter + select! on cancellation).
+
+---
+
+## v3 Truths
+
+- **T-18**: `.github/workflows/ci.yml` runs fmt, clippy (`-D warnings`), tests (against a real Postgres 16 service container), and `cargo deny check` on every push and pull request. CI is the authoritative gate — local "it compiles on my machine" is no longer sufficient.
+- **T-19**: Logging format is controlled by `LOG_FORMAT`. Default is human-readable; `LOG_FORMAT=json` produces one JSON object per line with `timestamp`, `level`, `target`, `message`, and span context fields. Other values fall back to the default.
+- **T-20**: The Prometheus metrics listener is opt-in. When `METRICS_ADDR` is unset, no listener is started and no extra port is bound. When set, a separate axum app binds to that address and serves only `GET /metrics`. The main API port is never used for `/metrics`.
+- **T-21**: `/health` is liveness only (returns 200 whenever the process is up). `/ready` is readiness (returns 200 only when DB reachable, migrations applied, background tasks running; 503 otherwise with `failing` field naming the failed check). Load balancers and container orchestrators should use `/ready` for traffic routing; `/health` for restart decisions.
+- **T-22**: Release artifacts for tags matching `v*` are reproducibly built with LTO + strip, signed with cosign keyless (GitHub OIDC), and accompanied by a CycloneDX SBOM and SHA-256 checksums. Consumers can verify provenance with `cosign verify-blob` without possessing any long-lived keys.
+- **T-23**: Operator knowledge for stale wakes, DB restore, migration rollback, rate-limit tuning, and webhook debugging lives in `docs/runbooks/` as markdown files with Symptom / Diagnostic Commands / Remediation / Escalation sections. Not tribal, not Slack threads, not in the head of whoever wrote it.
+
+## v3 Key Links
+
+- **AC-16 → CI workflow → `.github/workflows/ci.yml` → green run proof** (GitHub Actions log)
+- **AC-17 → `src/observability/logging.rs::init_logging` → `tests/observability_test.rs::json_log_format_emits_valid_json` → stdout capture with `LOG_FORMAT=json` parsed as JSON**
+- **AC-18 → `src/observability/metrics.rs` + `src/observability/server.rs` → `tests/observability_test.rs::metrics_endpoint_exposes_wake_counters` → curl `/metrics` after triggering a wake, grep for counter > 0**
+- **AC-19 → `src/api/health.rs::{health, ready}` → `tests/health_test.rs::ready_returns_503_when_db_unreachable` → stop DB pool, call `/ready`, expect 503 with failing=database**
+- **AC-20 → `.github/workflows/release.yml` + `.cargo/config.toml` → manual tag `v0.3.0-rc1` → `cosign verify-blob` on downloaded artifact**
+- **AC-21 → `docs/runbooks/*.md` (5 files) → REVIEW agent confirms structure + concrete commands**
+
+## v3 Acceptance Criteria Coverage
+
+| AC | Truth(s) | Planned test | Planned runtime proof |
+|---|---|---|---|
+| AC-16 | T-18 | CI workflow itself running green | GitHub Actions log showing all 4 steps pass |
+| AC-17 | T-19 | `observability_test.rs::json_log_format_emits_valid_json` | Start server `LOG_FORMAT=json`, capture stderr, each line `serde_json::from_str::<Value>` succeeds |
+| AC-18 | T-20 | `observability_test.rs::metrics_endpoint_exposes_wake_counters` | `METRICS_ADDR=127.0.0.1:0`, trigger wake, GET `/metrics`, parse Prometheus text, confirm `open_pincery_wake_started_total >= 1` |
+| AC-19 | T-21 | `health_test.rs::health_stays_up_when_db_down`, `health_test.rs::ready_fails_when_db_down` | Close pool, call `/health` → 200, call `/ready` → 503 with `{"failing":"database"}` |
+| AC-20 | T-22 | Release workflow YAML lint + test release on RC tag | Download `open-pincery-v0.3.0-rc1-linux-x86_64`, run `cosign verify-blob --certificate-identity-regexp ...`, exit 0 |
+| AC-21 | T-23 | REVIEW agent validates all 5 files exist with 4 required sections and concrete commands | `grep -l "^## Symptom" docs/runbooks/*.md \| wc -l` equals 5 |
+
+## v3 Scope Reduction Risks
+
+- **AC-18 (metrics)**: Tempting to skip the histogram (wake duration) if `metrics-exporter-prometheus` bucket config is fiddly. The histogram is in scope. Default buckets are acceptable — we do not need to tune them.
+- **AC-19 (readiness)**: Tempting to check only the DB pool and skip the background-tasks check. The `background_alive` flag must be present and checked. A server with a dead listener should fail readiness.
+- **AC-20 (release)**: Tempting to ship unsigned binaries to "get the first release out." This AC is signed-or-not-shipped. If cosign keyless breaks on first attempt, we debug it rather than skip signing.
+- **AC-21 (runbooks)**: Tempting to write thin runbooks with vague prose. Diagnostic commands must be concrete copy-paste shell invocations. Review will catch and reject vague runbooks.
+- **AC-17 (logging)**: Tempting to leave existing ad-hoc `println!` calls (if any) untouched. Any stdout writes from runtime code must go through `tracing` so they respect the JSON toggle. Audit during BUILD.
+
+## v3 Clarifications Needed
+
+None.
+
+## v3 Build Order
+
+1. **AC-17 — JSON logging** (v3 Slice 1): Minimal, self-contained. `src/observability/logging.rs` + wire in `main.rs`. Unblocks observable BUILD for later slices.
+2. **AC-19 — Health/ready split** (v3 Slice 2): Small, self-contained. Before metrics because readiness needs the `background_alive` flag which we wire once and then reuse.
+3. **AC-18 — Metrics** (v3 Slice 3): Depends on the observability module scaffolding from Slice 1 and the `AppState` plumbing from Slice 2. Add counters incrementally across existing runtime files.
+4. **AC-16 — CI workflow** (v3 Slice 4): Written once the new code exists so CI actually runs the new tests. Includes `deny.toml` with an initial conservative allow-list.
+5. **AC-21 — Runbooks** (v3 Slice 5): Pure docs, parallelizable. Uses the metrics and health endpoints from earlier slices in its diagnostic commands.
+6. **AC-20 — Release workflow + SBOM** (v3 Slice 6): Last. Needs `.cargo/config.toml` release profile, `deny.toml` already in place, and tested on a real tag. This is the most operator-facing change and should follow everything else being green.
+
+## v3 Complexity Exceptions
+
+None. All slices are small, self-contained, and within the build-discipline slice-size limits (≤5 files, ≤100 lines before verification).
+
+## Verdict (v3)
+
+READY. Proceed to BUILD.

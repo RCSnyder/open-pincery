@@ -142,3 +142,58 @@ $0 — same as v1. Docker is optional; bare-metal still works.
 - Webhook UI management (creating/rotating secrets via UI) — v3
 - Rate limit configuration per-workspace — v3
 - Health check page in UI — nice-to-have, not critical
+
+---
+
+## v3 — Operational Observability & Release Hygiene
+
+### Problem (v3)
+
+v1 and v2 delivered a working runtime with deployment scaffolding, but the project still lacks the operational foundation required by its own declared **skyscraper** quality tier: no CI, no metrics, no structured machine-readable logs, no signed release artifacts, no SBOM, no split liveness/readiness checks, and no operator runbooks. Without these, we cannot safely add sandboxing (v4+) or multi-instance coordination — you can't operate what you can't observe.
+
+v3 closes the skyscraper-tier operational gate and unblocks every later iteration. Scope is intentionally narrow: observability and release hygiene only, no new runtime features.
+
+### Changes from v2
+
+- Additive only: new observability module, new optional metrics listener, new logging format toggle, new CI workflow, new release workflow, new runbooks
+- No changes to core runtime, API semantics, database schema, or existing ACs
+- New optional dependencies gated by features/env vars; default binary size and behaviour unchanged
+
+### v3 Acceptance Criteria
+
+- **AC-16** (CI Pipeline): `.github/workflows/ci.yml` triggers on push and pull request. Runs, in order: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (against a PostgreSQL 16 service container with `TEST_DATABASE_URL` set), and `cargo deny check` (advisories + licenses + bans + sources). Any step failing fails the workflow. Verified by a green run on the branch that introduces the workflow, with the job log showing all four steps passing.
+
+- **AC-17** (Structured JSON Logging): When the environment variable `LOG_FORMAT=json` is set, `tracing-subscriber` emits one JSON object per log line with fields `timestamp`, `level`, `target`, `message`, plus any span context. When `LOG_FORMAT` is unset or any other value, output remains human-readable (current behaviour). Verified by starting the server with `LOG_FORMAT=json`, triggering a wake via a message, and confirming every stdout line parses as valid JSON and contains the expected top-level fields.
+
+- **AC-18** (Prometheus Metrics Endpoint): When the environment variable `METRICS_ADDR` is set (for example `127.0.0.1:9090`), a dedicated HTTP listener binds to that address and serves `GET /metrics` in Prometheus text format. The main API port never serves `/metrics`. Metrics exposed: counters for wake starts, wake completions by termination reason, LLM calls, LLM prompt and completion tokens, tool executions, webhook receipts, and rate-limit rejections; a gauge for active wake count; a histogram for wake duration in seconds. When `METRICS_ADDR` is unset, no metrics listener is started. Verified by starting with `METRICS_ADDR=127.0.0.1:9090`, triggering at least one wake, scraping `/metrics`, and confirming non-zero counter values and well-formed Prometheus output.
+
+- **AC-19** (Health / Readiness Split): `GET /health` returns `200 {"status":"ok"}` whenever the HTTP server is running (liveness only — no dependency checks). `GET /ready` returns `200 {"status":"ready"}` only when: the database pool can execute `SELECT 1`, all expected migrations are applied, and background tasks (listener, stale recovery) are running; otherwise returns `503` with a JSON body naming the failing check. Verified by stopping the PostgreSQL container mid-run and confirming `/health` continues to return 200 while `/ready` returns 503 with `database` listed as the failing check.
+
+- **AC-20** (Signed Release Artifacts with SBOM): `.github/workflows/release.yml` triggers on tags matching `v*`. It builds release binaries for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` using a release profile defined in `.cargo/config.toml` (LTO enabled, symbols stripped). It generates a CycloneDX SBOM via `cargo cyclonedx`. It signs each binary and the SBOM with cosign keyless signing backed by GitHub Actions OIDC. It publishes binaries, SHA-256 checksums, cosign signatures and certificates, and the SBOM to the GitHub Release for that tag. Verified by pushing tag `v0.3.0-rc1`, downloading the published artifacts, and running `cosign verify-blob` successfully against at least one artifact.
+
+- **AC-21** (Operator Runbooks): `docs/runbooks/` contains at least five runbooks: `stale-wake-triage.md`, `db-restore.md`, `migration-rollback.md`, `rate-limit-tuning.md`, and `webhook-debugging.md`. Each runbook contains the four sections: **Symptom**, **Diagnostic Commands**, **Remediation**, **Escalation**. Diagnostic commands must be concrete shell commands an operator can copy-paste, not prose. Verified by the REVIEW agent confirming all five files exist, each has all four sections, and each diagnostic command is a real executable invocation.
+
+### v3 Deployment Target
+
+Same as v1/v2: `self_host_individual`. Observability features are opt-in; a self-hoster who sets no observability env vars gets exactly the same behaviour as v2.
+
+### v3 Estimated Cost
+
+$0 — all tooling is free and OSS. Metrics scraping and log aggregation, if the operator runs them, use their existing infrastructure.
+
+### v3 Quality Tier
+
+Still skyscraper. v3 closes the CI / SBOM / observability / runbook gaps that were always required by that tier but were carried forward from v1 and v2 as implicit debt.
+
+### v3 Clarifications Needed
+
+None. All six ACs have unambiguous pass/fail criteria and do not depend on external business decisions.
+
+### v3 Deferred (from this iteration)
+
+- OpenTelemetry distributed tracing (OTLP export) — v4+. Rationale: the self-host target does not justify the binary size and dependency cost until a real operator requests it.
+- Log aggregation stack (Loki / Grafana deployment manifests) — v4+. Runbooks will describe the pattern; we will not ship the stack.
+- Prometheus alerting rules and Grafana dashboards as code — v4+. Example queries will live in the metrics runbook.
+- Multi-instance coordination and leader election for background jobs — v4+.
+- Performance baselining and load-test harness — separate iteration.
+- Binary signing with non-keyless cosign (hardware-token backed) — future enterprise release line.
