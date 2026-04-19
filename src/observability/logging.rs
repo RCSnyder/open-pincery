@@ -123,6 +123,9 @@ mod tests {
                 saw_event = true;
             }
         }
-        assert!(saw_event, "expected to see the emitted test event in JSON output");
+        assert!(
+            saw_event,
+            "expected to see the emitted test event in JSON output"
+        );
     }
 }
