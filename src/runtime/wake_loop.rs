@@ -19,7 +19,8 @@ pub async fn run_wake_loop(
 ) -> Result<String, AppError> {
     info!(agent_id = %agent_id, wake_id = %wake_id, "Starting wake loop");
 
-    let mut termination_reason = "completed".to_string();
+    #[allow(unused_assignments)]
+    let mut termination_reason = String::new();
 
     loop {
         // Check iteration cap

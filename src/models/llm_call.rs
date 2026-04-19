@@ -70,7 +70,7 @@ pub async fn insert_llm_call(
 
     let call_id = row.0;
 
-    for (i, (role, content)) in prompts.iter().enumerate() {
+    for (i, (_role, content)) in prompts.iter().enumerate() {
         if i == 0 {
             // First prompt is system, rest are messages
             let messages: Vec<serde_json::Value> = prompts[1..].iter().map(|(r, c)| {

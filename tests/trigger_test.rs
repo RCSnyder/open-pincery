@@ -1,6 +1,6 @@
 mod common;
 
-use open_pincery::models::{agent, event, user, workspace};
+use open_pincery::models::{agent, user, workspace};
 use sqlx::postgres::PgListener;
 
 /// AC-7: LISTEN/NOTIFY triggers on message send
