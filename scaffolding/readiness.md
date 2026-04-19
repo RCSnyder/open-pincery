@@ -1,10 +1,12 @@
-# Readiness: Open Pincery v1
+# Readiness: Open Pincery
 
 ## Verdict
 
 READY
 
-## Truths
+---
+
+## v1 Truths
 
 - **T-1**: CAS (`UPDATE ... WHERE status = $expected RETURNING *`) is the ONLY mechanism for wake acquisition. No agent transitions to `awake` without winning a CAS race. Concurrent attempts are naturally coalesced.
 - **T-2**: The `events` table is append-only. No UPDATE, DELETE, or ALTER operations on event rows. Events are the system of record.
@@ -19,7 +21,17 @@ READY
 - **T-11**: No secrets or credential values appear in source code. All sensitive config flows through environment variables.
 - **T-12**: Shell tool execution uses basic subprocess for v1 (Zerobox deferred to Phase 2). This is a conscious scope decision, not a placeholder.
 
-## Key Links
+## v2 Truths
+
+- **T-13**: On SIGTERM/SIGINT the process stops accepting new connections, drains in-flight requests and active wake loops for up to 30 seconds, then exits with code 0. No abrupt termination of running wakes.
+- **T-14**: `docker compose up` brings a fully functional stack (app + postgres) from zero. The app container waits for Postgres readiness before accepting traffic.
+- **T-15**: Per-IP rate limiting is enforced at the middleware layer for every API route. Bootstrap gets a stricter limit (10 req/min) than authenticated endpoints (60 req/min). Exceeding the limit returns HTTP 429 with `Retry-After` header.
+- **T-16**: Webhook payloads are verified with HMAC-SHA256 using a per-agent `webhook_secret`. Invalid signatures are rejected with 401 before any side effects occur.
+- **T-17**: Webhook idempotency is enforced via a deduplication table keyed by `X-Idempotency-Key`. Duplicate deliveries return 200 without re-inserting events or re-triggering wakes.
+- **T-18**: Disabled agents (`is_enabled = false`) reject wake acquisition at the CAS level. The `WHERE is_enabled = TRUE` clause in `acquire_wake` and `drain_reacquire` guarantees this structurally.
+- **T-19**: Soft-delete sets `is_enabled = false` and `disabled_reason = 'deleted'`. No rows are removed from the database. The agent's event log, projections, and wake summaries remain intact.
+
+## v1 Key Links
 
 - **L-1** AC-1 → `models/agent.rs` (acquire_wake, transition_to_maintenance, release_to_asleep, drain_reacquire CAS functions) → `tests/lifecycle_test.rs` → Runtime proof: two concurrent wake attempts, exactly one wins
 - **L-2** AC-2 → `models/event.rs` (append_event, recent_events) + migration `create_events.sql` → `tests/event_log_test.rs` → Runtime proof: send message → wake → query event log → verify complete sequence with ordering
@@ -31,6 +43,14 @@ READY
 - **L-8** AC-8 → `background/stale.rs` → `tests/stale_test.rs` → Runtime proof: set agent to `awake` with wake_started_at 3 hours ago → run recovery job → verify status = `asleep` + `stale_wake_recovery` event
 - **L-9** AC-9 → `runtime/drain.rs` + `models/event.rs` (has_pending_events) + `models/agent.rs` (drain_reacquire) → `tests/drain_test.rs` → Runtime proof: send message during active wake → confirm drain check triggers re-acquire after maintenance
 - **L-10** AC-10 → `api/bootstrap.rs` + `db.rs` (migration runner) → `tests/bootstrap_test.rs` → Runtime proof: start with empty DB → call bootstrap endpoint → verify user, org, workspace rows created
+
+## v2 Key Links
+
+- **L-11** AC-11 → `main.rs` (tokio signal handler + `CancellationToken`) + axum `with_graceful_shutdown` + `background/listener.rs` + `background/stale.rs` (token-aware loops) → `tests/shutdown_test.rs` → Runtime proof: start server, trigger a wake via message, send SIGTERM, confirm wake completes and process exits with code 0 within 30s
+- **L-12** AC-12 → `Dockerfile` (multi-stage build) + `docker-compose.yml` (app + postgres services, healthcheck) → Manual verification → Runtime proof: `docker compose up` from clean state, curl `GET /health` returns `{"status":"ok"}` within 60s
+- **L-13** AC-13 → `api/mod.rs` (tower-governor middleware, two rate-limit tiers) + `config.rs` (`RATE_LIMIT_PER_MINUTE`, `RATE_LIMIT_BOOTSTRAP_PER_MINUTE`) → `tests/rate_limit_test.rs` → Runtime proof: send 61 requests in rapid succession to an authenticated endpoint, confirm 61st returns 429 with `Retry-After` header
+- **L-14** AC-14 → `api/webhooks.rs` (HMAC-SHA256 verify, idempotency dedup) + `models/agent.rs` (`webhook_secret` column) + migration `add_webhook_secrets.sql` + migration `create_webhook_dedup.sql` + `models/event.rs` (append `webhook_received` event) → `tests/webhook_test.rs` → Runtime proof: send signed webhook → confirm `webhook_received` event in log + wake triggered; resend same webhook → confirm 200 without duplicate event; send bad signature → confirm 401
+- **L-15** AC-15 → `api/agents.rs` (PATCH + DELETE handlers) + `models/agent.rs` (`update_agent`, `soft_delete_agent`) → `tests/agent_mgmt_test.rs` → Runtime proof: PATCH to disable agent → send message → confirm no wake occurs; PATCH to rename → confirm name changed; DELETE → confirm `is_enabled = false` and `disabled_reason = 'deleted'`
 
 ## Acceptance Criteria Coverage
 
@@ -46,8 +66,15 @@ READY
 | AC-8 | Slice 9: Stale wake recovery | `stale_test.rs` — set agent status='awake', wake_started_at=NOW()-3h → run stale recovery job → assert status='asleep', wake_id=NULL, stale_wake_recovery event exists | Start stale recovery background task → manipulate time or directly set stale timestamp → verify recovery within one job cycle | Tests both `awake` and `maintenance` stale states per AC-8 |
 | AC-9 | Slice 8: Drain check | `drain_test.rs` — complete wake → enter maintenance → insert message_received during maintenance → drain check finds event → assert drain_reacquire CAS succeeds → new wake starts | Send message mid-wake → let original wake complete + maintenance → verify a second wake starts without a new NOTIFY by checking for two wake_start events with same message visible | Most complex sequencing; needs careful test setup with timing control |
 | AC-10 | Slice 1: Bootstrap + migrations | `bootstrap_test.rs` — start with empty DB → run migrations → POST /api/bootstrap with correct token → verify 201 + user/org/workspace rows; repeat call → verify 409 or idempotent behavior | Start binary against empty Postgres → call bootstrap → query tables directly → confirm rows exist with expected roles | First slice; all other slices depend on this working |
+| AC-11 | v2 Slice 1: Graceful shutdown | `shutdown_test.rs` — start server in a child process, send a message to trigger wake, send SIGTERM, assert process exits 0 within 30s; assert no partial wake events (wake_end must exist if wake_start exists) | Start server, trigger wake, send SIGTERM via `nix::sys::signal` or `tokio::signal`, confirm clean exit with code 0 and all background tasks stopped | Requires `CancellationToken` threaded through listener + stale + wake_loop; must also test SIGINT path |
+| AC-12 | v2 Slice 2: Docker Compose | Manual test — `Dockerfile` multi-stage build + `docker-compose.yml` with app + postgres services + healthcheck | `docker compose up` from clean state → curl `GET /health` → assert `{"status":"ok"}` within 60s; `docker compose down` clean | No automated test — Docker-in-Docker is out of scope; verified manually during BUILD |
+| AC-13 | v2 Slice 3: Rate limiting | `rate_limit_test.rs` — send 61 requests to authenticated endpoint → assert first 60 return 200, 61st returns 429 with `Retry-After` header; separate test for bootstrap at 10 req/min | Start server, burst 61 authenticated requests → verify 429 + header; burst 11 bootstrap requests → verify 429 | Needs `tower-governor` or equivalent crate added to `Cargo.toml` |
+| AC-14 | v2 Slice 4: Webhook ingress | `webhook_test.rs` — compute HMAC-SHA256 of payload with agent webhook_secret, send POST with valid signature → assert 202 + `webhook_received` event; send with bad signature → assert 401; resend with same idempotency key → assert 200 without duplicate event | Send signed webhook to `/api/agents/:id/webhooks` → query event log → confirm `webhook_received` with correct content; resend → confirm no new event row; bad signature → confirm 401 with no event | Requires 2 new migrations (webhook_secret column + dedup table) |
+| AC-15 | v2 Slice 5: Agent management | `agent_mgmt_test.rs` — PATCH disable agent → assert `is_enabled = false`; send message → assert no wake (acquire_wake returns None); PATCH enable → send message → assert wake succeeds; PATCH rename → assert name changed; DELETE → assert `is_enabled = false, disabled_reason = 'deleted'` | PATCH to disable → POST message → query agent → confirm still asleep; PATCH enable → POST message → confirm wake; DELETE → confirm soft-delete fields | CAS `WHERE is_enabled = TRUE` already in v1 acquire_wake — just needs the management endpoints to toggle the flag |
 
 ## Scope Reduction Risks
+
+### v1 Risks (carried forward)
 
 - **Shell tool becomes a no-op stub**: AC-4 requires the agent to "make at least one tool call." If the shell tool is implemented as a stub that returns a canned string without actually executing a subprocess, the wake loop appears to work but the system is not a real agent runtime. BUILD must implement `tokio::process::Command` with stdout/stderr capture, timeout, and exit code recording.
 
@@ -61,40 +88,75 @@ READY
 
 - **LLM call auditing silently dropped**: T-7 requires every LLM call to be recorded. If `llm_calls` inserts are commented out or made optional-and-never-enabled, observability is gone. Tests must query `llm_calls` after wake + maintenance and verify rows exist.
 
+### v2 Risks
+
+- **Graceful shutdown waits 0 seconds**: AC-11 requires a 30-second drain window. If shutdown immediately cancels all tasks (e.g. token is cancelled without awaiting in-flight work), active wakes are terminated mid-flight. The test must start a wake, send SIGTERM, and confirm the wake completes before exit.
+
+- **Rate limiting applied but with wrong limits or missing `Retry-After`**: AC-13 specifies exact thresholds (60/min auth, 10/min bootstrap) and requires `Retry-After` header. A rate limiter that uses different defaults or omits the header technically fails the criterion even though limiting occurs.
+
+- **Webhook HMAC check uses timing-unsafe comparison**: T-16 requires HMAC-SHA256 verification. Using `==` instead of constant-time comparison introduces a timing side-channel. BUILD must use `hmac` crate's `verify_slice` or equivalent constant-time comparison.
+
+- **Webhook dedup table grows unboundedly**: The idempotency dedup table has no TTL or cleanup. For v2, this is acceptable (mentioned as a bounded assumption below), but BUILD should not silently skip the dedup insert.
+
+- **Agent soft-delete actually hard-deletes**: AC-15 requires `DELETE` to set `is_enabled = false` and `disabled_reason = 'deleted'`, not to remove the row. The test must query the agent after DELETE and confirm the row still exists with correct fields.
+
 ## Clarifications Needed
 
-- **Prompt character budget**: AC-3 says "character-based trim" but no specific limit is defined in scope or design. Scope defers "context character cap enforcement" to Phase 2 but the trim function itself is in-scope. **Bounded assumption**: use a configurable `MAX_PROMPT_CHARS` env var defaulting to 100,000 characters. This does not change the pass/fail of AC-3 — the test verifies trim *behavior* regardless of the specific limit.
+### v1 Clarifications (carried forward)
 
-- **Append-only enforcement mechanism**: AC-2 says events are "never updated or deleted." The design enforces this by simply never issuing UPDATE/DELETE in application code. There is no DB-level trigger or constraint preventing it. **Bounded assumption**: application-level enforcement is sufficient for v1. A DB trigger (`BEFORE UPDATE OR DELETE ON events ... RAISE EXCEPTION`) can be added later as defense-in-depth. This does not change AC-2's test — the test verifies the application never issues mutations.
+- **Prompt character budget**: AC-3 says "character-based trim" but no specific limit is defined in scope or design. **Bounded assumption**: use a configurable `MAX_PROMPT_CHARS` env var defaulting to 100,000 characters. This does not change the pass/fail of AC-3.
 
-- **Bootstrap idempotency**: AC-10 says "on first run with an empty database" but doesn't specify behavior on repeat calls. **Bounded assumption**: the bootstrap endpoint returns 409 Conflict if bootstrap has already been completed (check for existing local_admin user). This keeps the test deterministic without expanding scope.
+- **Append-only enforcement mechanism**: AC-2 says events are "never updated or deleted." The design enforces this by simply never issuing UPDATE/DELETE in application code. **Bounded assumption**: application-level enforcement is sufficient for v1.
+
+- **Bootstrap idempotency**: AC-10 says "on first run with an empty database" but doesn't specify behavior on repeat calls. **Bounded assumption**: the bootstrap endpoint returns 409 Conflict if bootstrap has already been completed.
+
+### v2 Clarifications
+
+- **Webhook dedup TTL**: The dedup table stores idempotency keys but scope does not specify a retention window. **Bounded assumption**: keys are stored indefinitely for v2; a TTL cleanup job is deferred to v3. This does not change AC-14's pass/fail — deduplication works regardless of retention policy.
+
+- **Rate limit scope (per-IP vs per-token)**: AC-13 says "per-IP." This means unauthenticated and authenticated requests from the same IP share no state — they are tracked on separate middleware instances with different limits. **Bounded assumption**: tower-governor keyed by `ConnectInfo<SocketAddr>` peer IP, two `GovernorLayer` instances with distinct configs.
+
+- **Shutdown signal on Windows**: SIGTERM/SIGINT are Unix signals. On Windows, `tokio::signal::ctrl_c()` covers Ctrl+C. **Bounded assumption**: v2 uses `tokio::signal::ctrl_c()` for cross-platform support plus Unix-specific SIGTERM handling behind `#[cfg(unix)]`. This does not change AC-11's pass/fail — the test verifies the behavior, not the signal type.
+
+- **Webhook secret provisioning**: AC-14 mentions "per-agent webhook secret" but scope defers UI management of webhook secrets to v3. **Bounded assumption**: `webhook_secret` is auto-generated (random 32-byte hex) when the agent is created and returned in the create-agent response. API consumers read it once and configure their webhook source. No rotation API in v2.
 
 ## Build Order
 
-1. **AC-10 — Bootstrap + Migrations** (Slice 1): Cargo project scaffold, all 13 migration files, `config.rs`, `db.rs`, `error.rs`, bootstrap endpoint, user/org/workspace models. This is the foundation — every other slice needs a running DB with schema.
+### v1 Slices (completed)
 
-2. **AC-2 — Event Log** (Slice 2): `models/event.rs` with `append_event` and `recent_events`, events migration already created in Slice 1. Test append-only semantics.
+1. **AC-10 — Bootstrap + Migrations** (Slice 1)
+2. **AC-2 — Event Log** (Slice 2)
+3. **AC-1 — CAS Lifecycle** (Slice 3)
+4. **AC-7 — Wake Triggers** (Slice 4)
+5. **AC-3 — Prompt Assembly** (Slice 5)
+6. **AC-4 — Wake Loop** (Slice 6)
+7. **AC-5 — Maintenance Cycle** (Slice 7)
+8. **AC-9 — Drain Check** (Slice 8)
+9. **AC-8 — Stale Wake Recovery** (Slice 9)
+10. **AC-6 — HTTP API** (Slice 10)
 
-3. **AC-1 — CAS Lifecycle** (Slice 3): `models/agent.rs` with all four CAS functions. Concurrent wake test. This unlocks the wake executor.
+### v2 Slices (appended)
 
-4. **AC-7 — Wake Triggers** (Slice 4): `background/listener.rs` with LISTEN/NOTIFY. Wires message insertion to wake acquisition. Needs AC-1 + AC-2.
+11. **AC-11 — Graceful Shutdown** (v2 Slice 1): Add `tokio_util::sync::CancellationToken` to `main.rs`. Wire `tokio::signal` for SIGTERM/SIGINT. Thread token through background listener and stale recovery task loops. Use `axum::serve(...).with_graceful_shutdown(...)` for HTTP. Wait up to 30s for in-flight wake loops via `JoinSet` or task tracking. Files: `main.rs`, `background/listener.rs`, `background/stale.rs`, `Cargo.toml` (add `tokio-util`). Foundation for all other v2 slices (clean shutdown needed before Docker).
 
-5. **AC-3 — Prompt Assembly** (Slice 5): `runtime/prompt.rs`, `models/projection.rs`, `models/prompt_template.rs`. Seed a default prompt template in migrations. Character-based trim. Needs projections + events.
+12. **AC-12 — Docker Compose** (v2 Slice 2): Create `Dockerfile` (multi-stage: builder with cargo-chef + runtime with Debian slim). Update `docker-compose.yml` to add app service with healthcheck, depends_on postgres with condition `service_healthy`, env vars. Files: `Dockerfile`, `docker-compose.yml`. No Rust code changes. Manual verification only.
 
-6. **AC-4 — Wake Loop** (Slice 6): `runtime/wake_loop.rs`, `runtime/llm.rs`, `runtime/tools.rs`. LLM client with retry. Shell tool via `tokio::process::Command`. Plan + sleep tools. Iteration cap. This is the largest and most complex slice — complexity exception applies.
+13. **AC-13 — Rate Limiting** (v2 Slice 3): Add `tower-governor` to `Cargo.toml`. Create two `GovernorLayer` configs in `api/mod.rs` — one for bootstrap (10/min), one for authenticated (60/min). Apply as tower middleware layers on the respective route groups. Files: `api/mod.rs`, `config.rs`, `Cargo.toml`. Test: `rate_limit_test.rs`.
 
-7. **AC-5 — Maintenance Cycle** (Slice 7): `runtime/maintenance.rs`. Separate LLM call, versioned projection writes, wake summary ≤500 chars. Needs wake loop to produce a transcript.
+14. **AC-14 — Webhook Ingress** (v2 Slice 4): Create `api/webhooks.rs` with HMAC-SHA256 verification, idempotency dedup lookup/insert, event append + NOTIFY. Add two migrations: `add_webhook_secrets.sql` (add `webhook_secret` column to agents), `create_webhook_dedup.sql` (idempotency key table). Register route in `api/mod.rs`. Add `hmac` + `sha2` crates (sha2 already present). Files: `api/webhooks.rs`, `api/mod.rs`, 2 migrations, `models/agent.rs` (expose webhook_secret in create). Test: `webhook_test.rs`.
 
-8. **AC-9 — Drain Check** (Slice 8): `runtime/drain.rs`. Post-maintenance event check + CAS re-acquire. Needs maintenance to be complete.
-
-9. **AC-8 — Stale Wake Recovery** (Slice 9): `background/stale.rs`. Periodic background job. Independent of wake flow but needs agent CAS primitives.
-
-10. **AC-6 — HTTP API** (Slice 10): `api/mod.rs`, `api/agents.rs`, `api/messages.rs`, `api/events.rs`. Session auth middleware. Assembles all internal components behind REST endpoints. Final integration point.
+15. **AC-15 — Agent Management** (v2 Slice 5): Add `update_agent` and `soft_delete_agent` functions to `models/agent.rs`. Add PATCH and DELETE handlers to `api/agents.rs`. Wire routes in agent router. Files: `models/agent.rs`, `api/agents.rs`. Test: `agent_mgmt_test.rs`. Depends on AC-11 implicitly (disabled wake rejection uses existing CAS WHERE clause).
 
 ## Complexity Exceptions
 
-- **`wake_loop.rs` may exceed 300 lines (target ≤400)**: Carried forward from design.md. The LLM interaction loop, tool dispatch, iteration cap, event recording, and error handling are tightly coupled in a single control flow. Artificial splitting would obscure the state machine.
+### v1 Exceptions (carried forward)
 
-- **13+ migration files**: Each TLA+-specified table gets its own migration per preferences.md convention ("One migration per schema change"). This is high file count but each file is small and self-contained.
+- **`wake_loop.rs` may exceed 300 lines (target ≤400)**: The LLM interaction loop, tool dispatch, iteration cap, event recording, and error handling are tightly coupled in a single control flow.
 
-- **Slice 6 (Wake Loop) touches ~5 files**: `wake_loop.rs`, `llm.rs`, `tools.rs`, `event.rs` (new event types), and potentially `agent.rs` (iteration count update). This is at the edge of the 5-file slice limit but is inherently coupled — the wake loop, LLM client, and tool dispatch form a single vertical slice. Can be sub-sliced: (6a) LLM client + mock, (6b) tool dispatch, (6c) wake loop integration.
+- **13+ migration files**: Each TLA+-specified table gets its own migration per preferences.md convention.
+
+- **Slice 6 (Wake Loop) touches ~5 files**: Inherently coupled — the wake loop, LLM client, and tool dispatch form a single vertical slice.
+
+### v2 Exceptions
+
+- **v2 Slice 1 (Graceful Shutdown) touches 4 files**: `main.rs`, `background/listener.rs`, `background/stale.rs`, `Cargo.toml`. The `CancellationToken` must be threaded into every long-running task, making this inherently cross-cutting. Each file change is small (adding token parameter + select! on cancellation).
