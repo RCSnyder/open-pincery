@@ -12,3 +12,12 @@ pub fn hash_token(token: &str) -> String {
     hasher.update(token.as_bytes());
     hex::encode(hasher.finalize())
 }
+
+pub fn generate_webhook_secret() -> String {
+    use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
+    use rand::Rng;
+
+    let mut rng = rand::rng();
+    let bytes: Vec<u8> = (0..32).map(|_| rng.random::<u8>()).collect();
+    STANDARD_NO_PAD.encode(bytes)
+}

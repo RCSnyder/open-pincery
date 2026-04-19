@@ -215,3 +215,21 @@ pub async fn soft_delete_agent(pool: &PgPool, id: Uuid) -> Result<Agent, AppErro
     .await?;
     Ok(agent)
 }
+
+pub async fn rotate_webhook_secret(
+    pool: &PgPool,
+    id: Uuid,
+    webhook_secret: &str,
+) -> Result<Agent, AppError> {
+    let agent = sqlx::query_as::<_, Agent>(
+        "UPDATE agents
+         SET webhook_secret = $2
+         WHERE id = $1
+         RETURNING *",
+    )
+    .bind(id)
+    .bind(webhook_secret)
+    .fetch_one(pool)
+    .await?;
+    Ok(agent)
+}

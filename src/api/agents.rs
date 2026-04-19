@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use super::{AppState, AuthUser};
 use crate::error::AppError;
-use crate::models::{agent, projection};
+use crate::models::{agent, event, projection};
 
 #[derive(Deserialize)]
 struct CreateAgent {
@@ -33,6 +33,11 @@ struct AgentResponse {
     identity: Option<String>,
     work_list: Option<String>,
     created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Serialize)]
+struct RotateWebhookSecretResponse {
+    webhook_secret: String,
 }
 
 impl AgentResponse {
@@ -67,6 +72,10 @@ pub fn router() -> Router<AppState> {
             get(get_agent_handler)
                 .patch(update_agent_handler)
                 .delete(delete_agent_handler),
+        )
+        .route(
+            "/agents/{id}/webhook/rotate",
+            post(rotate_webhook_secret_handler),
         )
 }
 
@@ -132,4 +141,39 @@ async fn delete_agent_handler(
 ) -> Result<Json<AgentResponse>, AppError> {
     let a = agent::soft_delete_agent(&state.pool, id).await?;
     Ok(Json(AgentResponse::from_agent(a, None, false)))
+}
+
+async fn rotate_webhook_secret_handler(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<RotateWebhookSecretResponse>, AppError> {
+    let existing = agent::get_agent(&state.pool, id)
+        .await?
+        .ok_or(AppError::NotFound("Agent not found".into()))?;
+
+    if existing.workspace_id != auth.workspace_id {
+        return Err(AppError::Unauthorized("Invalid credentials".into()));
+    }
+
+    let new_secret = crate::auth::generate_webhook_secret();
+    let _rotated = agent::rotate_webhook_secret(&state.pool, id, &new_secret).await?;
+
+    event::append_event(
+        &state.pool,
+        id,
+        "webhook_secret_rotated",
+        "api",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    Ok(Json(RotateWebhookSecretResponse {
+        webhook_secret: new_secret,
+    }))
 }
