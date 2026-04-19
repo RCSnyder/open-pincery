@@ -110,17 +110,25 @@ Open Pincery is designed for four deployment modes. Self-hosting is first-class 
 ## Project Structure
 
 ```text
+src/
+  api/                # HTTP handlers (agents, events, messages, bootstrap)
+  background/         # Listener (NOTIFY/LISTEN) and stale recovery
+  runtime/            # Wake loop, maintenance, LLM client, tools, prompt assembly
+  models/             # Database models (agents, events, projections, etc.)
+  config.rs           # Environment configuration
+  db.rs               # Pool creation + migrations
+  error.rs            # Unified error type
+  auth.rs             # Token hashing
+migrations/           # PostgreSQL schema (13 tables)
+tests/                # Integration tests (17 tests across 10 files)
+docker-compose.yml    # PostgreSQL for local dev
 docs/
   input/              # Architecture specs, TLA+ model, design docs
   reference/          # Audit reports, adoption plans
-preferences.md        # Stack + conventions for the build agent
 scaffolding/          # Scope, design, readiness, experiment log
-<project code>        # The runtime (not yet implemented)
 ```
 
 ## Getting Started
-
-> **Note:** The runtime is not yet buildable. The architecture is fully specified and the implementation stack is chosen. See [docs/input/](docs/input/) for the complete design.
 
 To explore the architecture:
 
@@ -165,39 +173,100 @@ The platform's design practices are informed by emerging research in agentic sof
 ### Prerequisites
 
 - Rust 1.75+
-- PostgreSQL 16+
-- An OpenAI-compatible LLM API key
+- Docker (for PostgreSQL) or an existing PostgreSQL 16+ instance
+- An OpenAI-compatible LLM API key (e.g., OpenRouter, OpenAI)
 
-### Setup
+### 1. Start PostgreSQL
 
 ```bash
-# Start PostgreSQL
 docker compose up -d
+```
 
-# Configure environment
+This starts Postgres on `localhost:5432` with user/password/database all set to `open_pincery`.
+
+### 2. Configure Environment
+
+```bash
 cp .env.example .env
-# Edit .env: set LLM_API_KEY and OPEN_PINCERY_BOOTSTRAP_TOKEN
+```
 
-# Build and run
+Edit `.env` and set at minimum:
+
+- `LLM_API_KEY` — your LLM provider API key
+- `OPEN_PINCERY_BOOTSTRAP_TOKEN` — a secret for the one-time admin setup
+
+### 3. Build and Run
+
+```bash
 cargo build --release
-source .env && ./target/release/open-pincery
+```
 
-# Bootstrap (one-time)
+**Linux/macOS:**
+
+```bash
+source .env && ./target/release/open-pincery
+```
+
+**Windows (PowerShell):**
+
+```powershell
+Get-Content .env | ForEach-Object { if ($_ -match '^\s*([^#][^=]+)=(.*)$') { [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2]) } }
+.\target\release\open-pincery.exe
+```
+
+The server starts on `http://localhost:8080`. You should see `Starting server` in the logs. Migrations run automatically on first start.
+
+### 4. Bootstrap (One-Time)
+
+Create the first admin user:
+
+```bash
 curl -X POST http://localhost:8080/api/bootstrap \
-  -H "Authorization: Bearer YOUR_BOOTSTRAP_TOKEN"
+  -H "Authorization: Bearer YOUR_BOOTSTRAP_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "admin@example.com", "name": "Admin"}'
+```
+
+This returns a `session_token`. Save it — all subsequent API calls require it.
+
+### 5. Create an Agent and Send a Message
+
+```bash
+# Create an agent
+curl -X POST http://localhost:8080/api/agents \
+  -H "Authorization: Bearer SESSION_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "my-agent"}'
+
+# Send a message (triggers a wake cycle)
+curl -X POST http://localhost:8080/api/agents/AGENT_ID/messages \
+  -H "Authorization: Bearer SESSION_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "Hello, what can you do?"}'
+
+# Check the event log
+curl http://localhost:8080/api/agents/AGENT_ID/events \
+  -H "Authorization: Bearer SESSION_TOKEN"
+```
+
+### 6. Verify Health
+
+```bash
+curl http://localhost:8080/health
+# Returns: {"status":"ok","db":"connected"}
 ```
 
 ### API
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Health check |
-| POST | `/api/bootstrap` | One-time admin setup |
-| POST | `/api/agents` | Create agent |
-| GET | `/api/agents` | List agents |
-| GET | `/api/agents/:id` | Agent detail with projections |
-| POST | `/api/agents/:id/messages` | Send message (triggers wake) |
-| GET | `/api/agents/:id/events` | Event log |
+| Method | Path                       | Description                     |
+| ------ | -------------------------- | ------------------------------- |
+| GET    | `/health`                  | Health check (no auth required) |
+| POST   | `/api/bootstrap`           | One-time admin setup            |
+| POST   | `/api/agents`              | Create agent                    |
+| GET    | `/api/agents`              | List agents                     |
+| GET    | `/api/agents/:id`          | Agent detail with projections   |
+| POST   | `/api/agents/:id/messages` | Send message (triggers wake)    |
+| GET    | `/api/agents/:id/events`   | Event log                       |
 
 All `/api/*` routes (except bootstrap) require `Authorization: Bearer <session_token>`.
 
