@@ -515,3 +515,38 @@
 - **Changes**: `DELIVERY.md` updated to v5, `scaffolding/log.md` finalized.
 - **Retries**: 0
 - **Next**: STOP (v5 delivered).
+
+## ADR — 2026-04-20T00:00Z — Relicense to MIT OR Apache-2.0 (dual)
+
+- **Decision**: Adopt the idiomatic Rust-ecosystem dual license `MIT OR Apache-2.0` for all future work, effective from the next released version.
+- **Context**: v1.0.0 shipped to crates.io under `MIT` only. Strategic answer D3 (see `docs/input/v6_pre_iterate/strategic-answers-2026-04.md`) mandates Apache-2.0 for explicit patent protection given the agentic-infra domain. The Rust standard is dual-licensing: downstream users pick whichever license fits their distribution model; contributors get Apache-2.0 patent grants into the project.
+- **Changes**:
+  - `LICENSE` renamed to `LICENSE-MIT` (preserved via `git mv`).
+  - `LICENSE-APACHE` added with canonical Apache License 2.0 text, copyright "2026 Open Pincery Contributors".
+  - `Cargo.toml`: `license = "MIT OR Apache-2.0"` (SPDX expression).
+  - `README.md`: License section rewritten with dual-license notice and Apache-2.0 contribution clause ("Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual licensed as above…").
+- **Scope boundary**: This is a forward-only relicense. v1.0.0 on crates.io remains MIT-only (immutable); users who consumed v1.0.0 keep their MIT grant. Starting v1.0.1+, new consumers receive the dual grant.
+- **Contributor provenance**: All commits to date are authored by the project's single maintainer, so no third-party contributor re-licensing is required. Future external contributions are governed by the README contribution clause.
+- **Not committed**: This change is staged but not committed — awaiting human review before the next release cut.
+- **Next**: Commit as part of the v6 cycle cut, or sooner if a v1.0.1 patch release is needed.
+
+## Pre-EXPAND — 2026-04-20 — v6 strategic synthesis
+
+- **Phase**: pre-EXPAND (v6 is a documentation/meta iteration; no code ships)
+- **Evidence**: `docs/input/north-star-2026-04.md` written as the canonical direction doc. Supersedes prior `first-principles-assessment.md`, plus the four `v6_pre_iterate/` drafts (`strategic-answers`, `tripwires`, `agent-taxonomy`, `research-synthesis`), which are preserved as provenance.
+- **Key claims** (carried into v6 EXPAND):
+  - Buyer is the solo founder-CEO / single-CTO already burned by vendor lock-in — explicitly not the median solo founder.
+  - Category is three-part: Continuous Agents (Category 5) × Collaborative Agentic IS × cognitive capabilities whatever-mission-demands-inside-scope.
+  - 12 Durable Bets, headline #2 (memory-as-substrate; pgvector v7, CozoDB embedded v10-ish) and #11 ("a single pincer should be able to build the rest").
+  - Bet #12: the substrate encodes invariants, not opinions. Year-one substrate-level conventions (delegation patterns, signal tags, mission shapes) are deliberately kept out of primitives so stronger future models don't have to fight the substrate.
+  - Only four specific behaviors are banned at the substrate level: self-modifying acceptance contracts, self-granting capabilities, self-raising budget, faking completion.
+  - Professional Bar §6 is "rollback-capable or confirmation-gated" — exploratory missions that spend compute have budget as receipt; irreversible external actions gate on operator confirmation.
+  - Competitive peer set refreshed for 2026: Zapier Agents, Lindy, AWS Bedrock AgentCore, LangGraph Platform, Cloudflare Agents, Cursor Background Agents, ChatGPT Agent, Devin, Claude Cowork / Dispatch.
+- **Changes**:
+  - `docs/input/north-star-2026-04.md` added at the top level (promoted from `v6_pre_iterate/`).
+  - `docs/input/v6_pre_iterate/` now holds all five provenance drafts including the moved `first-principles-assessment.md`.
+  - `docs/reference/tripwires-2026-04.md` removed (orphan with stale backlinks; condensed table now lives in the north star, narrative form lives in `v6_pre_iterate/tripwires-2026-04.md`).
+  - Readiness filenames normalized to hyphens: `enterprise-readiness.md`, `saas-readiness.md`, `self-host-readiness.md`. Backlinks updated in `scope.md` and `first-principles-assessment.md`.
+  - `docs/input/README.md` gains a Directory layout section distinguishing live top-level inputs from `v6_pre_iterate/` provenance.
+- **Not committed**: staged pending review before the v6 EXPAND run.
+- **Next**: v6 EXPAND — the north star drives documentation-level ACs of the form *"north-star states X in ≤N sentences"*; v6 ships no code and reconciles the north star into `docs/reference/north-star.md`.

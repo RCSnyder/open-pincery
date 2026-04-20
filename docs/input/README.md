@@ -37,3 +37,8 @@ These files are **project evidence**, not operating instructions for the harness
 ## Provenance
 
 Input docs are permanent project records. They stay with the repo alongside `scaffolding/` — together they form the full provenance chain from intent to delivered software. Don't archive or delete them.
+
+## Directory layout
+
+- **Top level** — live reference inputs. The current canonical direction doc lives here (`north-star-2026-04.md` at time of writing) alongside the per-concern reference files (`best-practices.md`, `competitive-landscape.md`, `technical-stack.md`, `security-architecture.md`, `*-readiness.md`, `improvement-ideas.md`, `OpenPinceryAgent.tla`).
+- **`v6_pre_iterate/`** — pre-v6 synthesis drafts preserved as provenance. These are superseded by the current north star but kept unchanged so the audit trail from first principles to current direction is intact. Agents should read the top-level north star as the source of truth; the `v6_pre_iterate/` files are context about _how_ we got there.

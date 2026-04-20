@@ -275,7 +275,7 @@ v4 shipped the pieces a self-hoster needs (non-root container, budget cap, webho
 - `.env.example` is v3-shaped and missing every v4 variable.
 - Quick Start in README is v3-era with contradictory Option A/B steps, no `pcy`, no web UI, no Troubleshooting, no reset, no observability pointers, no signed-binary install path (v3 AC-20), and no backup pointer (v3 AC-21 runbook exists but is invisible from the landing page).
 - Compose publishes on `0.0.0.0:8080` by default — unacceptable for a platform whose explicit purpose is remote shell execution.
-- No Caddy/TLS example exists despite `preferences.md` naming Caddy as the self-host default (gap also called out in `docs/input/self_host_readiness.md` §2).
+- No Caddy/TLS example exists despite `preferences.md` naming Caddy as the self-host default (gap also called out in `docs/input/self-host-readiness.md` §2).
 
 This iteration is **operator-experience only** — no new runtime features, no interface changes, no new dependencies. Every shipped v1–v4 capability must become reachable via a single linear onramp with test-enforced docs/config consistency.
 
@@ -322,7 +322,7 @@ None. All six ACs have unambiguous pass/fail criteria. OpenRouter remains the de
 
 ### v5 Deferred (from this iteration)
 
-- **Bootstrap token rotation/expiry rules** (`self_host_readiness.md` §1) — v6
+- **Bootstrap token rotation/expiry rules** (`self-host-readiness.md` §1) — v6
 - **`self_host_team` split-topology docs and compose overlay** (readiness §2) — v6
 - **Upgrade runbook and backup-encryption guidance** (readiness §5) — v6
 - **Local admin lockout recovery and MFA policy** (readiness §3) — v6
