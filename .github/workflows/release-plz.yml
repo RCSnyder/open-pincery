@@ -36,9 +36,12 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.RELEASE_PLZ_TOKEN }}
-          # workflow_run runs on the default branch ref; check out the exact
-          # commit that CI passed against so we tag the right SHA.
-          ref: ${{ github.event.workflow_run.head_sha }}
+          # Check out main (not the exact SHA) so HEAD is on a branch.
+          # release-plz needs a branch ref to compute version bumps; a detached
+          # HEAD from a SHA checkout fails with "HEAD does not point to a branch".
+          # The head_sha of the workflow_run is the tip of main in the normal
+          # case (CI runs on pushes to main), so this tags the right commit.
+          ref: main
 
       - uses: dtolnay/rust-toolchain@stable
 
