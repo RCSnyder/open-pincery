@@ -336,6 +336,10 @@ ITERATION_CAP=50                   # Max wake loop iterations per wake
 STALE_WAKE_HOURS=2                 # Hours before a wake is considered stale
 WAKE_SUMMARY_LIMIT=20              # Max wake summaries included in prompt
 EVENT_WINDOW_LIMIT=200             # Max recent events included in prompt
+LLM_PRICE_INPUT_PER_MTOK=3.0                 # v4 AC-23 — USD per 1M input tokens, primary model
+LLM_PRICE_OUTPUT_PER_MTOK=15.0               # v4 AC-23 — USD per 1M output tokens, primary model
+LLM_MAINTENANCE_PRICE_INPUT_PER_MTOK=3.0     # v4 AC-23 — USD per 1M input tokens, maintenance model
+LLM_MAINTENANCE_PRICE_OUTPUT_PER_MTOK=15.0   # v4 AC-23 — USD per 1M output tokens, maintenance model
 RUST_LOG=open_pincery=info
 ```
 
@@ -623,14 +627,28 @@ This section is additive. Every prior v1/v2/v3 interface, file path, and data sh
 │    src/bin/pcy.rs                   (thin: open_pincery::cli::run())│
 │                                                                     │
 │  Modified:                                                          │
+│    src/api/agents.rs                (+rotate_webhook_secret_handler,│
+│                                     AC-24 route registered here;    │
+│                                     no separate webhook_rotate.rs)  │
 │    src/background/listener.rs       (+budget check before acquire)  │
-│    src/runtime/llm.rs or llm_call.rs (cost_usd → agents.budget_used_usd) │
-│    src/api/mod.rs                   (register webhook_rotate route) │
+│    src/runtime/llm.rs               (new `Pricing` struct,          │
+│                                     `LlmClient::with_pricing(...)`) │
+│    src/models/llm_call.rs           (cost_usd + in-tx              │
+│                                     agents.budget_used_usd bump)    │
+│    src/main.rs                      (LLM_PRICE_* env → Pricing)     │
+│    src/api/events.rs +              (since=<uuid> pagination for    │
+│    src/models/event.rs              UI long-poll, AC-26)            │
+│    src/api/mod.rs                   (+scoped_agent helper —         │
+│                                     workspace-scoped agent lookup   │
+│                                     shared by PATCH/DELETE/messages/│
+│                                     events/rotate)                  │
 │    Cargo.toml                       (clap dep, [[bin]] pcy entry)   │
 │    Dockerfile                       (USER pcy, chown /app)          │
-│    static/index.html                (real SPA root)                 │
-│    static/app.js                    (new — UI logic)                │
-│    static/style.css                 (new — minimal reset + utility) │
+│    static/index.html                (real SPA shell, ES-module boot)│
+│    static/js/*.js + static/js/views/*.js                            │
+│                                     (new — UI split by concern:     │
+│                                      app/api/state/ui + 4 views)    │
+│    static/css/style.css             (new — minimal reset + utility) │
 │                                                                     │
 │  New docs:                                                          │
 │    docs/api.md                      (HTTP API contract, AC-27)      │
@@ -642,7 +660,16 @@ This section is additive. Every prior v1/v2/v3 interface, file path, and data sh
 ```
 src/
   api/
-    webhook_rotate.rs        # NEW — POST /api/agents/:id/webhook/rotate (AC-24)
+    agents.rs                # MODIFIED — `rotate_webhook_secret_handler` + route
+                             # `POST /api/agents/{id}/webhook/rotate` live here
+                             # (no separate webhook_rotate.rs module — the handler
+                             # was inlined next to the existing PATCH/DELETE
+                             # handlers because it shares the `scoped_agent`
+                             # lookup and the same auth middleware stack)
+    events.rs                # MODIFIED — `?since=<uuid>` cursor support for UI poll (AC-26)
+    mod.rs                   # MODIFIED — `pub(crate) async fn scoped_agent(...)`
+                             # helper (workspace-scoped agent lookup, reused by
+                             # PATCH / DELETE / messages / events / rotate)
   api_client.rs              # NEW — reusable HTTP client (CLI, tests)
   bin/
     pcy.rs                   # NEW — CLI entrypoint binary (AC-25)
@@ -658,17 +685,38 @@ src/
       events.rs              # NEW — pcy events [--tail --since]
       budget.rs              # NEW — pcy budget {set,show,reset}
       status.rs              # NEW — pcy status
+  models/
+    event.rs                 # MODIFIED — `events_since_id(...)` for cursor paging
+    llm_call.rs              # MODIFIED — single-transaction insert +
+                             # `agents.budget_used_usd` bump (AC-23, T-26)
+  runtime/
+    llm.rs                   # MODIFIED — `Pricing { input_per_mtok, output_per_mtok }`
+                             # struct + `LlmClient::with_pricing(primary, maint)`
+                             # builder; cost_usd computed per call (AC-23)
 static/
-  index.html                 # REPLACED — single SPA entry with 5 hash-routed views
-  app.js                     # NEW — all UI logic (~350 lines target)
-  style.css                  # NEW — minimal reset + utility classes (~80 lines target)
+  index.html                 # REPLACED — minimal SPA shell, `<script type="module" src="/js/app.js">`
+  css/
+    style.css                # NEW — minimal reset + utility classes (154 lines)
+  js/
+    app.js                   # NEW — hash-router entrypoint (103 lines)
+    api.js                   # NEW — fetch wrapper + typed API helpers (124 lines)
+    state.js                 # NEW — in-memory store + event poll loop (75 lines)
+    ui.js                    # NEW — DOM helpers + shared nav (66 lines)
+    views/
+      login.js               # NEW — #/login view (58 lines)
+      agents.js              # NEW — #/agents list view (68 lines)
+      detail.js              # NEW — #/agents/:id detail + stream view (132 lines)
+      settings.js            # NEW — #/agents/:id/settings (rotate + budget) (105 lines)
 docs/
   api.md                     # NEW — AC-27 HTTP API contract
 tests/
-  budget_test.rs             # NEW — AC-23 integration test
+  budget_test.rs             # NEW — AC-23 integration test (cost_usd + refusal path)
   webhook_rotate_test.rs     # NEW — AC-24 integration test
   cli_e2e_test.rs            # NEW — AC-25 end-to-end test (invokes pcy binary)
   ui_smoke_test.rs           # NEW — AC-26 UI smoke (serves files + probes routes)
+  dockerfile_nonroot_test.rs # NEW — AC-22 static Dockerfile guard
+  wake_loop_test.rs          # MODIFIED — AC-23 end-to-end cost assertion
+                             # (`cost_usd = 0.00045`, `budget_used_usd = 0.00045`)
 ```
 
 ## v4 Interfaces
@@ -707,6 +755,47 @@ ENTRYPOINT ["open-pincery"]
 Note: `pcy` username collides with the CLI binary name; this is intentional (short, memorable) and fine because the container user never interacts with the CLI — the CLI runs on the operator's host.
 
 ### AC-23 — Budget enforcement
+
+Cost accounting happens at LLM-call record time and feeds the pre-CAS budget
+gate in the background listener. `src/runtime/llm.rs` exposes a `Pricing`
+value type and an `LlmClient::with_pricing(...)` builder:
+
+```rust
+// src/runtime/llm.rs
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Pricing {
+    pub input_per_mtok: Decimal,   // USD per 1,000,000 input tokens
+    pub output_per_mtok: Decimal,  // USD per 1,000,000 output tokens
+}
+
+impl Pricing {
+    pub fn new(input_per_mtok: Decimal, output_per_mtok: Decimal) -> Self;
+    pub fn cost_for(&self, usage: &Usage) -> Decimal;
+}
+
+pub struct LlmClient {
+    // ...existing fields...
+    pub primary_pricing: Pricing,     // applied to wake-loop calls
+    pub maintenance_pricing: Pricing, // applied to maintenance calls
+}
+
+impl LlmClient {
+    pub fn with_pricing(mut self, primary: Pricing, maintenance: Pricing) -> Self;
+}
+```
+
+Pricing is wired in `src/main.rs` from environment (defaults are
+Claude-Sonnet-class list prices):
+
+```
+LLM_PRICE_INPUT_PER_MTOK                 (default: 3.0)
+LLM_PRICE_OUTPUT_PER_MTOK                (default: 15.0)
+LLM_MAINTENANCE_PRICE_INPUT_PER_MTOK     (default: 3.0)
+LLM_MAINTENANCE_PRICE_OUTPUT_PER_MTOK    (default: 15.0)
+```
+
+`Pricing::default()` is zero-cost, so tests that don't configure pricing
+record `cost_usd = 0` unchanged.
 
 Insertion point is `src/background/listener.rs::trigger_wake`, **before** `agent::acquire_wake`:
 
@@ -754,38 +843,41 @@ Decision: `budget_limit_usd = 0` = unlimited. `NULL` is not used (schema has `NO
 ### AC-24 — Webhook rotation endpoint
 
 ```rust
-// src/api/webhook_rotate.rs — NEW
+// src/api/agents.rs — handler inlined alongside PATCH/DELETE because it
+// shares the `scoped_agent` workspace lookup and auth stack. No separate
+// `webhook_rotate.rs` module is introduced.
 
-pub async fn rotate_webhook_secret(
+async fn rotate_webhook_secret_handler(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthUser>,
-    Path(agent_id): Path<Uuid>,
-) -> Result<Json<RotateResponse>, AppError> {
-    // 1. Verify agent belongs to auth.workspace_id (404 if not)
-    // 2. Generate 32 random bytes, base64-encode
-    let new_secret = base64::engine::general_purpose::STANDARD_NO_PAD
-        .encode(rand::random::<[u8; 32]>());
-    // 3. Atomic update
-    sqlx::query!(
-        "UPDATE agents SET webhook_secret = $1 WHERE id = $2 AND workspace_id = $3",
-        new_secret, agent_id, auth.workspace_id,
-    ).execute(&state.pool).await?;
-    // 4. Append event (no secret in payload)
-    event::append_event(
-        &state.pool, agent_id, "webhook_secret_rotated", "api",
+    Path(id): Path<Uuid>,
+) -> Result<Json<RotateWebhookSecretResponse>, AppError> {
+    // 1. Workspace-scope the agent (404 if not in auth.workspace_id).
+    scoped_agent(&state, &auth, id).await?;
+
+    // 2. Generate 32 random bytes, base64-encoded.
+    let new_secret = crate::auth::generate_webhook_secret();
+
+    // 3. Rotate + audit event in a single transaction.
+    let mut tx = state.pool.begin().await?;
+    let _rotated = agent::rotate_webhook_secret_tx(&mut tx, id, &new_secret).await?;
+    event::append_event_tx(
+        &mut tx, id, "webhook_secret_rotated", "api",
         None, None, None, None, None, None,
     ).await?;
-    Ok(Json(RotateResponse { webhook_secret: new_secret }))
+    tx.commit().await?;
+
+    Ok(Json(RotateWebhookSecretResponse { webhook_secret: new_secret }))
 }
 
 #[derive(Serialize)]
-pub struct RotateResponse { webhook_secret: String }
+struct RotateWebhookSecretResponse { webhook_secret: String }
 ```
 
 Route registered in `src/api/agents.rs::router()`:
 
 ```rust
-.route("/agents/{id}/webhook/rotate", post(webhook_rotate::rotate_webhook_secret))
+.route("/agents/{id}/webhook/rotate", post(rotate_webhook_secret_handler))
 ```
 
 ### AC-25 — `pcy` CLI
@@ -876,56 +968,43 @@ impl Client {
 
 Hash-routed SPA. No build step. No framework. No external dependencies (no CDN fetches).
 
-`static/index.html` (shell):
+`static/index.html` (shell — bootstraps the ES-module graph):
 
 ```html
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Open Pincery</title>
-  <link rel="stylesheet" href="/style.css">
-</head>
-<body>
-  <header id="nav"></header>
-  <main id="app"></main>
-  <script src="/app.js"></script>
-</body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Open Pincery</title>
+    <link rel="stylesheet" href="/css/style.css" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/js/app.js"></script>
+  </body>
 </html>
 ```
 
-`static/app.js` (structure):
+`static/js/` layer map (each file is an ES module imported via relative paths;
+no bundler, no CDN, same-origin only):
 
-```javascript
-// Routes: #/login, #/agents, #/agents/:id, #/agents/:id/settings
-// Single-file module. Exposes only `window.addEventListener('hashchange', render)`.
-
-const API = '';                                    // same-origin
-const TOKEN_KEY = 'open-pincery.token';
-
-async function api(path, opts = {}) {
-  const token = localStorage.getItem(TOKEN_KEY);
-  const headers = { 'content-type': 'application/json', ...(opts.headers || {}) };
-  if (token) headers.authorization = `Bearer ${token}`;
-  const res = await fetch(API + path, { ...opts, headers });
-  if (res.status === 401) { location.hash = '#/login'; throw new Error('unauthorized'); }
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
-  return res.status === 204 ? null : res.json();
-}
-
-function render() { /* route dispatch */ }
-function viewLogin() { /* ... */ }
-function viewAgentList() { /* ... */ }
-function viewAgentDetail(id) { /* live event poll loop */ }
-function viewAgentSettings(id) { /* rotate + budget */ }
-
-window.addEventListener('hashchange', render);
-window.addEventListener('DOMContentLoaded', render);
+```
+static/js/app.js           # hash-route dispatcher, re-renders #app on hashchange
+static/js/api.js           # `fetch` wrapper + typed API helpers (bootstrap, list agents,
+                           # send message, list events since, rotate secret, set budget)
+static/js/state.js         # in-memory store + `pollEvents(agentId, sinceId)` long-poll
+                           # loop with exponential backoff (4s → 8s → 16s → 32s)
+static/js/ui.js            # DOM helpers + shared nav shell (`currentRoute`, `routeTo`)
+static/js/views/login.js   # #/login             — paste token, persist to localStorage
+static/js/views/agents.js  # #/agents            — list view
+static/js/views/detail.js  # #/agents/:id        — live stream + send-message form
+static/js/views/settings.js# #/agents/:id/settings — rotate webhook secret, set/show budget
 ```
 
-Event stream: `GET /api/agents/:id/events?since=<last_seen_id>` polled every 4s with exponential backoff on failure (4s → 8s → 16s → 32s cap). Caller remembers last-seen event id in module-local state (not `localStorage` — intentionally ephemeral).
+Event stream: `GET /api/agents/:id/events?since=<last_seen_id>` polled every 4s with exponential backoff on failure (4s → 8s → 16s → 32s cap). Caller remembers last-seen event id in module-local state inside `state.js` (not `localStorage` — intentionally ephemeral).
 
-CSS: a ~80-line reset + utility classes (no flex/grid framework, direct rules). Accessible defaults (`prefers-color-scheme`, min contrast).
+CSS: `static/css/style.css` — minimal reset + utility classes (154 lines, no flex/grid framework, direct rules). Accessible defaults (`prefers-color-scheme`, min contrast).
 
 ### AC-27 — `docs/api.md` API contract
 
@@ -940,17 +1019,21 @@ incompatibly without a major version bump. Undocumented fields are not part
 of the contract and may appear or disappear.
 
 ## Authentication
+
 ...
 
 ## Endpoints
 
 ### POST /api/bootstrap
+
 ...
 
 ### POST /api/agents
+
 ...
 
 ### GET /api/agents
+
 ...
 
 <one section per endpoint the CLI or UI calls>
@@ -960,12 +1043,12 @@ of the contract and may appear or disappear.
 
 No schema changes. Existing columns already sufficient:
 
-| Column | Table | Used by |
-|--------|-------|---------|
-| `budget_limit_usd` (NUMERIC, default 10.0) | `agents` | AC-23 |
-| `budget_used_usd` (NUMERIC, default 0) | `agents` | AC-23 |
-| `webhook_secret` (TEXT) | `agents` | AC-24 |
-| `cost_usd` (NUMERIC) | `llm_calls` | AC-23 (increments `agents.budget_used_usd`) |
+| Column                                     | Table       | Used by                                     |
+| ------------------------------------------ | ----------- | ------------------------------------------- |
+| `budget_limit_usd` (NUMERIC, default 10.0) | `agents`    | AC-23                                       |
+| `budget_used_usd` (NUMERIC, default 0)     | `agents`    | AC-23                                       |
+| `webhook_secret` (TEXT)                    | `agents`    | AC-24                                       |
+| `cost_usd` (NUMERIC)                       | `llm_calls` | AC-23 (increments `agents.budget_used_usd`) |
 
 New event types (append-only convention, no schema change):
 
@@ -976,10 +1059,10 @@ New event types (append-only convention, no schema change):
 
 No new outbound integrations. All changes are internal or inbound (CLI, browser).
 
-| Integration | Failure mode | Test strategy |
-|---|---|---|
-| `pcy` CLI → HTTP API | network error, auth failure, 4xx, 5xx — exit non-zero with stderr message | Real HTTP against live test server in `cli_e2e_test.rs` |
-| Browser UI → HTTP API | fetch error, 401 → redirect to login, 5xx → render banner | `ui_smoke_test.rs` loads served files + probes routes |
+| Integration           | Failure mode                                                              | Test strategy                                           |
+| --------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------- |
+| `pcy` CLI → HTTP API  | network error, auth failure, 4xx, 5xx — exit non-zero with stderr message | Real HTTP against live test server in `cli_e2e_test.rs` |
+| Browser UI → HTTP API | fetch error, 401 → redirect to login, 5xx → render banner                 | `ui_smoke_test.rs` loads served files + probes routes   |
 
 ## v4 Observability
 
@@ -987,8 +1070,16 @@ No changes to the observability stack. New events (`budget_exceeded`, `webhook_s
 
 ## v4 Complexity Exceptions
 
-- **`static/app.js`** may exceed the 300-line soft limit (target ≤400 lines) because splitting a single-file vanilla SPA into modules without a build step means `<script type="module">` with CORS and relative-import tax. The single-file approach is intentionally chosen to keep deployment artifact-free.
-- **`src/cli/mod.rs` + submodules** are a second binary in the same crate. Total CLI code budget: 600 lines across `src/cli/**`. If it grows past that in v5, extract to a workspace member.
+- **`static/js/**`— split by responsibility, no single-file ceiling**. BUILD
+moved away from the single-file`static/app.js` design note in favour of
+four ES-module layers (`app.js`router,`api.js`fetch client,`state.js`store + poll loop,`ui.js` DOM helpers) plus one file per view
+(`views/{login,agents,detail,settings}.js`). This is served as-is by the
+existing axum static handler via `<script type="module" src="/js/app.js">`— still no bundler, no framework, no build step, no CDN fetches. The
+largest file is`views/detail.js` at 132 lines; the total UI budget
+  (all JS + CSS combined) is well under the previous ~400-line single-file
+  soft ceiling, so the explicit ceiling is retired. If any single module
+  grows past ~200 lines, split it further rather than extending the ceiling.
+- **`src/cli/**`— 600-line total budget** across`src/cli/mod.rs`, `src/cli/config.rs`, and `src/cli/commands/\*.rs`. Justification: a second binary in the same crate is cohesive with the runtime and shares `src/api_client.rs`; extracting to a separate workspace member is premature at v4 size. If v5 pushes the CLI past 600 lines, extract to a workspace member per preferences.md convention.
 
 ## v4 Open Questions
 
@@ -996,11 +1087,11 @@ None. All interfaces, file paths, and test strategies are final.
 
 ## v4 Test Strategy
 
-| AC | Test file | Kind | Notes |
-|---|---|---|---|
-| AC-22 | `tests/docker_nonroot_test.sh` (shell, gated by `DOCKER_AVAILABLE=1`) | Integration | Skipped in CI without Docker; documented in runbook |
-| AC-23 | `tests/budget_test.rs` | Integration | DB fixture + real wake attempt; asserts event + no llm_calls row |
-| AC-24 | `tests/webhook_rotate_test.rs` | Integration | Two-secret HMAC flow |
-| AC-25 | `tests/cli_e2e_test.rs` | End-to-end | Uses `assert_cmd` or spawns `cargo run --bin pcy` against a live test server |
-| AC-26 | `tests/ui_smoke_test.rs` | Smoke | Serves files through the axum router, asserts `index.html` is reachable, grep-asserts the app.js loads `/api/agents` on list view; full-browser headless-chrome optional, gated by env |
-| AC-27 | REVIEW subagent pass | Document review | Subagent cross-checks every CLI/UI call against `docs/api.md` and every endpoint in `src/api/` against the doc |
+| AC    | Test file                                                             | Kind            | Notes                                                                                                                                                                                  |
+| ----- | --------------------------------------------------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AC-22 | `tests/docker_nonroot_test.sh` (shell, gated by `DOCKER_AVAILABLE=1`) | Integration     | Skipped in CI without Docker; documented in runbook                                                                                                                                    |
+| AC-23 | `tests/budget_test.rs`                                                | Integration     | DB fixture + real wake attempt; asserts event + no llm_calls row                                                                                                                       |
+| AC-24 | `tests/webhook_rotate_test.rs`                                        | Integration     | Two-secret HMAC flow                                                                                                                                                                   |
+| AC-25 | `tests/cli_e2e_test.rs`                                               | End-to-end      | Uses `assert_cmd` or spawns `cargo run --bin pcy` against a live test server                                                                                                           |
+| AC-26 | `tests/ui_smoke_test.rs`                                              | Smoke           | Serves files through the axum router, asserts `index.html` is reachable, grep-asserts the app.js loads `/api/agents` on list view; full-browser headless-chrome optional, gated by env |
+| AC-27 | REVIEW subagent pass                                                  | Document review | Subagent cross-checks every CLI/UI call against `docs/api.md` and every endpoint in `src/api/` against the doc                                                                         |

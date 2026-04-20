@@ -354,3 +354,55 @@
 - **Changes**: AC-22..AC-27 code/docs implemented and committed across slices (`43927e2`, `0156561`, `a7e7e3b`, `30c84c4`, `04a05ab`, `fdf1ab0`, `f51d53a`).
 - **Retries**: 0
 - **Next**: REVIEW.
+
+## v4 REVIEW (first pass) — 2026-04-20T01:00Z
+
+- **Gate**: FAIL (attempt 1)
+- **Evidence**: REVIEW subagent returned findings against the initial v4 BUILD. Issues spanned AC-23 cost accounting (pricing was fixed at Pricing::default()-zero rather than wired from env, so `cost_usd` was always 0 and `budget_used_usd` never advanced end-to-end), a missing end-to-end assertion that a wake-loop cycle actually recorded non-zero `cost_usd` and bumped `agents.budget_used_usd`, and assorted clippy / dependency-feature hygiene items (sqlx default features left `sqlx-mysql` on the compile path, triggering `RUSTSEC-2023-0071` with no upstream fix).
+- **Retries**: 1
+- **Next**: Fix findings, then REVIEW pass 2.
+
+## v4 REVIEW FIX — 2026-04-20T01:30Z
+
+- **Gate**: N/A (work phase feeding the next REVIEW attempt)
+- **Evidence**:
+  - Introduced `Pricing { input_per_mtok, output_per_mtok }` value type in `src/runtime/llm.rs` with `Pricing::cost_for(&Usage) -> Decimal` and a `LlmClient::with_pricing(primary, maintenance)` builder.
+  - Wired `LLM_PRICE_INPUT_PER_MTOK` / `LLM_PRICE_OUTPUT_PER_MTOK` / `LLM_MAINTENANCE_PRICE_INPUT_PER_MTOK` / `LLM_MAINTENANCE_PRICE_OUTPUT_PER_MTOK` env vars in `src/main.rs` (defaults 3.0 / 15.0 / 3.0 / 15.0, Claude-Sonnet-class list prices). Tests that don't care about pricing keep `Pricing::default()` (zero-cost) so existing unit-level behaviour is unchanged.
+  - Extended `tests/wake_loop_test.rs::test_wake_loop_sleep_termination` to assert end-to-end cost accumulation: `Pricing::new(3.0, 15.0)` + `Usage { prompt_tokens: 100, completion_tokens: 10 }` → `llm_calls.cost_usd = 0.00045`, `agents.budget_used_usd = 0.00045`. Paired with the existing `tests/budget_test.rs` refusal-path assertion, this closes the two directions AC-23 needs (refuse when exhausted, accumulate when spending).
+  - Narrowed `sqlx` features (Postgres only, no default `sqlx-mysql` path) and refreshed `Cargo.lock` (commit `f51d53a`). `cargo audit --ignore RUSTSEC-2023-0071` passes; the single remaining advisory is in a transitive path that runtime does not link.
+  - Final fix commit `e0f27de` folds review fixes and finalizes v4 BUILD state.
+  - Full regression: `cargo fmt --all -- --check` EXIT=0; `cargo clippy --all-targets -- -D warnings` EXIT=0; `cargo test --all-targets -- --test-threads=1` **42 passed / 0 failed** EXIT=0.
+- **Changes**: Modified: `src/runtime/llm.rs`, `src/main.rs`, `src/models/llm_call.rs`, `tests/wake_loop_test.rs`, `Cargo.toml`, `Cargo.lock`.
+- **Retries**: 0
+- **Next**: REVIEW (second pass) — expecting PASS.
+
+## v4 REVIEW (second pass) — 2026-04-20T02:00Z
+
+- **Gate**: PASS (attempt 2)
+- **Evidence**: REVIEW subagent verdict **PASS** against HEAD `e0f27de`. All first-pass findings confirmed resolved:
+  - AC-23 pricing is now real: `Pricing::new(3.0, 15.0)` wired from env in `src/main.rs`, applied in `src/runtime/llm.rs`, end-to-end cost + budget accumulation asserted in `tests/wake_loop_test.rs::test_wake_loop_sleep_termination` (`cost_usd = 0.00045`, `budget_used_usd = 0.00045`).
+  - Dependency surface cleaned: `sqlx` features narrowed to the Postgres path only; lockfile refreshed; `cargo audit --ignore RUSTSEC-2023-0071` passes with the single remaining advisory confined to unused transitive code.
+  - No new Critical or Required findings.
+  - Gate verification at HEAD: `cargo fmt --all -- --check` EXIT=0, `cargo clippy --all-targets -- -D warnings` EXIT=0, `cargo test --all-targets -- --test-threads=1` 42 passed / 0 failed EXIT=0.
+- **Retries**: 1 (first pass FAIL, second pass PASS)
+- **Next**: RECONCILE.
+
+## v4 RECONCILE — 2026-04-20T02:30Z
+
+- **Gate**: PASS (auto-fix)
+- **Evidence**: Seven-axis drift audit against HEAD `e0f27de`. All drift was Structural or Cosmetic; no Spec-violating drift found.
+  - **Axis 1 — Directory structure**: design.md v4 delta and directory tree realigned with the shipped split-module UI (`static/index.html` + `static/js/{app,api,state,ui}.js` + `static/js/views/{login,agents,detail,settings}.js` + `static/css/style.css`; largest file `views/detail.js` at 132 lines). The design.md single-file `static/app.js` and the implied `static/style.css` at the root were both replaced with the actual split layout.
+  - **Axis 2 — Interfaces**: AC-24 webhook rotation was documented as living in a new `src/api/webhook_rotate.rs` module; reality is `rotate_webhook_secret_handler` inlined inside `src/api/agents.rs` (shares `scoped_agent` helper + `auth_middleware` stack with PATCH/DELETE). design.md AC-24 interface block + readiness.md L-18 + AC-24 coverage row updated to match. The shipped handler also wraps the rotation and `webhook_secret_rotated` event append in a single transaction via `rotate_webhook_secret_tx` + `append_event_tx` — noted in both design and readiness.
+  - **Axis 2 — Interfaces (continued)**: design.md now documents the `Pricing { input_per_mtok, output_per_mtok }` value type and `LlmClient::with_pricing(primary, maintenance)` builder in `src/runtime/llm.rs`, per the v4 REVIEW-fix landing in commit `e0f27de`.
+  - **Axis 3 — Acceptance criteria**: no AC definitions changed. AC-23 coverage mapping updated to reflect that cost accumulation is now asserted end-to-end in `tests/wake_loop_test.rs::test_wake_loop_sleep_termination` (`cost_usd = 0.00045`, `budget_used_usd = 0.00045`) in addition to the refusal-path coverage in `tests/budget_test.rs`.
+  - **Axis 4 — External integrations**: no outbound integrations changed. The `src/api/events.rs` cursor support (`?since=<uuid>`) + `events_since_id` helper in `src/models/event.rs` + `scoped_agent` helper in `src/api/mod.rs` are workspace-internal refactors supporting AC-24 (workspace scoping) and AC-26 (UI long-poll). They are now called out in the v4 Architecture Delta and Directory Structure as modified files.
+  - **Axis 5 — Stack & deploy**: `Cargo.toml` narrowed `sqlx` features to Postgres-only (drops the `sqlx-mysql` compile path that was triggering `RUSTSEC-2023-0071` on a dead transitive). No new runtime deps beyond those already called out in design.md v4.
+  - **Axis 5 — Env vars**: design.md v1 config block now lists `LLM_PRICE_INPUT_PER_MTOK`, `LLM_PRICE_OUTPUT_PER_MTOK`, `LLM_MAINTENANCE_PRICE_INPUT_PER_MTOK`, `LLM_MAINTENANCE_PRICE_OUTPUT_PER_MTOK` with defaults 3.0 / 15.0 / 3.0 / 15.0 (AC-23). Previously absent.
+  - **Axis 6 — Log accuracy**: log.md was missing v4 REVIEW pass 1 FAIL → REVIEW FIX (commit `e0f27de`) → v4 REVIEW pass 2 PASS cycle. Entries appended before this one. git log `e0f27de` + `f51d53a` + `fdf1ab0` + `04a05ab` + `30c84c4` + `a7e7e3b` + `0156561` + `43927e2` + `caa122b` + `ddb7264` + `83fb5b8` confirms the v4 BUILD slice / review-fix chain.
+  - **Axis 7 — Readiness / traceability**: readiness.md v4 `static/app.js` complexity exception retired and replaced with a `static/js/**` split-by-concern note; Slice 5 build-order text updated to describe the split module layout; L-17/L-18/L-20 key links and the AC-23/AC-24/AC-26/AC-27 coverage-table rows updated to reference the actual shipped files and tests. T-29 rewritten to describe the ES-module layers rather than a single `static/app.js`.
+- **Cosmetic fixes**: none material this pass (aside from table-row rewrites swept into Structural above).
+- **Structural fixes**: as enumerated across axes 1–7.
+- **Spec-violating fixes**: none.
+- **Documents updated**: `scaffolding/design.md`, `scaffolding/readiness.md`, `scaffolding/log.md`.
+- **Confidence**: REPAIRED.
+- **Next**: VERIFY.
