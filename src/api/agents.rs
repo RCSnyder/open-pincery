@@ -3,6 +3,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -19,6 +20,7 @@ struct CreateAgent {
 struct UpdateAgent {
     name: Option<String>,
     is_enabled: Option<bool>,
+    budget_limit_usd: Option<Decimal>,
 }
 
 #[derive(Serialize)]
@@ -32,6 +34,8 @@ struct AgentResponse {
     webhook_secret: Option<String>,
     identity: Option<String>,
     work_list: Option<String>,
+    budget_limit_usd: Decimal,
+    budget_used_usd: Decimal,
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -59,6 +63,8 @@ impl AgentResponse {
             },
             identity: proj.as_ref().map(|p| p.identity.clone()),
             work_list: proj.as_ref().map(|p| p.work_list.clone()),
+            budget_limit_usd: a.budget_limit_usd,
+            budget_used_usd: a.budget_used_usd,
             created_at: a.created_at,
         }
     }
@@ -130,6 +136,7 @@ async fn update_agent_handler(
         body.name.as_deref(),
         body.is_enabled,
         disabled_reason,
+        body.budget_limit_usd,
     )
     .await?;
     Ok(Json(AgentResponse::from_agent(a, None, false)))

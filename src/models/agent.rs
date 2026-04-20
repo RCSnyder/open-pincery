@@ -182,13 +182,15 @@ pub async fn update_agent(
     name: Option<&str>,
     is_enabled: Option<bool>,
     disabled_reason: Option<&str>,
+    budget_limit_usd: Option<Decimal>,
 ) -> Result<Agent, AppError> {
     let agent = sqlx::query_as::<_, Agent>(
         "UPDATE agents SET
            name = COALESCE($2, name),
            is_enabled = COALESCE($3, is_enabled),
            disabled_reason = CASE WHEN $3 = FALSE THEN $4 WHEN $3 = TRUE THEN NULL ELSE disabled_reason END,
-           disabled_at = CASE WHEN $3 = FALSE THEN NOW() WHEN $3 = TRUE THEN NULL ELSE disabled_at END
+           disabled_at = CASE WHEN $3 = FALSE THEN NOW() WHEN $3 = TRUE THEN NULL ELSE disabled_at END,
+           budget_limit_usd = COALESCE($5, budget_limit_usd)
          WHERE id = $1
          RETURNING *"
     )
@@ -196,6 +198,7 @@ pub async fn update_agent(
     .bind(name)
     .bind(is_enabled)
     .bind(disabled_reason)
+    .bind(budget_limit_usd)
     .fetch_one(pool)
     .await?;
     Ok(agent)

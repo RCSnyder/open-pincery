@@ -1,0 +1,172 @@
+use std::process::ExitCode;
+
+use clap::{Parser, Subcommand};
+
+use crate::api_client::ApiClient;
+use crate::error::AppError;
+
+pub mod commands;
+pub mod config;
+
+#[derive(Parser, Debug)]
+#[command(name = "pcy")]
+pub struct Cli {
+    #[arg(long)]
+    url: Option<String>,
+    #[arg(long)]
+    token: Option<String>,
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    Bootstrap {
+        #[arg(long)]
+        bootstrap_token: Option<String>,
+    },
+    Login {
+        #[arg(long)]
+        token: String,
+    },
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommands,
+    },
+    Message {
+        agent: String,
+        text: String,
+    },
+    Events {
+        agent: String,
+        #[arg(long)]
+        tail: bool,
+        #[arg(long)]
+        since: Option<String>,
+    },
+    Budget {
+        #[command(subcommand)]
+        command: BudgetCommands,
+    },
+    Status,
+}
+
+#[derive(Subcommand, Debug)]
+enum AgentCommands {
+    Create { name: String },
+    List,
+    Show { agent: String },
+    Disable { agent: String },
+    RotateSecret { agent: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum BudgetCommands {
+    Show { agent: String },
+    Set { agent: String, limit: String },
+    Reset { agent: String },
+}
+
+fn resolve_url(cli: &Cli, cfg: &config::CliConfig) -> String {
+    cli.url
+        .clone()
+        .or_else(|| std::env::var("OPEN_PINCERY_URL").ok())
+        .or_else(|| cfg.url.clone())
+        .unwrap_or_else(|| "http://localhost:8080".to_string())
+}
+
+fn resolve_token(cli: &Cli, cfg: &config::CliConfig) -> Option<String> {
+    cli.token
+        .clone()
+        .or_else(|| std::env::var("OPEN_PINCERY_TOKEN").ok())
+        .or_else(|| cfg.token.clone())
+}
+
+pub async fn run() -> ExitCode {
+    match run_inner().await {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+async fn run_inner() -> Result<ExitCode, AppError> {
+    let cli = Cli::parse();
+    let cfg = config::load()?;
+    let url = resolve_url(&cli, &cfg);
+    let token = resolve_token(&cli, &cfg);
+
+    match cli.command {
+        Commands::Bootstrap { bootstrap_token } => {
+            let bootstrap_token = bootstrap_token
+                .or_else(|| std::env::var("OPEN_PINCERY_BOOTSTRAP_TOKEN").ok())
+                .ok_or_else(|| {
+                    AppError::BadRequest(
+                        "missing bootstrap token: pass --bootstrap-token or OPEN_PINCERY_BOOTSTRAP_TOKEN"
+                            .into(),
+                    )
+                })?;
+            let client = ApiClient::new(url, None);
+            commands::bootstrap::run(&client, bootstrap_token).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Login { token } => {
+            commands::login::run(url, token)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Agent { command } => {
+            let token = token.clone().ok_or_else(|| {
+                AppError::Unauthorized("missing token; run pcy login first".into())
+            })?;
+            let client = ApiClient::new(url, Some(token));
+            match command {
+                AgentCommands::Create { name } => commands::agent::create(&client, name).await?,
+                AgentCommands::List => commands::agent::list(&client).await?,
+                AgentCommands::Show { agent } => commands::agent::show(&client, agent).await?,
+                AgentCommands::Disable { agent } => {
+                    commands::agent::disable(&client, agent).await?
+                }
+                AgentCommands::RotateSecret { agent } => {
+                    commands::agent::rotate_secret(&client, agent).await?
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Message { agent, text } => {
+            let token = token.clone().ok_or_else(|| {
+                AppError::Unauthorized("missing token; run pcy login first".into())
+            })?;
+            let client = ApiClient::new(url, Some(token));
+            commands::message::run(&client, agent, text).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Events { agent, tail, since } => {
+            let token = token.clone().ok_or_else(|| {
+                AppError::Unauthorized("missing token; run pcy login first".into())
+            })?;
+            let client = ApiClient::new(url, Some(token));
+            commands::events::run(&client, agent, since, tail).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Budget { command } => {
+            let token = token.clone().ok_or_else(|| {
+                AppError::Unauthorized("missing token; run pcy login first".into())
+            })?;
+            let client = ApiClient::new(url, Some(token));
+            match command {
+                BudgetCommands::Show { agent } => commands::budget::show(&client, agent).await?,
+                BudgetCommands::Set { agent, limit } => {
+                    commands::budget::set(&client, agent, limit).await?
+                }
+                BudgetCommands::Reset { agent } => commands::budget::reset(&client, agent).await?,
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Status => {
+            let client = ApiClient::new(url, token);
+            commands::status::run(&client).await
+        }
+    }
+}
