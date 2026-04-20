@@ -173,8 +173,34 @@ The platform's design practices are informed by emerging research in agentic sof
 ### Prerequisites
 
 - Docker 24+
+- Rust toolchain (for building the `pcy` CLI)
 - An LLM API key (OpenRouter default, OpenAI-compatible also supported)
-- `pcy` CLI available either on `PATH` or at `target/release/pcy`
+
+### Build the pcy CLI
+
+```bash
+cargo build --release --bin pcy
+```
+
+Then add it to your PATH:
+
+```bash
+# Linux / macOS / Git Bash
+export PATH="$PWD/target/release:$PATH"
+
+# Windows PowerShell
+$env:PATH = "$PWD\target\release;$env:PATH"
+```
+
+Or copy the binary to a directory already on your PATH:
+
+```bash
+# Linux / macOS
+sudo cp target/release/pcy /usr/local/bin/
+
+# Windows PowerShell (admin)
+Copy-Item target\release\pcy.exe C:\Windows\System32\
+```
 
 ### Web UI (fastest path)
 
@@ -292,6 +318,7 @@ Anchor index:
 - [silent-wake](#silent-wake)
 - [compose-up-failed](#compose-up-failed)
 - [already-bootstrapped](#already-bootstrapped)
+- [lost-session-token](#lost-session-token)
 - [log-format-json](#log-format-json)
 - [metrics-scrape](#metrics-scrape)
 - [backup-one-liner](#backup-one-liner)
@@ -319,7 +346,13 @@ Anchor index:
 
 #### already-bootstrapped
 
-- `/api/bootstrap` is one-time initialization. If you need a clean local reset, run the reset commands below.
+- `/api/bootstrap` is one-time initialization. To get a new session token, use `pcy login --bootstrap-token <token>` or `POST /api/login`.
+- If you need a full clean reset, run `docker compose down -v` and re-bootstrap.
+
+#### lost-session-token
+
+- Run `pcy login --bootstrap-token "$OPEN_PINCERY_BOOTSTRAP_TOKEN"` to get a fresh session token.
+- The bootstrap token in `.env` is your recovery credential — keep it safe.
 
 #### log-format-json
 
@@ -384,6 +417,7 @@ docker compose -f docker-compose.yml -f docker-compose.caddy.yml up -d
 | GET    | `/ready`                         | Readiness (DB + migrations + bg tasks) |
 | GET    | `/metrics`                       | Prometheus scrape (opt-in, own port)   |
 | POST   | `/api/bootstrap`                 | One-time admin setup                   |
+| POST   | `/api/login`                     | New session via bootstrap token        |
 | POST   | `/api/agents`                    | Create agent (returns webhook_secret)  |
 | GET    | `/api/agents`                    | List agents                            |
 | GET    | `/api/agents/:id`                | Agent detail with projections          |

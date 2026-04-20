@@ -26,8 +26,12 @@ enum Commands {
         bootstrap_token: Option<String>,
     },
     Login {
+        /// Paste a session token directly
+        #[arg(long, conflicts_with = "bootstrap_token")]
+        token: Option<String>,
+        /// Use bootstrap token to obtain a new session
         #[arg(long)]
-        token: String,
+        bootstrap_token: Option<String>,
     },
     Agent {
         #[command(subcommand)]
@@ -112,8 +116,22 @@ async fn run_inner() -> Result<ExitCode, AppError> {
             commands::bootstrap::run(&client, bootstrap_token).await?;
             Ok(ExitCode::SUCCESS)
         }
-        Commands::Login { token } => {
-            commands::login::run(url, token)?;
+        Commands::Login {
+            token,
+            bootstrap_token,
+        } => {
+            if let Some(bt) =
+                bootstrap_token.or_else(|| std::env::var("OPEN_PINCERY_BOOTSTRAP_TOKEN").ok())
+            {
+                let client = ApiClient::new(url, None);
+                commands::login::run_with_bootstrap(&client, bt).await?;
+            } else if let Some(t) = token {
+                commands::login::run(url, t)?;
+            } else {
+                return Err(AppError::BadRequest(
+                    "pass --token <session_token> or --bootstrap-token <bootstrap_token>".into(),
+                ));
+            }
             Ok(ExitCode::SUCCESS)
         }
         Commands::Agent { command } => {

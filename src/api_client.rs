@@ -76,6 +76,14 @@ impl ApiClient {
         .await
     }
 
+    pub async fn login(&self, bootstrap_token: &str) -> Result<Value, AppError> {
+        let req = self
+            .http
+            .post(format!("{}/api/login", self.base_url))
+            .header("Authorization", format!("Bearer {bootstrap_token}"));
+        self.send_json(req, None).await
+    }
+
     pub async fn list_agents(&self) -> Result<Value, AppError> {
         let req = self.http.get(format!("{}/api/agents", self.base_url));
         self.send_json(req, None).await

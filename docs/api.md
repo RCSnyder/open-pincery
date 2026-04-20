@@ -23,7 +23,7 @@ Examples assume `http://localhost:8080`.
 
 There are three auth patterns:
 
-- Bootstrap auth: `Authorization: Bearer <bootstrap_token>` only for `POST /api/bootstrap`.
+- Bootstrap auth: `Authorization: Bearer <bootstrap_token>` for `POST /api/bootstrap` and `POST /api/login`.
 - Session auth: `Authorization: Bearer <session_token>` for all authenticated `/api/agents/*` routes.
 - Webhook signature auth: unauthenticated route with `X-Webhook-Signature` HMAC header for webhook ingress.
 
@@ -103,7 +103,27 @@ Other `failing` values include `migrations`, `background_tasks`, `background_tas
 
 - Errors:
 - `401` missing/invalid bootstrap token
-- `409` already bootstrapped
+- `409` already bootstrapped — use `POST /api/login` to get a new session token
+
+### Login
+
+#### `POST /api/login`
+
+- Auth: bootstrap token (`Authorization: Bearer <bootstrap_token>`)
+- Description: issue a new session token for the admin user. Use when the system is already bootstrapped and you need a fresh session (e.g., lost token, expired session).
+- Request body: none.
+- Response 200:
+
+```json
+{
+  "user_id": "uuid",
+  "session_token": "token"
+}
+```
+
+- Errors:
+- `401` missing/invalid bootstrap token
+- `400` system not yet bootstrapped
 
 ### Agents
 
@@ -353,10 +373,10 @@ Other `failing` values include `migrations`, `background_tasks`, `background_tas
 
 The following call sites are covered by the endpoints above:
 
-| Caller                              | Endpoints used                                                                                                                                                      |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/api_client.rs` (CLI transport) | `/api/bootstrap`, `/api/agents`, `/api/agents/{id}`, `/api/agents/{id}/webhook/rotate`, `/api/agents/{id}/messages`, `/api/agents/{id}/events`, `/ready`            |
-| `static/js/api.js` (UI transport)   | `/api/bootstrap`, `/health`, `/ready`, `/api/agents`, `/api/agents/{id}`, `/api/agents/{id}/webhook/rotate`, `/api/agents/{id}/messages`, `/api/agents/{id}/events` |
+| Caller                              | Endpoints used                                                                                                                                                         |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/api_client.rs` (CLI transport) | `/api/bootstrap`, `/api/login`, `/api/agents`, `/api/agents/{id}`, `/api/agents/{id}/webhook/rotate`, `/api/agents/{id}/messages`, `/api/agents/{id}/events`, `/ready` |
+| `static/js/api.js` (UI transport)   | `/api/bootstrap`, `/health`, `/ready`, `/api/agents`, `/api/agents/{id}`, `/api/agents/{id}/webhook/rotate`, `/api/agents/{id}/messages`, `/api/agents/{id}/events`    |
 
 ## Route Registration Source of Truth
 

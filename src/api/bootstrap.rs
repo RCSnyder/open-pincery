@@ -20,8 +20,16 @@ struct BootstrapResponse {
     session_token: String,
 }
 
+#[derive(Serialize)]
+struct LoginResponse {
+    user_id: Uuid,
+    session_token: String,
+}
+
 pub fn router() -> Router<AppState> {
-    Router::new().route("/api/bootstrap", post(bootstrap))
+    Router::new()
+        .route("/api/bootstrap", post(bootstrap))
+        .route("/api/login", post(login))
 }
 
 async fn bootstrap(
@@ -42,7 +50,9 @@ async fn bootstrap(
     // Check if already bootstrapped
     let existing = user::find_local_admin(&state.pool).await?;
     if existing.is_some() {
-        return Err(AppError::Conflict("System already bootstrapped".into()));
+        return Err(AppError::Conflict(
+            "System already bootstrapped. Use 'pcy login --bootstrap-token <token>' or POST /api/login to get a new session token.".into(),
+        ));
     }
 
     let admin = user::create_local_admin(&state.pool, "admin@localhost", "Admin").await?;
@@ -68,6 +78,40 @@ async fn bootstrap(
             user_id: admin.id,
             organization_id: org.id,
             workspace_id: ws.id,
+            session_token: raw_token,
+        }),
+    ))
+}
+
+async fn login(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+) -> Result<impl IntoResponse, AppError> {
+    let token = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or(AppError::Unauthorized("Missing bearer token".into()))?;
+
+    if token != state.config.bootstrap_token {
+        return Err(AppError::Unauthorized("Invalid bootstrap token".into()));
+    }
+
+    let admin = user::find_local_admin(&state.pool)
+        .await?
+        .ok_or(AppError::BadRequest(
+            "System not bootstrapped yet. Run 'pcy bootstrap' first.".into(),
+        ))?;
+
+    let raw_token = crate::auth::generate_token();
+    let token_hash = crate::auth::hash_token(&raw_token);
+    user::create_session(&state.pool, admin.id, &token_hash, "local_admin").await?;
+
+    Ok((
+        StatusCode::OK,
+        Json(LoginResponse {
+            user_id: admin.id,
             session_token: raw_token,
         }),
     ))
