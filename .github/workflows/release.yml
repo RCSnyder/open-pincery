@@ -123,10 +123,18 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
-          cargo cyclonedx --format json --override-filename "open-pincery-${TAG}-sbom"
+          OUT="open-pincery-${TAG}-sbom.cdx.json"
+          # cargo-cyclonedx writes to a crate-default filename which varies by
+          # version; locate the produced .cdx.json and rename it.
+          cargo cyclonedx --format json
+          SRC=$(find . -maxdepth 3 -name '*.cdx.json' -not -path './dist/*' | head -n1)
+          if [ -z "$SRC" ]; then
+            echo "No .cdx.json produced by cargo-cyclonedx" >&2
+            exit 1
+          fi
           mkdir -p dist
-          mv open-pincery-${TAG}-sbom.cdx.json "dist/open-pincery-${TAG}-sbom.cdx.json"
-          (cd dist && sha256sum "open-pincery-${TAG}-sbom.cdx.json" > "open-pincery-${TAG}-sbom.cdx.json.sha256")
+          cp "$SRC" "dist/${OUT}"
+          (cd dist && sha256sum "${OUT}" > "${OUT}.sha256")
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
