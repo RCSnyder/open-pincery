@@ -1,10 +1,13 @@
-// API client for Open Pincery
+// @ts-check
+
 const TOKEN_KEY = "op_session_token"
 
+/** @returns {string | null} */
 export function getToken() {
   return localStorage.getItem(TOKEN_KEY)
 }
 
+/** @param {string} token */
 export function setToken(token) {
   localStorage.setItem(TOKEN_KEY, token)
 }
@@ -13,21 +16,26 @@ export function clearToken() {
   localStorage.removeItem(TOKEN_KEY)
 }
 
+/**
+ * @param {string} method
+ * @param {string} path
+ * @param {any=} body
+ */
 async function request(method, path, body) {
+  /** @type {Record<string, string>} */
   const headers = {}
   const token = getToken()
   if (token) headers["Authorization"] = `Bearer ${token}`
-  if (body) headers["Content-Type"] = "application/json"
+  if (body !== undefined) headers["Content-Type"] = "application/json"
 
   const res = await fetch(path, {
     method,
     headers,
-    body: body ? JSON.stringify(body) : undefined
+    body: body !== undefined ? JSON.stringify(body) : undefined
   })
 
   if (res.status === 401) {
     clearToken()
-    // Will be caught by the caller to redirect to auth
     throw { status: 401, message: "Unauthorized" }
   }
 
@@ -40,6 +48,7 @@ async function request(method, path, body) {
   return res.json()
 }
 
+/** @param {string} bootstrapToken */
 export async function bootstrap(bootstrapToken) {
   const res = await fetch("/api/bootstrap", {
     method: "POST",
@@ -52,33 +61,64 @@ export async function bootstrap(bootstrapToken) {
   return res.json()
 }
 
-export async function healthCheck() {
+export async function health() {
   return request("GET", "/health")
+}
+
+export async function ready() {
+  return request("GET", "/ready")
 }
 
 export async function listAgents() {
   return request("GET", "/api/agents")
 }
 
+/** @param {string} name */
 export async function createAgent(name) {
   return request("POST", "/api/agents", { name })
 }
 
-export async function getAgent(id) {
-  return request("GET", `/api/agents/${encodeURIComponent(id)}`)
+/** @param {string} agentId */
+export async function getAgent(agentId) {
+  return request("GET", `/api/agents/${encodeURIComponent(agentId)}`)
 }
 
+/** @param {string} agentId */
+export async function rotateWebhookSecret(agentId) {
+  return request(
+    "POST",
+    `/api/agents/${encodeURIComponent(agentId)}/webhook/rotate`
+  )
+}
+
+/** @param {string} agentId @param {number} budgetLimitUsd */
+export async function setBudget(agentId, budgetLimitUsd) {
+  return request("PATCH", `/api/agents/${encodeURIComponent(agentId)}`, {
+    budget_limit_usd: budgetLimitUsd
+  })
+}
+
+/** @param {string} agentId @param {string} content */
 export async function sendMessage(agentId, content) {
   return request(
     "POST",
     `/api/agents/${encodeURIComponent(agentId)}/messages`,
-    { content }
+    {
+      content
+    }
   )
 }
 
-export async function getEvents(agentId, limit = 100) {
+/**
+ * @param {string} agentId
+ * @param {{limit?: number, since?: string}=} options
+ */
+export async function getEvents(agentId, options = {}) {
+  const params = new URLSearchParams()
+  params.set("limit", String(options.limit ?? 200))
+  if (options.since) params.set("since", options.since)
   return request(
     "GET",
-    `/api/agents/${encodeURIComponent(agentId)}/events?limit=${limit}`
+    `/api/agents/${encodeURIComponent(agentId)}/events?${params.toString()}`
   )
 }

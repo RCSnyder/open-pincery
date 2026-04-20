@@ -102,3 +102,32 @@ pub async fn has_pending_events(
     .await?;
     Ok(count > 0)
 }
+
+pub async fn events_since_id(
+    pool: &PgPool,
+    agent_id: Uuid,
+    since_id: Uuid,
+    limit: i64,
+) -> Result<Vec<Event>, AppError> {
+    let events = sqlx::query_as::<_, Event>(
+        "SELECT e.*
+         FROM events e
+         WHERE e.agent_id = $1
+           AND e.created_at > COALESCE(
+               (
+                 SELECT created_at
+                 FROM events
+                 WHERE id = $2 AND agent_id = $1
+               ),
+               to_timestamp(0)
+           )
+         ORDER BY e.created_at ASC
+         LIMIT $3",
+    )
+    .bind(agent_id)
+    .bind(since_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(events)
+}
