@@ -57,6 +57,8 @@ fn ac_28_optional_vars_forwarded_with_defaults() {
     // ${VAR:-default} interpolation so operators can override without editing
     // the compose file.
     for (var, _default_hint) in [
+        ("OPEN_PINCERY_HOST", "0.0.0.0"),
+        ("OPEN_PINCERY_PORT", "8080"),
         ("LLM_MODEL", "anthropic"),
         ("LLM_MAINTENANCE_MODEL", "anthropic"),
         ("LLM_PRICE_INPUT_PER_MTOK", "3.0"),
@@ -119,6 +121,8 @@ fn ac_28_compose_config_resolves_with_env_fixture() {
         .env("OPEN_PINCERY_BOOTSTRAP_TOKEN", "fixture-token-12345")
         .env("LLM_API_BASE_URL", "https://example.invalid/v1")
         .env("LLM_API_KEY", "fixture-key")
+        .env("OPEN_PINCERY_HOST", "0.0.0.0")
+        .env("OPEN_PINCERY_PORT", "8080")
         .output()
         .expect("docker compose must be invokable");
     assert!(
@@ -132,6 +136,15 @@ fn ac_28_compose_config_resolves_with_env_fixture() {
         "rendered compose must contain the operator-supplied bootstrap token"
     );
     assert!(
+        rendered.contains("OPEN_PINCERY_HOST: 0.0.0.0"),
+        "rendered compose must contain OPEN_PINCERY_HOST from interpolation"
+    );
+    assert!(
+        rendered.contains("OPEN_PINCERY_PORT: \"8080\"")
+            || rendered.contains("OPEN_PINCERY_PORT: '8080'"),
+        "rendered compose must contain OPEN_PINCERY_PORT from interpolation"
+    );
+    assert!(
         !rendered.contains("changeme"),
         "rendered compose must not contain `changeme` literal"
     );
@@ -143,13 +156,28 @@ fn ac_32_compose_config_fails_fast_without_required_secrets() {
         eprintln!("SKIP: set COMPOSE_AVAILABLE=1 to run live fail-fast check");
         return;
     }
+
+    // Compose auto-loads ./.env from CWD unless --env-file is supplied.
+    // Force a truly scrubbed environment by passing an empty env-file.
+    let mut empty_env = std::env::temp_dir();
+    empty_env.push("open_pincery_empty_compose_env_test.env");
+    std::fs::write(&empty_env, "\n").expect("must write empty compose env file");
+
     let out = Command::new("docker")
-        .args(["compose", "config"])
+        .args([
+            "compose",
+            "--env-file",
+            empty_env.to_str().expect("temp path must be utf-8"),
+            "config",
+        ])
         .env_remove("OPEN_PINCERY_BOOTSTRAP_TOKEN")
         .env_remove("LLM_API_KEY")
         .env_remove("LLM_API_BASE_URL")
         .output()
         .expect("docker compose must be invokable");
+
+    let _ = std::fs::remove_file(&empty_env);
+
     assert!(
         !out.status.success(),
         "docker compose config must fail when required secrets are unset (AC-32)"

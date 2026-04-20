@@ -459,6 +459,51 @@
 
 - **Gate**: PASS (attempt 1)
 - **Evidence**: `scaffolding/readiness.md` produced by the analyze subagent — v5 overwrites v4 (v4 lives in git history). Verdict READY. 17 Truths (T-v5-1..T-v5-17). AC-28..AC-33 coverage table with named test files and runtime proof paths. Build order locked at six slices: (1) compose + .env.example rewrite covering AC-28/AC-29/AC-32, (2) compose + env regression tests, (3) bash smoke script, (4) PowerShell smoke script, (5) README rewrite + readme_quickstart_test, (6) Caddy overlay + test + Going-Public subsection. Scope Reduction Risks explicit. Clarifications Needed: None. Complexity Exceptions: None.
-- **Changes**: `scaffolding/readiness.md` replaced with v5 content (v4 content preserved in git history at `9013ff7`).
+- **Changes**: `scaffolding/readiness.md` replaced with v5 content (v4 content preserved in git history at `bba2497`).
 - **Retries**: 0
 - **Next**: BUILD.
+
+## v5 BUILD — 2026-04-19T22:34Z (in progress)
+
+- **Gate**: partial — slices 1+2 committed (`893759f`); slices 3–6 (smoke scripts, README rewrite, Caddy overlay + tests) completed in working tree but uncommitted at time of this RECONCILE.
+- **Evidence**:
+  - Slice 1 + 2 (`feat(build): v5 slice 1+2 compose + .env.example rewrite with regression tests`, commit `893759f`): `docker-compose.yml` rewritten to `${VAR}` interpolation with fail-fast `:?` guards for `OPEN_PINCERY_BOOTSTRAP_TOKEN` / `LLM_API_BASE_URL` / `LLM_API_KEY` and `${VAR:-default}` for every optional runtime var; both `app` and `db` published on `127.0.0.1` only. `.env.example` refreshed with every runtime-read var grouped + commented, OpenRouter default + commented OpenAI alternative, `OPEN_PINCERY_HOST=0.0.0.0` default for compose-network reachability. New `tests/compose_env_test.rs` (7 assertions: no `changeme` literal, fail-fast `:?` on required secrets, `${VAR:-default}` forwarding for 16 optional vars, `127.0.0.1:8080:8080` and `127.0.0.1:5432:5432` bindings, gated live `docker compose config` checks). New `tests/env_example_test.rs` (4 assertions: source→example coverage, orphan-entry prevention, OpenAI alternative present, `OPEN_PINCERY_HOST=0.0.0.0` default). Closes AC-28, AC-29, AC-32.
+  - Slices 3–4 (uncommitted): `scripts/smoke.sh` + `scripts/smoke.ps1` exercise `docker compose up -d --wait` → `/ready` poll → `pcy bootstrap/agent create/message/events` → asserts `message_received`. `tests/smoke_script_test.rs` static-checks both scripts for milestone strings and runs `bash scripts/smoke.sh` under `DOCKER_SMOKE=1`. Closes AC-30.
+  - Slice 5 (uncommitted): `README.md` Quick Start rewritten with Web UI → `pcy` → curl/HTTP appendix → From Signed Release Binary → Troubleshooting (bootstrap-401, rate-limit-429, silent-wake, already-bootstrapped, log-format-json, metrics-scrape, backup-one-liner anchors) → Reset → Going public with HTTPS. API table includes shipped v4 route `POST /api/agents/:id/webhook/rotate` plus compat note naming the legacy `rotate-webhook-secret` spelling from scope AC-31. `tests/readme_quickstart_test.rs` grep-asserts every section heading, milestone command, troubleshooting anchor, and accepts either rotate path. Closes AC-31.
+  - Slice 6 (uncommitted): `docker-compose.caddy.yml` (Caddy 2 service fronting app, publishing 80/443, mounts `Caddyfile.example`) + `Caddyfile.example` (single site block with `reverse_proxy app:8080`, editable host, global `email`) + `tests/caddy_overlay_test.rs` (structural + gated live `docker compose -f ... config` + optional `caddy validate`). Closes AC-33.
+  - Test state: full workspace `cargo test --all-targets -- --test-threads=1` green; `cargo fmt --all -- --check` clean.
+- **Changes**: `docker-compose.yml`, `.env.example`, `README.md`, `scripts/smoke.sh`, `scripts/smoke.ps1`, `docker-compose.caddy.yml`, `Caddyfile.example`, `tests/compose_env_test.rs`, `tests/env_example_test.rs`, `tests/smoke_script_test.rs`, `tests/readme_quickstart_test.rs`, `tests/caddy_overlay_test.rs`, plus in-flight updates to `scaffolding/scope.md` and `scaffolding/readiness.md` aligning `OPEN_PINCERY_HOST` default.
+- **Retries**: 0
+- **Next**: commit remaining slices (3–6), then REVIEW.
+
+## v5 RECONCILE — 2026-04-19T23:00Z
+
+- **Confidence**: REPAIRED.
+- **Cosmetic drift fixed**:
+  - None.
+- **Structural drift fixed**:
+  - `scaffolding/readiness.md`: stale git-history anchor for the prior v4 readiness — replaced `9013ff7` (which is actually the v5 design addendum commit) with `bba2497` (the last commit to update v4 readiness, `docs(reconcile): sync v4 scaffolding with shipped code`) in the header note, the footer note, and the removed-tail HTML comment.
+  - `scaffolding/readiness.md` T-v5-14: rewritten to match shipped reality — the README API table lists the actual v4 route `POST /api/agents/:id/webhook/rotate` plus a compatibility note naming the legacy `rotate-webhook-secret` spelling preserved verbatim in scope AC-31. Old truth required only the legacy path which is not what the shipped README exposes as the canonical route.
+  - `scaffolding/readiness.md` R-9: same realignment — guard now requires either the shipped `/api/agents/:id/webhook/rotate` or the legacy `/api/agents/:id/rotate-webhook-secret` path, matching the `tests/readme_quickstart_test.rs` assertion that already accepts both.
+  - `scaffolding/design.md` v5 New Files table: added `tests/smoke_script_test.rs` row (was present in `readiness.md` L-30 and in the codebase, but missing from design's new-files list).
+  - `scaffolding/log.md`: added missing v5 BUILD entry documenting slice 1+2 committed state plus slices 3–6 in-flight (uncommitted) state — previous tail stopped at v5 ANALYZE despite commit `893759f` already being on HEAD.
+- **Spec-violating drift**:
+  - None. Scope AC-31 literally names `/api/agents/:id/rotate-webhook-secret`; the shipped README contains that literal string inside a compatibility note pointing at the canonical `/api/agents/:id/webhook/rotate` route, so the AC is satisfied as written. The scope wording is a known legacy-path label kept intentionally and is not in conflict with the code.
+- **Documents updated**: `scaffolding/readiness.md`, `scaffolding/design.md`, `scaffolding/log.md`.
+- **Notes for human**: scope AC-31's literal `rotate-webhook-secret` spelling is preserved; the author may choose to update it to the canonical `webhook/rotate` path in a separate scope-wording pass, but that is a scope decision, not reconcile territory.
+
+## v5 REVIEW — 2026-04-19T23:30Z
+
+- **Gate**: PASS (attempt 4)
+- **Evidence**: Four review iterations. Iteration 1: 4 Required findings (host/port hardcoded in compose, test env scrubbing, PS curl alias, troubleshooting anchor misrouting). Iteration 2: Critical — `.env.example` defaulted `OPEN_PINCERY_HOST=127.0.0.1` breaking container networking. Iteration 3: scope.md/readiness.md still referenced 127.0.0.1 in AC-32 and T-v5-6. Iteration 4: all axes clean — zero Critical or Required findings.
+- **Changes**: `docker-compose.yml` (interpolated host/port), `.env.example` (0.0.0.0 default), `scripts/smoke.sh` + `scripts/smoke.ps1` (curl.exe, correct anchors), `tests/compose_env_test.rs` (env scrubbing via --env-file), `tests/env_example_test.rs` (renamed test, 0.0.0.0 assertion), `scaffolding/scope.md` (AC-32 wording), `scaffolding/readiness.md` (T-v5-6 wording).
+- **Retries**: 3
+- **Next**: RECONCILE.
+
+## v5 VERIFY — 2026-04-19T23:45Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: Full test suite green (55+ tests, 25 test files, `cargo test --all-targets -- --test-threads=1`). `cargo fmt --check` clean. `cargo clippy` clean. All 6 ACs (AC-28..AC-33) verified with real evidence — compose env interpolation, .env.example coverage, smoke script structure, README section/anchor assertions, Caddy overlay validation. All 17 truths (T-v5-1..T-v5-17) confirmed. No security issues. Deployment config correct.
+- **Changes**: None (read-only verification).
+- **Retries**: 0
+- **Next**: DEPLOY.

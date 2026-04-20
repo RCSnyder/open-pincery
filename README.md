@@ -172,141 +172,230 @@ The platform's design practices are informed by emerging research in agentic sof
 
 ### Prerequisites
 
-- Rust 1.75+
-- Docker (for PostgreSQL) or an existing PostgreSQL 16+ instance
-- An OpenAI-compatible LLM API key (e.g., OpenRouter, OpenAI)
+- Docker 24+
+- An LLM API key (OpenRouter default, OpenAI-compatible also supported)
+- `pcy` CLI available either on `PATH` or at `target/release/pcy`
 
-### 1. Start PostgreSQL
+### Web UI (fastest path)
 
-**Option A — Docker Compose (full stack):**
-
-```bash
-# Start both the app and PostgreSQL
-cp .env.example .env
-# Edit .env: set LLM_API_KEY and OPEN_PINCERY_BOOTSTRAP_TOKEN
-docker compose up -d
-```
-
-The app starts on `http://localhost:8080` with migrations applied automatically. Skip to step 4.
-
-**Option B — PostgreSQL only (development):**
-
-```bash
-docker compose up -d db
-```
-
-This starts Postgres on `localhost:5432` with user/password/database all set to `open_pincery`.
-
-### 2. Configure Environment
+1. Prepare env:
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` and set at minimum:
+Set non-placeholder values in `.env` for:
 
-- `LLM_API_KEY` — your LLM provider API key
-- `OPEN_PINCERY_BOOTSTRAP_TOKEN` — a secret for the one-time admin setup
+- `OPEN_PINCERY_BOOTSTRAP_TOKEN`
+- `LLM_API_KEY`
 
-### 3. Build and Run
-
-```bash
-cargo build --release
-```
-
-**Linux/macOS:**
+1. Start stack and wait for health:
 
 ```bash
-source .env && ./target/release/open-pincery
+docker compose up -d --wait
+curl -fsS http://localhost:8080/ready
 ```
 
-**Windows (PowerShell):**
+1. Open the UI:
+
+- `http://localhost:8080`
+
+1. Bootstrap once (copy the returned session token into the UI login panel):
+
+```bash
+pcy --url http://localhost:8080 bootstrap --bootstrap-token "$OPEN_PINCERY_BOOTSTRAP_TOKEN"
+```
+
+### pcy CLI path
+
+Use this if you prefer terminal-first operations.
+
+If `OPEN_PINCERY_URL=http://localhost:8080` is exported, the shortest command
+forms are:
+
+```bash
+pcy bootstrap --bootstrap-token "$OPEN_PINCERY_BOOTSTRAP_TOKEN"
+pcy agent create "my-agent"
+pcy message AGENT_ID "hello from cli"
+pcy events AGENT_ID
+```
+
+Equivalent explicit URL form:
+
+```bash
+# one-time bootstrap
+pcy --url http://localhost:8080 bootstrap --bootstrap-token "$OPEN_PINCERY_BOOTSTRAP_TOKEN"
+
+# create an agent
+pcy --url http://localhost:8080 agent create "my-agent"
+
+# send a message
+pcy --url http://localhost:8080 message AGENT_ID "hello from cli"
+
+# read events
+pcy --url http://localhost:8080 events AGENT_ID
+```
+
+You can run the full scripted flow with:
+
+```bash
+bash scripts/smoke.sh
+```
+
+On Windows PowerShell:
 
 ```powershell
-Get-Content .env | ForEach-Object { if ($_ -match '^\s*([^#][^=]+)=(.*)$') { [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2]) } }
-.\target\release\open-pincery.exe
+powershell -ExecutionPolicy Bypass -File .\scripts\smoke.ps1
 ```
 
-The server starts on `http://localhost:8080`. You should see `Starting server` in the logs. Migrations run automatically on first start.
-
-### 4. Bootstrap (One-Time)
-
-Create the first admin user:
+### curl/HTTP appendix
 
 ```bash
 curl -X POST http://localhost:8080/api/bootstrap \
   -H "Authorization: Bearer YOUR_BOOTSTRAP_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"email": "admin@example.com", "name": "Admin"}'
-```
 
-This returns a `session_token`. Save it — all subsequent API calls require it.
-
-### 5. Create an Agent and Send a Message
-
-```bash
-# Create an agent
 curl -X POST http://localhost:8080/api/agents \
   -H "Authorization: Bearer SESSION_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name": "my-agent"}'
 
-# Send a message (triggers a wake cycle)
 curl -X POST http://localhost:8080/api/agents/AGENT_ID/messages \
   -H "Authorization: Bearer SESSION_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"content": "Hello, what can you do?"}'
 
-# Check the event log
 curl http://localhost:8080/api/agents/AGENT_ID/events \
   -H "Authorization: Bearer SESSION_TOKEN"
 ```
 
-### 6. Verify Health
+### From Signed Release Binary
+
+If you do not want to build from source, use release artifacts from GitHub Releases (AC-20).
 
 ```bash
-curl http://localhost:8080/health
-# {"status":"ok"}
-
-curl http://localhost:8080/ready
-# 200 {"status":"ready"} when DB is reachable, migrations are applied, and
-# both background tasks (LISTEN/NOTIFY + stale recovery) are alive.
-# Otherwise 503 with {"status":"not_ready","failing":"database" |
-#   "migrations" | "background_task:listener" |
-#   "background_task:stale_recovery" | "background_tasks"}.
+# Example verification flow (replace filenames with your release assets)
+cosign verify-blob open-pincery-linux-x86_64 \
+  --signature open-pincery-linux-x86_64.sig \
+  --certificate open-pincery-linux-x86_64.pem \
+  --certificate-identity-regexp "https://github.com/RCSnyder/open-pincery/.*" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
 ```
 
-### 7. Observability (optional)
+### Troubleshooting
 
-- **Structured logs**: set `LOG_FORMAT=json` to emit one JSON object per line
-  (`timestamp`, `level`, `target`, `fields.message`, plus span context) for
-  ingestion into Loki, Vector, Elastic, etc. Any other value produces
-  human-readable output.
-- **Prometheus metrics**: set `METRICS_ADDR=127.0.0.1:9090` to spawn a
-  separate `/metrics` endpoint. Exposes counters for wakes, LLM calls,
-  tokens consumed, tool calls, webhook deliveries, rate-limit rejections;
-  a gauge for active wakes; and a histogram of wake durations. Leave unset
-  to disable metrics entirely (zero cost).
-- **Operator runbooks**: see [`docs/runbooks/`](docs/runbooks/) for
-  diagnostic + remediation playbooks (stale wakes, DB restore, migration
-  rollback, rate-limit tuning, webhook debugging).
+Anchor index:
+
+- [bootstrap-401](#bootstrap-401)
+- [rate-limit-429](#rate-limit-429)
+- [silent-wake](#silent-wake)
+- [compose-up-failed](#compose-up-failed)
+- [already-bootstrapped](#already-bootstrapped)
+- [log-format-json](#log-format-json)
+- [metrics-scrape](#metrics-scrape)
+- [backup-one-liner](#backup-one-liner)
+
+#### bootstrap-401
+
+- Confirm `.env` has the same `OPEN_PINCERY_BOOTSTRAP_TOKEN` you pass to `pcy bootstrap`.
+- Verify the compose stack loaded your env: `docker compose config | grep OPEN_PINCERY_BOOTSTRAP_TOKEN`.
+
+#### rate-limit-429
+
+- Unauthenticated routes are limited to 10 req/min and authenticated routes to 60 req/min.
+- Back off and retry after the `Retry-After` header.
+
+#### silent-wake
+
+- Check logs: `docker compose logs -f app`.
+- Confirm `LLM_API_KEY` is valid and `LLM_API_BASE_URL` points to your provider.
+
+#### compose-up-failed
+
+- Check `docker compose logs -f app` and `docker compose logs -f db` for startup errors.
+- Confirm required `.env` values are set (`OPEN_PINCERY_BOOTSTRAP_TOKEN`, `LLM_API_KEY`, `LLM_API_BASE_URL`).
+- If this is a stale local state issue, run reset (`docker compose down -v`) and retry.
+
+#### already-bootstrapped
+
+- `/api/bootstrap` is one-time initialization. If you need a clean local reset, run the reset commands below.
+
+#### log-format-json
+
+- Set `LOG_FORMAT=json` in `.env`, restart with `docker compose up -d`, then stream logs:
+
+```bash
+docker compose logs -f app
+```
+
+#### metrics-scrape
+
+- Set `METRICS_ADDR=127.0.0.1:9090` in `.env` and restart.
+- Scrape metrics:
+
+```bash
+curl -fsS http://127.0.0.1:9090/metrics | head
+```
+
+#### backup-one-liner
+
+```bash
+docker compose exec db pg_dump -U open_pincery open_pincery > backup.sql
+```
+
+See [`docs/runbooks/db-restore.md`](docs/runbooks/db-restore.md) for restore steps.
+
+### Reset (wipe local state)
+
+<a id="reset"></a>
+
+```bash
+docker compose down -v
+```
+
+This removes the Postgres volume and all local data.
+
+### Going public with HTTPS
+
+Default compose bindings are loopback-only (`127.0.0.1`) for safety.
+To expose Open Pincery over HTTPS with Caddy:
+
+1. Edit `Caddyfile.example` with your real domain and email.
+1. Start with overlay:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.caddy.yml up -d
+```
+
+1. Confirm Caddy is serving 80/443 and reverse-proxying to `app:8080`.
+
+### Observability (optional)
+
+- **Structured logs**: set `LOG_FORMAT=json` for JSON lines suitable for log pipelines.
+- **Prometheus metrics**: set `METRICS_ADDR=127.0.0.1:9090` to expose `/metrics` on a dedicated listener.
+- **Operator runbooks**: see [`docs/runbooks/`](docs/runbooks/) for stale wake, DB restore, rollback, rate-limit tuning, and webhook debugging.
 
 ### API
 
-| Method | Path                       | Description                            |
-| ------ | -------------------------- | -------------------------------------- |
-| GET    | `/health`                  | Liveness (always 200 while serving)    |
-| GET    | `/ready`                   | Readiness (DB + migrations + bg tasks) |
-| GET    | `/metrics`                 | Prometheus scrape (opt-in, own port)   |
-| POST   | `/api/bootstrap`           | One-time admin setup                   |
-| POST   | `/api/agents`              | Create agent (returns webhook_secret)  |
-| GET    | `/api/agents`              | List agents                            |
-| GET    | `/api/agents/:id`          | Agent detail with projections          |
-| PATCH  | `/api/agents/:id`          | Update agent name/enabled status       |
-| DELETE | `/api/agents/:id`          | Soft-delete (disable with reason)      |
-| POST   | `/api/agents/:id/messages` | Send message (triggers wake)           |
-| GET    | `/api/agents/:id/events`   | Event log                              |
-| POST   | `/api/agents/:id/webhooks` | Webhook ingress (HMAC-SHA256)          |
+| Method | Path                             | Description                            |
+| ------ | -------------------------------- | -------------------------------------- |
+| GET    | `/health`                        | Liveness (always 200 while serving)    |
+| GET    | `/ready`                         | Readiness (DB + migrations + bg tasks) |
+| GET    | `/metrics`                       | Prometheus scrape (opt-in, own port)   |
+| POST   | `/api/bootstrap`                 | One-time admin setup                   |
+| POST   | `/api/agents`                    | Create agent (returns webhook_secret)  |
+| GET    | `/api/agents`                    | List agents                            |
+| GET    | `/api/agents/:id`                | Agent detail with projections          |
+| PATCH  | `/api/agents/:id`                | Update agent name/enabled status       |
+| DELETE | `/api/agents/:id`                | Soft-delete (disable with reason)      |
+| POST   | `/api/agents/:id/messages`       | Send message (triggers wake)           |
+| GET    | `/api/agents/:id/events`         | Event log                              |
+| POST   | `/api/agents/:id/webhook/rotate` | Rotate per-agent webhook secret        |
+| POST   | `/api/agents/:id/webhooks`       | Webhook ingress (HMAC-SHA256)          |
+
+Compatibility note: older docs may refer to `/api/agents/:id/rotate-webhook-secret`.
+The shipped v4/v5 route is `/api/agents/:id/webhook/rotate`.
 
 All `/api/*` routes (except bootstrap) require `Authorization: Bearer <session_token>`.
 Webhook routes require `X-Signature` header with HMAC-SHA256 of the body.

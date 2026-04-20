@@ -159,15 +159,11 @@ fn ac_29_env_example_has_no_orphan_entries() {
 }
 
 #[test]
-fn ac_32_env_example_defaults_to_loopback_host() {
+fn ac_32_env_example_defaults_to_compose_reachable_host() {
     let contents = std::fs::read_to_string(".env.example").expect(".env.example");
     assert!(
-        contents.contains("OPEN_PINCERY_HOST=127.0.0.1"),
-        ".env.example must default OPEN_PINCERY_HOST to 127.0.0.1 (AC-32)"
-    );
-    assert!(
-        !contents.contains("OPEN_PINCERY_HOST=0.0.0.0"),
-        ".env.example must not default to 0.0.0.0 (AC-32)"
+        contents.contains("OPEN_PINCERY_HOST=0.0.0.0"),
+        ".env.example must default OPEN_PINCERY_HOST to 0.0.0.0 so compose networking works"
     );
 }
 

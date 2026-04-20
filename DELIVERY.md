@@ -1,4 +1,4 @@
-# DELIVERY.md — Open Pincery v4
+# DELIVERY.md — Open Pincery v5
 
 ## What Was Built
 
@@ -60,6 +60,15 @@ A multi-agent platform runtime implementing the Open Pincery architecture: event
 - AC-25: `pcy` CLI binary (`[[bin]] pcy` in `Cargo.toml`) with subcommands `bootstrap`, `login`, `agent` (`create`/`list`/`show`/`disable`/`rotate-secret`), `message`, `events`, `budget` (`show`/`set`/`reset`), and `status`. Thin shim at `src/bin/pcy.rs`; shared HTTP client at `src/api_client.rs`.
 - AC-26: Vanilla-JS ES-module control plane UI served at `/` from `static/`. Split across `static/js/{app,api,state,ui}.js` plus `static/js/views/{login,agents,detail,settings}.js`; no bundler, no CDN, no single file exceeds 132 lines. Covers login, agent list, agent detail with long-poll event stream, and settings including secret rotation.
 - AC-27: `docs/api.md` publishes the v4 HTTP surface as the stable contract, documents the three auth models (bootstrap token, session token, webhook HMAC), the common error shape, every endpoint with request/response examples, and the client coverage matrix against the `pcy` CLI and the static UI.
+
+## v5 Changes (from v4) — Operator Onramp
+
+- AC-28: `docker-compose.yml` env block rewritten — every runtime-read env var forwarded via `${VAR:-default}` interpolation; required secrets (`OPEN_PINCERY_BOOTSTRAP_TOKEN`, `LLM_API_BASE_URL`, `LLM_API_KEY`) use `:?` fail-fast guards. No hardcoded tokens or credentials remain.
+- AC-29: `.env.example` refreshed to cover every `env::var` call in the source. Grouped by function (server, LLM, auth, budget, stale recovery, observability), commented with purpose and defaults. OpenRouter default + commented OpenAI alternative.
+- AC-30: End-to-end smoke scripts (`scripts/smoke.sh` + `scripts/smoke.ps1`) exercise `docker compose up --wait` → health poll → `pcy bootstrap` → agent create → message → event query → assert `message_received`. Both use `curl.exe` explicitly to avoid PowerShell alias issues.
+- AC-31: `README.md` Quick Start rewritten — Web UI path, `pcy` CLI path, curl/HTTP appendix, signed binary install, troubleshooting (7 anchors), reset, going public with HTTPS, observability. API table includes canonical `POST /api/agents/:id/webhook/rotate` with compat note for legacy `rotate-webhook-secret` spelling.
+- AC-32: Secure-by-default compose — host ports bound to `127.0.0.1`, `.env.example` defaults `OPEN_PINCERY_HOST=0.0.0.0` so the app is reachable inside the Docker network (loopback restricted by port mapping on host side).
+- AC-33: Caddy TLS overlay (`docker-compose.caddy.yml` + `Caddyfile.example`) for HTTPS exposure. `docker compose -f docker-compose.yml -f docker-compose.caddy.yml up -d` adds Caddy fronting the app on ports 80/443.
 
 ## Known Limitations
 

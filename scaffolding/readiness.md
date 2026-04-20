@@ -1,7 +1,7 @@
 # Readiness: Open Pincery — v5 (Operator Onramp)
 
 > This file supersedes the prior v4 readiness record. v4 is shipped; its
-> readiness artifact lives in git history at commit `9013ff7` and earlier.
+> readiness artifact lives in git history at commit `bba2497` and earlier.
 > v5 covers AC-28 through AC-33 only — the prior AC-1..AC-27 coverage is
 > verified by the shipped v4 suite and is not re-planned here.
 
@@ -35,7 +35,9 @@ Non-negotiable statements that must be true in the shipped v5 system:
   with a message naming the missing variable.
 - **T-v5-5** The default published port binding is `127.0.0.1:8080:8080`.
   Compose does not expose the app on `0.0.0.0` out of the box.
-- **T-v5-6** `.env.example` defaults `OPEN_PINCERY_HOST=127.0.0.1`.
+- **T-v5-6** `.env.example` defaults `OPEN_PINCERY_HOST=0.0.0.0` for
+  container-network reachability; host exposure remains restricted by
+  `docker-compose.yml` loopback port mapping (`127.0.0.1:8080:8080`).
 - **T-v5-7** `.env.example` ships OpenRouter as the default
   `LLM_API_BASE_URL` and includes a commented OpenAI-compatible
   alternative block.
@@ -60,8 +62,10 @@ Non-negotiable statements that must be true in the shipped v5 system:
 - **T-v5-13** Every milestone command executed by `scripts/smoke.sh`
   appears verbatim (or as a documented equivalent) in the README Quick
   Start body.
-- **T-v5-14** The README API table includes
-  `POST /api/agents/:id/rotate-webhook-secret` (v4 AC-24).
+- **T-v5-14** The README API table includes the webhook-secret
+  rotation endpoint — the shipped v4 route `POST /api/agents/:id/webhook/rotate`
+  (and a compatibility note naming the legacy `rotate-webhook-secret`
+  path called out in scope AC-31).
 - **T-v5-15** `docker-compose.caddy.yml` defines a `caddy` service that
   fronts `app`; the overlay command
   `docker compose -f docker-compose.yml -f docker-compose.caddy.yml config`
@@ -159,10 +163,12 @@ in the test or the slice output.
   `127.0.0.1`)**: Guard — the test must assert on the literal string
   `127.0.0.1:8080:8080` in the rendered yaml. Accepting either binding
   defeats the point of the AC.
-- **R-9 (AC-31 — API table skips `rotate-webhook-secret`)**: Guard —
-  `readme_quickstart_test.rs` must substring-check for
-  `/api/agents/:id/rotate-webhook-secret` specifically, not just any
-  `rotate` string.
+- **R-9 (AC-31 — API table skips the rotate endpoint)**: Guard —
+  `readme_quickstart_test.rs` must substring-check for the rotate
+  path (accepting either the shipped v4 route
+  `/api/agents/:id/webhook/rotate` or the legacy
+  `/api/agents/:id/rotate-webhook-secret` spelling preserved in
+  scope AC-31), not just any `rotate` string.
 
 ## Clarifications Needed
 
@@ -223,11 +229,11 @@ None. Per design.md v5 addendum:
 
 ---
 
-_Readiness records for v1–v4 live in git history (see commit `9013ff7` and
+_Readiness records for v1–v4 live in git history (see commit `bba2497` and
 earlier tags). This file is authoritative for v5 only._
 
 <!-- Historical v1–v4 readiness content intentionally removed from this file.
-     Retrieve with: `git show 9013ff7:scaffolding/readiness.md` -->
+     Retrieve with: `git show bba2497:scaffolding/readiness.md` -->
 
 <!-- HISTORICAL_TAIL_REMOVED
 

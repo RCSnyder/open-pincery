@@ -27,8 +27,8 @@ services:
       DATABASE_URL: postgres://open_pincery:open_pincery@db:5432/open_pincery
       # Server binds to all container interfaces; the host-side port mapping
       # above is what actually restricts exposure.
-      OPEN_PINCERY_HOST: "0.0.0.0"
-      OPEN_PINCERY_PORT: "8080"
+      OPEN_PINCERY_HOST: ${OPEN_PINCERY_HOST:-0.0.0.0}
+      OPEN_PINCERY_PORT: ${OPEN_PINCERY_PORT:-8080}
       # Bootstrap secret — required; compose refuses to start if unset.
       OPEN_PINCERY_BOOTSTRAP_TOKEN: ${OPEN_PINCERY_BOOTSTRAP_TOKEN:?Set OPEN_PINCERY_BOOTSTRAP_TOKEN in .env}
       # LLM provider — required.

@@ -1,0 +1,8 @@
+{
+  email you@example.com
+}
+
+example.your-domain.com {
+  encode gzip
+  reverse_proxy app:8080
+}
