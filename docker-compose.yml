@@ -1,3 +1,6 @@
+# Default deployment binds both services to 127.0.0.1 (loopback only).
+# To expose remotely, see "Going public with HTTPS" in README.md — use the
+# docker-compose.caddy.yml overlay rather than changing the port bindings here.
 services:
   db:
     image: postgres:16
@@ -6,7 +9,7 @@ services:
       POSTGRES_PASSWORD: open_pincery
       POSTGRES_DB: open_pincery
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -18,14 +21,37 @@ services:
   app:
     build: .
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
+      # Database (internal compose network)
       DATABASE_URL: postgres://open_pincery:open_pincery@db:5432/open_pincery
+      # Server binds to all container interfaces; the host-side port mapping
+      # above is what actually restricts exposure.
       OPEN_PINCERY_HOST: "0.0.0.0"
       OPEN_PINCERY_PORT: "8080"
-      OPEN_PINCERY_BOOTSTRAP_TOKEN: changeme
+      # Bootstrap secret — required; compose refuses to start if unset.
+      OPEN_PINCERY_BOOTSTRAP_TOKEN: ${OPEN_PINCERY_BOOTSTRAP_TOKEN:?Set OPEN_PINCERY_BOOTSTRAP_TOKEN in .env}
+      # LLM provider — required.
       LLM_API_BASE_URL: ${LLM_API_BASE_URL:?Set LLM_API_BASE_URL in .env}
       LLM_API_KEY: ${LLM_API_KEY:?Set LLM_API_KEY in .env}
+      # LLM model selection (optional).
+      LLM_MODEL: ${LLM_MODEL:-anthropic/claude-sonnet-4-20250514}
+      LLM_MAINTENANCE_MODEL: ${LLM_MAINTENANCE_MODEL:-anthropic/claude-sonnet-4-20250514}
+      # LLM pricing in USD per million tokens (v4 budget cap).
+      LLM_PRICE_INPUT_PER_MTOK: ${LLM_PRICE_INPUT_PER_MTOK:-3.0}
+      LLM_PRICE_OUTPUT_PER_MTOK: ${LLM_PRICE_OUTPUT_PER_MTOK:-15.0}
+      LLM_MAINTENANCE_PRICE_INPUT_PER_MTOK: ${LLM_MAINTENANCE_PRICE_INPUT_PER_MTOK:-3.0}
+      LLM_MAINTENANCE_PRICE_OUTPUT_PER_MTOK: ${LLM_MAINTENANCE_PRICE_OUTPUT_PER_MTOK:-15.0}
+      # Observability (v3 — all optional).
+      LOG_FORMAT: ${LOG_FORMAT:-}
+      METRICS_ADDR: ${METRICS_ADDR:-}
+      RUST_LOG: ${RUST_LOG:-open_pincery=info}
+      # Runtime tunables (optional; defaults are usually correct).
+      MAX_PROMPT_CHARS: ${MAX_PROMPT_CHARS:-100000}
+      ITERATION_CAP: ${ITERATION_CAP:-50}
+      STALE_WAKE_HOURS: ${STALE_WAKE_HOURS:-2}
+      WAKE_SUMMARY_LIMIT: ${WAKE_SUMMARY_LIMIT:-20}
+      EVENT_WINDOW_LIMIT: ${EVENT_WINDOW_LIMIT:-200}
     depends_on:
       db:
         condition: service_healthy

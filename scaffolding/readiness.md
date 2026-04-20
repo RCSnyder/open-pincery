@@ -357,4 +357,3 @@ Carried forward from `scaffolding/design.md` v4 section:
 - **`src/cli/**`— 600-line total budget** across`src/cli/mod.rs`, `src/cli/config.rs`, and `src/cli/commands/\*.rs`. Justification: a second binary in the same crate is cohesive with the runtime and shares `src/api_client.rs`; extracting to a separate workspace member is premature at v4 size. If v5 pushes the CLI past 600 lines, extract to a workspace member per preferences.md convention.
 
 HISTORICAL_TAIL_REMOVED -->
-
