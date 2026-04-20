@@ -1095,3 +1095,65 @@ None. All interfaces, file paths, and test strategies are final.
 | AC-25 | `tests/cli_e2e_test.rs`                                               | End-to-end      | Uses `assert_cmd` or spawns `cargo run --bin pcy` against a live test server                                                                                                           |
 | AC-26 | `tests/ui_smoke_test.rs`                                              | Smoke           | Serves files through the axum router, asserts `index.html` is reachable, grep-asserts the app.js loads `/api/agents` on list view; full-browser headless-chrome optional, gated by env |
 | AC-27 | REVIEW subagent pass                                                  | Document review | Subagent cross-checks every CLI/UI call against `docs/api.md` and every endpoint in `src/api/` against the doc                                                                         |
+
+---
+
+## v5 Design Addendum — Operator Onramp
+
+### Architecture Changes
+
+None. v5 is docs, compose YAML, `.env.example`, scripts, and tests. No new runtime modules, no new API endpoints, no schema migrations, no dependencies.
+
+### Operator Onramp Contract
+
+The onramp is the documented + test-enforced path from an empty clone to a working first agent. It has six deliverables:
+
+1. **`docker-compose.yml` env passthrough**: Every config variable the runtime reads reaches the container via `${VAR}` interpolation. Required secrets use `${VAR:?message}` to fail fast. Optional vars use `${VAR:-default}` with defaults matching `.env.example`.
+2. **`.env.example` as the config contract**: Every `std::env::var(...)` call site in `src/config.rs`, `src/runtime/llm.rs` pricing, and `src/observability/` must have a corresponding entry, grouped + commented.
+3. **`scripts/smoke.{sh,ps1}`**: Identical onramp behaviour on Linux/macOS/Windows. Bash is primary; PowerShell is byte-level equivalent behaviour.
+4. **`README.md` Quick Start**: UI → `pcy` → curl, plus From-Binary, Troubleshooting, Reset, Backup, Going-Public.
+5. **`docker-compose.caddy.yml` + `Caddyfile.example`**: Localhost-to-HTTPS overlay.
+6. **Regression tests** in `tests/` that enforce (1)-(5) consistency with the runtime.
+
+### New Files
+
+| File                           | Purpose                                                                                         |
+| ------------------------------ | ----------------------------------------------------------------------------------------------- |
+| `docker-compose.caddy.yml`     | Overlay file adding a Caddy service in front of app; published ports switch from app:8080 to caddy:80/443 |
+| `Caddyfile.example`            | Template with a single-line site block + env-var placeholders for domain and email              |
+| `scripts/smoke.sh`             | Bash: `compose up --wait` → poll `/ready` → `pcy bootstrap/login/agent create/message` → `pcy events` → assert `message_received` |
+| `scripts/smoke.ps1`            | PowerShell equivalent                                                                            |
+| `tests/compose_env_test.rs`    | Runs `docker compose config` against a fixture env; asserts passthrough + secure defaults + fail-fast |
+| `tests/env_example_test.rs`    | Parses `.env.example`; scans source for `env::var`; asserts coverage modulo explicit allowlist  |
+| `tests/readme_quickstart_test.rs` | Greps `README.md` for smoke-script-milestone strings + named anchor sections                  |
+| `tests/caddy_overlay_test.rs`  | Runs `docker compose -f docker-compose.yml -f docker-compose.caddy.yml config`; asserts caddy service present and ports correct |
+
+### Modified Files
+
+| File                 | Change                                                                              |
+| -------------------- | ----------------------------------------------------------------------------------- |
+| `docker-compose.yml` | env block → `${VAR}` interpolation with `:?` / `:-` guards; ports → `127.0.0.1:8080:8080` |
+| `.env.example`       | Refreshed with all v4 vars, grouped/commented, OpenRouter default + OpenAI alt block, `OPEN_PINCERY_HOST=127.0.0.1` |
+| `README.md`          | Quick Start rewrite (UI/pcy/curl/binary), Troubleshooting, Reset, Backup, Going-Public-HTTPS sections; API table updated |
+
+### Test Strategy for Each Integration
+
+| Concern                  | Strategy                                                                                 |
+| ------------------------ | ---------------------------------------------------------------------------------------- |
+| Docker Compose rendering | `docker compose config` against fixture `.env` — runs offline, no containers started    |
+| Smoke script             | Bash script exercised against the running test-DB stack already used by other integration tests; gated by `DOCKER_SMOKE=1` to avoid requiring compose in every CI leg |
+| `.env.example` coverage  | Pure Rust test — regex-scans source, compares to parsed `.env.example`                  |
+| README anchor presence   | Pure Rust test — `include_str!("../README.md")` + substring assertions                  |
+| Caddyfile syntax         | `caddy validate` if binary present; fall back to structural parse if not (don't hard-require caddy binary in CI) |
+
+### Observability
+
+No new observability. v5 surfaces existing v3 observability (JSON logs, Prometheus `/metrics`) through documentation, not new code.
+
+### Complexity Exceptions
+
+None. Every file stays under 300 lines. Compose file remains a single YAML; the Caddy overlay is its own file so the baseline compose has zero new complexity for operators who skip TLS.
+
+### Open Questions
+
+None. OpenRouter stays the default LLM base URL; OpenAI ships as a commented alternative in `.env.example`. Port binding default is `127.0.0.1:8080:8080`; operators who want remote exposure explicitly override `OPEN_PINCERY_HOST=0.0.0.0` and change the compose ports line (documented in Troubleshooting).

@@ -446,3 +446,11 @@
 - **Changes**: `scaffolding/scope.md` only.
 - **Retries**: 0
 - **Next**: DESIGN (minor: onramp contract subsection in `scaffolding/design.md`).
+
+## v5 DESIGN — 2026-04-19T00:10Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: `scaffolding/design.md` appended with v5 addendum — Architecture Changes (none), Operator Onramp Contract (6 deliverables), New Files (8 — 2 compose/caddy artifacts + 2 smoke scripts + 4 regression tests), Modified Files (3 — compose, .env.example, README), Test Strategy per integration, Observability (none new), Complexity Exceptions (none), Open Questions (none). Design review skipped with rationale: no architecture change, pure docs+config+tests.
+- **Changes**: `scaffolding/design.md` only.
+- **Retries**: 0
+- **Next**: ANALYZE.
