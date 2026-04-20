@@ -337,3 +337,20 @@
 - **Changes**: `scaffolding/readiness.md` (194 → 299 lines).
 - **Retries**: 0
 - **Next**: BUILD slice 1 (AC-22 non-root Dockerfile).
+
+## v4 BUILD — 2026-04-20T00:21Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**:
+  - AC-22 complete: non-root runtime image enforced in `Dockerfile` (UID/GID 10001), with static guard test in `tests/dockerfile_nonroot_test.rs`.
+  - AC-23 complete: budget cap enforced pre-CAS wake in `src/background/listener.rs`; LLM call insert + `budget_used_usd` increment remain in one transaction in `src/models/llm_call.rs`; covered by `tests/budget_test.rs`.
+  - AC-24 complete: authenticated rotate endpoint `POST /api/agents/{id}/webhook/rotate` implemented in `src/api/agents.rs` with rotation helper in `src/models/agent.rs`; covered by `tests/webhook_rotate_test.rs`.
+  - AC-25 complete: `pcy` CLI binary (`src/bin/pcy.rs`, `src/cli/**`, `src/api_client.rs`) implemented and validated by `tests/cli_e2e_test.rs`.
+  - AC-26 complete: vanilla JS control plane rewritten (`static/js/app.js`, `static/js/api.js`, `static/css/style.css`) with hash routes and incremental event polling (`since` support in `src/api/events.rs` + `src/models/event.rs`); covered by `tests/ui_smoke_test.rs`.
+  - AC-27 complete: API stability contract added in `docs/api.md`, including endpoint coverage matrix for CLI/UI call sites and v4→v5 compatibility rules.
+  - Full regression after AC-26/AC-27 and dependency feature hardening: `cargo test -- --test-threads=1` passed (all tests green).
+  - Dependency audit: `cargo audit` reports one medium advisory (`RUSTSEC-2023-0071`) in transitive `sqlx-mysql` path with no upstream fix; runtime is Postgres-only and `sqlx` defaults were disabled in `Cargo.toml`. Build evidence uses `cargo audit --ignore RUSTSEC-2023-0071` (pass) to enforce no remaining non-ignored advisories.
+  - Formatting gate: `cargo fmt -- --check` passed.
+- **Changes**: AC-22..AC-27 code/docs implemented and committed across slices (`43927e2`, `0156561`, `a7e7e3b`, `30c84c4`, `04a05ab`, `fdf1ab0`, `f51d53a`).
+- **Retries**: 0
+- **Next**: REVIEW.
