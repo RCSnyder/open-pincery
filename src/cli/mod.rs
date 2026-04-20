@@ -52,6 +52,12 @@ enum Commands {
         #[command(subcommand)]
         command: BudgetCommands,
     },
+    /// Run an end-to-end smoke test: bootstrap-or-login, create an agent, send
+    /// a message, wait for a reply, and print it.
+    Demo {
+        #[arg(long)]
+        bootstrap_token: Option<String>,
+    },
     Status,
 }
 
@@ -185,6 +191,18 @@ async fn run_inner() -> Result<ExitCode, AppError> {
         Commands::Status => {
             let client = ApiClient::new(url, token);
             commands::status::run(&client).await
+        }
+        Commands::Demo { bootstrap_token } => {
+            let bootstrap_token = bootstrap_token
+                .or_else(|| std::env::var("OPEN_PINCERY_BOOTSTRAP_TOKEN").ok())
+                .ok_or_else(|| {
+                    AppError::BadRequest(
+                        "missing bootstrap token: pass --bootstrap-token or set OPEN_PINCERY_BOOTSTRAP_TOKEN"
+                            .into(),
+                    )
+                })?;
+            commands::demo::run(url, bootstrap_token).await?;
+            Ok(ExitCode::SUCCESS)
         }
     }
 }

@@ -232,6 +232,18 @@ curl -fsS http://localhost:8080/ready
 pcy --url http://localhost:8080 bootstrap --bootstrap-token "$OPEN_PINCERY_BOOTSTRAP_TOKEN"
 ```
 
+### One-command end-to-end smoke test
+
+If you just want to confirm the stack works, run:
+
+```bash
+pcy --url http://localhost:8080 demo --bootstrap-token "$OPEN_PINCERY_BOOTSTRAP_TOKEN"
+```
+
+This bootstraps (or logs in if already bootstrapped), creates a throwaway agent,
+sends it a message, waits up to 60s for a real LLM reply, and prints it. If this
+succeeds, your database, runtime, and LLM provider are all wired up correctly.
+
 ### pcy CLI path
 
 Use this if you prefer terminal-first operations.
