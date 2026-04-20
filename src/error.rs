@@ -8,6 +8,7 @@ pub enum AppError {
     NotFound(String),
     Conflict(String),
     Unauthorized(String),
+    Forbidden(String),
     BadRequest(String),
     Internal(String),
 }
@@ -19,6 +20,7 @@ impl std::fmt::Display for AppError {
             Self::NotFound(msg) => write!(f, "Not found: {msg}"),
             Self::Conflict(msg) => write!(f, "Conflict: {msg}"),
             Self::Unauthorized(msg) => write!(f, "Unauthorized: {msg}"),
+            Self::Forbidden(msg) => write!(f, "Forbidden: {msg}"),
             Self::BadRequest(msg) => write!(f, "Bad request: {msg}"),
             Self::Internal(msg) => write!(f, "Internal error: {msg}"),
         }
@@ -38,6 +40,7 @@ impl IntoResponse for AppError {
             Self::NotFound(msg) => (StatusCode::NOT_FOUND, msg.as_str()),
             Self::Conflict(msg) => (StatusCode::CONFLICT, msg.as_str()),
             Self::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.as_str()),
+            Self::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.as_str()),
             Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.as_str()),
             Self::Internal(msg) => {
                 tracing::error!("Internal error: {msg}");

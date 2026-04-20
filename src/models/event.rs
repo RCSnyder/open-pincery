@@ -52,6 +52,38 @@ pub async fn append_event(
     Ok(event)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn append_event_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    agent_id: Uuid,
+    event_type: &str,
+    source: &str,
+    wake_id: Option<Uuid>,
+    tool_name: Option<&str>,
+    tool_input: Option<&str>,
+    tool_output: Option<&str>,
+    content: Option<&str>,
+    termination_reason: Option<&str>,
+) -> Result<Event, AppError> {
+    let event = sqlx::query_as::<_, Event>(
+        "INSERT INTO events (agent_id, event_type, source, wake_id, tool_name, tool_input, tool_output, content, termination_reason)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         RETURNING *",
+    )
+    .bind(agent_id)
+    .bind(event_type)
+    .bind(source)
+    .bind(wake_id)
+    .bind(tool_name)
+    .bind(tool_input)
+    .bind(tool_output)
+    .bind(content)
+    .bind(termination_reason)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(event)
+}
+
 pub async fn recent_events(
     pool: &PgPool,
     agent_id: Uuid,

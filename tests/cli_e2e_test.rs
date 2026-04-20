@@ -153,6 +153,47 @@ async fn test_pcy_cli_e2e_core_flow() {
     )
     .await;
     assert_ok("events", &out);
+    let events_json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let first_event_id = events_json["events"][0]["id"].as_str().unwrap().to_string();
+
+    let out = run_pcy(
+        pcy_bin.clone(),
+        cfg_path.clone(),
+        vec!["message".into(), agent_id.clone(), "hello again".into()],
+    )
+    .await;
+    assert_ok("message second", &out);
+
+    let out = run_pcy(
+        pcy_bin.clone(),
+        cfg_path.clone(),
+        vec!["message".into(), agent_id.clone(), "hello third".into()],
+    )
+    .await;
+    assert_ok("message third", &out);
+
+    let out = run_pcy(
+        pcy_bin.clone(),
+        cfg_path.clone(),
+        vec![
+            "events".into(),
+            agent_id.clone(),
+            "--since".into(),
+            first_event_id,
+        ],
+    )
+    .await;
+    assert_ok("events since", &out);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let lines: Vec<&str> = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    let second_event: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    let third_event: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(second_event["content"], "hello again");
+    assert_eq!(third_event["content"], "hello third");
 
     // rotate secret
     let out = run_pcy(

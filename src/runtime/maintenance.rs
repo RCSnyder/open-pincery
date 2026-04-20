@@ -65,8 +65,9 @@ pub async fn run_maintenance(
         .chat(messages.clone(), None, Some(&llm.maintenance_model))
         .await?;
 
-    // Record LLM call
+    // Record LLM call (maintenance model pricing — AC-23).
     let usage = response.usage.as_ref();
+    let cost_usd = usage.map(|u| llm.estimate_cost(u, true));
     let prompt_pairs: Vec<(String, String)> = messages
         .iter()
         .map(|m| (m.role.clone(), m.content.clone().unwrap_or_default()))
@@ -77,7 +78,7 @@ pub async fn run_maintenance(
         wake_id,
         &llm.maintenance_model,
         "maintenance",
-        None,
+        cost_usd,
         usage.map(|u| u.prompt_tokens),
         usage.map(|u| u.completion_tokens),
         None,

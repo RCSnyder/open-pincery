@@ -118,11 +118,22 @@ impl ApiClient {
             .await
     }
 
-    pub async fn events(&self, agent_id: &str, limit: i64) -> Result<Value, AppError> {
-        let req = self.http.get(format!(
+    pub async fn events(
+        &self,
+        agent_id: &str,
+        limit: i64,
+        since: Option<&str>,
+    ) -> Result<Value, AppError> {
+        let mut url = format!(
             "{}/api/agents/{}/events?limit={}",
             self.base_url, agent_id, limit
-        ));
+        );
+        if let Some(since) = since {
+            url.push_str("&since=");
+            url.push_str(since);
+        }
+
+        let req = self.http.get(url);
         self.send_json(req, None).await
     }
 

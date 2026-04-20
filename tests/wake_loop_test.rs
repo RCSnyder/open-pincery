@@ -2,7 +2,12 @@ mod common;
 
 use open_pincery::config::Config;
 use open_pincery::models::{agent, event, user, workspace};
-use open_pincery::runtime::{llm::LlmClient, wake_loop};
+use open_pincery::runtime::{
+    llm::{LlmClient, Pricing},
+    wake_loop,
+};
+use rust_decimal::Decimal;
+use std::str::FromStr;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -98,6 +103,14 @@ async fn test_wake_loop_sleep_termination() {
         "fake-key".into(),
         "test-model".into(),
         "test-model".into(),
+    )
+    .with_pricing(
+        // $3/Mtok input, $15/Mtok output — matches production defaults.
+        Pricing::new(
+            Decimal::from_str("3").unwrap(),
+            Decimal::from_str("15").unwrap(),
+        ),
+        Pricing::default(),
     );
 
     let reason = wake_loop::run_wake_loop(&pool, &llm, &config, a.id, wake_id)
@@ -113,6 +126,25 @@ async fn test_wake_loop_sleep_termination() {
         .collect();
     assert_eq!(wake_ends.len(), 1);
     assert_eq!(wake_ends[0].termination_reason.as_deref(), Some("sleep"));
+
+    // AC-23: `cost_usd` is computed from usage and accumulates in the same
+    // transaction as the `llm_calls` insert. Here: 100 prompt tokens * $3/Mtok
+    // + 10 completion tokens * $15/Mtok = $0.0003 + $0.00015 = $0.00045.
+    let expected_cost = Decimal::from_str("0.00045").unwrap();
+    let recorded_cost: Option<Decimal> =
+        sqlx::query_scalar("SELECT cost_usd FROM llm_calls WHERE agent_id = $1")
+            .bind(a.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(recorded_cost, Some(expected_cost), "llm_calls.cost_usd");
+    let recorded_used: Decimal =
+        sqlx::query_scalar("SELECT budget_used_usd FROM agents WHERE id = $1")
+            .bind(a.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(recorded_used, expected_cost, "agents.budget_used_usd");
 }
 
 /// AC-4: Wake loop respects iteration cap

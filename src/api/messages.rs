@@ -7,7 +7,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{AppState, AuthUser};
+use super::{scoped_agent, AppState, AuthUser};
 use crate::error::AppError;
 use crate::models::event;
 
@@ -28,9 +28,11 @@ pub fn router() -> Router<AppState> {
 async fn send_message(
     State(state): State<AppState>,
     Path(agent_id): Path<Uuid>,
-    Extension(_auth): Extension<AuthUser>,
+    Extension(auth): Extension<AuthUser>,
     Json(body): Json<SendMessage>,
 ) -> Result<(StatusCode, Json<MessageResponse>), AppError> {
+    scoped_agent(&state, &auth, agent_id).await?;
+
     let ev = event::append_event(
         &state.pool,
         agent_id,

@@ -1,6 +1,34 @@
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::observability::metrics as m;
+
+/// Per-million-token prices (USD). `Default` is zero-cost so tests that
+/// don't care about pricing keep working unchanged; real deployments wire
+/// real prices via `LlmClient::with_pricing`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Pricing {
+    pub input_per_mtok: Decimal,
+    pub output_per_mtok: Decimal,
+}
+
+impl Pricing {
+    pub fn new(input_per_mtok: Decimal, output_per_mtok: Decimal) -> Self {
+        Self {
+            input_per_mtok,
+            output_per_mtok,
+        }
+    }
+
+    /// Compute cost in USD for the given token usage. Integer-token math keeps
+    /// full `Decimal` precision; we divide by 1_000_000 at the end.
+    pub fn cost_for(&self, usage: &Usage) -> Decimal {
+        let mtok = Decimal::from(1_000_000);
+        let input = Decimal::from(usage.prompt_tokens.max(0)) * self.input_per_mtok / mtok;
+        let output = Decimal::from(usage.completion_tokens.max(0)) * self.output_per_mtok / mtok;
+        input + output
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -81,6 +109,8 @@ pub struct LlmClient {
     api_key: String,
     pub model: String,
     pub maintenance_model: String,
+    pub primary_pricing: Pricing,
+    pub maintenance_pricing: Pricing,
 }
 
 impl LlmClient {
@@ -96,7 +126,29 @@ impl LlmClient {
             api_key,
             model,
             maintenance_model,
+            primary_pricing: Pricing::default(),
+            maintenance_pricing: Pricing::default(),
         }
+    }
+
+    /// Attach token-price tables for cost accounting. Zero pricing means
+    /// `cost_usd` will be recorded as 0 but the insert+increment transaction
+    /// still runs, preserving AC-23 atomicity semantics.
+    pub fn with_pricing(mut self, primary: Pricing, maintenance: Pricing) -> Self {
+        self.primary_pricing = primary;
+        self.maintenance_pricing = maintenance;
+        self
+    }
+
+    /// Compute the USD cost of a single `Usage` report for either the
+    /// primary wake-loop model or the maintenance model.
+    pub fn estimate_cost(&self, usage: &Usage, is_maintenance: bool) -> Decimal {
+        let p = if is_maintenance {
+            &self.maintenance_pricing
+        } else {
+            &self.primary_pricing
+        };
+        p.cost_for(usage)
     }
 
     pub async fn chat(

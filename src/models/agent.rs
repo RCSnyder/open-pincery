@@ -236,3 +236,21 @@ pub async fn rotate_webhook_secret(
     .await?;
     Ok(agent)
 }
+
+pub async fn rotate_webhook_secret_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: Uuid,
+    webhook_secret: &str,
+) -> Result<Agent, AppError> {
+    let agent = sqlx::query_as::<_, Agent>(
+        "UPDATE agents
+         SET webhook_secret = $2
+         WHERE id = $1
+         RETURNING *",
+    )
+    .bind(id)
+    .bind(webhook_secret)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(agent)
+}

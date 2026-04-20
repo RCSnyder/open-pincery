@@ -107,8 +107,10 @@ pub async fn run_wake_loop(
             }
         };
 
-        // Record LLM call
+        // Record LLM call (cost attributed in the same transaction that
+        // inserts the row and bumps agents.budget_used_usd — AC-23).
         let usage = response.usage.as_ref();
+        let cost_usd = usage.map(|u| llm.estimate_cost(u, false));
         let prompt_pairs: Vec<(String, String)> = messages
             .iter()
             .map(|m| (m.role.clone(), m.content.clone().unwrap_or_default()))
@@ -119,7 +121,7 @@ pub async fn run_wake_loop(
             wake_id,
             &llm.model,
             "wake_loop",
-            None,
+            cost_usd,
             usage.map(|u| u.prompt_tokens),
             usage.map(|u| u.completion_tokens),
             None,

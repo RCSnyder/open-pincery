@@ -1,12 +1,12 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     routing::get,
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::AppState;
+use super::{scoped_agent, AppState, AuthUser};
 use crate::error::AppError;
 use crate::models::event::{self, Event};
 
@@ -29,8 +29,11 @@ pub fn router() -> Router<AppState> {
 async fn get_events(
     State(state): State<AppState>,
     Path(agent_id): Path<Uuid>,
+    Extension(auth): Extension<AuthUser>,
     Query(params): Query<EventQuery>,
 ) -> Result<Json<EventsResponse>, AppError> {
+    scoped_agent(&state, &auth, agent_id).await?;
+
     let limit = params.limit.unwrap_or(100).min(1000);
     let events = if let Some(since_id) = params.since {
         event::events_since_id(&state.pool, agent_id, since_id, limit).await?

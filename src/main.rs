@@ -4,6 +4,14 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+/// Parse a `Decimal` env var with a default. Panics with a clear message on
+/// bad input rather than silently zeroing a price.
+fn price_from_env(key: &str, default: &str) -> rust_decimal::Decimal {
+    let raw = std::env::var(key).unwrap_or_else(|_| default.to_string());
+    raw.parse::<rust_decimal::Decimal>()
+        .unwrap_or_else(|e| panic!("Invalid {key}={raw}: {e}"))
+}
+
 #[tokio::main]
 async fn main() {
     // Load .env if present
@@ -23,12 +31,27 @@ async fn main() {
 
     info!("Migrations complete");
 
-    let llm = Arc::new(runtime::llm::LlmClient::new(
-        config.llm_api_base_url.clone(),
-        config.llm_api_key.clone(),
-        config.llm_model.clone(),
-        config.llm_maintenance_model.clone(),
-    ));
+    // AC-23: pricing used to compute `cost_usd` for every recorded LLM call.
+    // Defaults chosen for a reasonable Claude-Sonnet-class model; operators
+    // override per-model via env.
+    let primary_pricing = runtime::llm::Pricing::new(
+        price_from_env("LLM_PRICE_INPUT_PER_MTOK", "3.0"),
+        price_from_env("LLM_PRICE_OUTPUT_PER_MTOK", "15.0"),
+    );
+    let maintenance_pricing = runtime::llm::Pricing::new(
+        price_from_env("LLM_MAINTENANCE_PRICE_INPUT_PER_MTOK", "3.0"),
+        price_from_env("LLM_MAINTENANCE_PRICE_OUTPUT_PER_MTOK", "15.0"),
+    );
+
+    let llm = Arc::new(
+        runtime::llm::LlmClient::new(
+            config.llm_api_base_url.clone(),
+            config.llm_api_key.clone(),
+            config.llm_model.clone(),
+            config.llm_maintenance_model.clone(),
+        )
+        .with_pricing(primary_pricing, maintenance_pricing),
+    );
 
     let config = Arc::new(config);
     let shutdown = CancellationToken::new();

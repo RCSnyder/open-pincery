@@ -7,7 +7,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{AppState, AuthUser};
+use super::{scoped_agent, AppState, AuthUser};
 use crate::error::AppError;
 use crate::models::{agent, event, projection};
 
@@ -112,20 +112,22 @@ async fn list_agents(
 
 async fn get_agent_handler(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthUser>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<AgentResponse>, AppError> {
-    let a = agent::get_agent(&state.pool, id)
-        .await?
-        .ok_or(AppError::NotFound("Agent not found".into()))?;
+    let a = scoped_agent(&state, &auth, id).await?;
     let proj = projection::latest_projection(&state.pool, id).await?;
     Ok(Json(AgentResponse::from_agent(a, proj, false)))
 }
 
 async fn update_agent_handler(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthUser>,
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateAgent>,
 ) -> Result<Json<AgentResponse>, AppError> {
+    scoped_agent(&state, &auth, id).await?;
+
     let disabled_reason = match body.is_enabled {
         Some(false) => Some("disabled_by_user"),
         _ => None,
@@ -144,8 +146,11 @@ async fn update_agent_handler(
 
 async fn delete_agent_handler(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthUser>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<AgentResponse>, AppError> {
+    scoped_agent(&state, &auth, id).await?;
+
     let a = agent::soft_delete_agent(&state.pool, id).await?;
     Ok(Json(AgentResponse::from_agent(a, None, false)))
 }
@@ -155,19 +160,14 @@ async fn rotate_webhook_secret_handler(
     Extension(auth): Extension<AuthUser>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<RotateWebhookSecretResponse>, AppError> {
-    let existing = agent::get_agent(&state.pool, id)
-        .await?
-        .ok_or(AppError::NotFound("Agent not found".into()))?;
-
-    if existing.workspace_id != auth.workspace_id {
-        return Err(AppError::Unauthorized("Invalid credentials".into()));
-    }
+    scoped_agent(&state, &auth, id).await?;
 
     let new_secret = crate::auth::generate_webhook_secret();
-    let _rotated = agent::rotate_webhook_secret(&state.pool, id, &new_secret).await?;
+    let mut tx = state.pool.begin().await?;
+    let _rotated = agent::rotate_webhook_secret_tx(&mut tx, id, &new_secret).await?;
 
-    event::append_event(
-        &state.pool,
+    event::append_event_tx(
+        &mut tx,
         id,
         "webhook_secret_rotated",
         "api",
@@ -179,6 +179,7 @@ async fn rotate_webhook_secret_handler(
         None,
     )
     .await?;
+    tx.commit().await?;
 
     Ok(Json(RotateWebhookSecretResponse {
         webhook_secret: new_secret,

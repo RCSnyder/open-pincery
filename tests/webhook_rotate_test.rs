@@ -6,6 +6,7 @@ use hmac::{Hmac, Mac};
 use http_body_util::BodyExt;
 use open_pincery::api::{self, AppState};
 use open_pincery::config::Config;
+use open_pincery::models::workspace;
 use sha2::Sha256;
 use tower::ServiceExt;
 
@@ -119,4 +120,114 @@ async fn test_rotate_webhook_secret_invalidates_old_secret() {
     .await
     .unwrap();
     assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn test_rotate_webhook_secret_is_forbidden_outside_workspace() {
+    let pool = common::test_pool().await;
+    let state = AppState::new(pool.clone(), test_config());
+    let app = api::router(state);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/bootstrap")
+        .header(header::AUTHORIZATION, "Bearer test-token")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"email":"owner@test.com","display_name":"Owner"}"#,
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let owner_token = json["session_token"].as_str().unwrap().to_string();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/agents")
+        .header(header::AUTHORIZATION, format!("Bearer {owner_token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"name":"owner-agent"}"#))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let agent_id = json["id"].as_str().unwrap().parse::<uuid::Uuid>().unwrap();
+    let original_secret = json["webhook_secret"].as_str().unwrap().to_string();
+
+    let outsider_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO users (email, display_name, auth_provider, auth_subject)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id",
+    )
+    .bind("outsider-rotate@test.com")
+    .bind("Outsider Rotate")
+    .bind("local_test")
+    .bind("outsider_rotate")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let outsider_org = workspace::create_organization(
+        &pool,
+        "outsider-rotate-org",
+        "outsider-rotate-org",
+        outsider_id,
+    )
+    .await
+    .unwrap();
+    let outsider_ws = workspace::create_workspace(
+        &pool,
+        outsider_org.id,
+        "outsider-rotate-ws",
+        "outsider-rotate-ws",
+        outsider_id,
+    )
+    .await
+    .unwrap();
+    workspace::add_org_membership(&pool, outsider_org.id, outsider_id, "owner")
+        .await
+        .unwrap();
+    workspace::add_workspace_membership(&pool, outsider_ws.id, outsider_id, "owner")
+        .await
+        .unwrap();
+    let outsider_token_hash = open_pincery::auth::hash_token("outsider-rotate-token");
+    open_pincery::models::user::create_session(
+        &pool,
+        outsider_id,
+        &outsider_token_hash,
+        "local_test",
+    )
+    .await
+    .unwrap();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/agents/{agent_id}/webhook/rotate"))
+        .header(header::AUTHORIZATION, "Bearer outsider-rotate-token")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let stored_secret: String =
+        sqlx::query_scalar("SELECT webhook_secret FROM agents WHERE id = $1")
+            .bind(agent_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored_secret, original_secret);
+
+    let rotate_events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM events
+         WHERE agent_id = $1
+           AND event_type = 'webhook_secret_rotated'",
+    )
+    .bind(agent_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rotate_events, 0);
 }

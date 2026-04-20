@@ -21,7 +21,10 @@ pub mod health;
 pub mod messages;
 pub mod webhooks;
 
-use crate::models::user;
+use crate::{
+    error::AppError,
+    models::{agent, user},
+};
 
 type KeyedRateLimiter = RateLimiter<IpAddr, DashMapStateStore<IpAddr>, DefaultClock>;
 
@@ -144,6 +147,22 @@ impl AppState {
             stale_alive: Arc::new(AtomicBool::new(false)),
         }
     }
+}
+
+pub(crate) async fn scoped_agent(
+    state: &AppState,
+    auth: &AuthUser,
+    agent_id: Uuid,
+) -> Result<agent::Agent, AppError> {
+    let found = agent::get_agent(&state.pool, agent_id)
+        .await?
+        .ok_or(AppError::NotFound("Agent not found".into()))?;
+
+    if found.workspace_id != auth.workspace_id {
+        return Err(AppError::Forbidden("Forbidden".into()));
+    }
+
+    Ok(found)
 }
 
 pub fn router(state: AppState) -> Router {
