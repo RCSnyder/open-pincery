@@ -1,176 +1,235 @@
-# Readiness: Open Pincery
+# Readiness: Open Pincery — v5 (Operator Onramp)
+
+> This file supersedes the prior v4 readiness record. v4 is shipped; its
+> readiness artifact lives in git history at commit `9013ff7` and earlier.
+> v5 covers AC-28 through AC-33 only — the prior AC-1..AC-27 coverage is
+> verified by the shipped v4 suite and is not re-planned here.
 
 ## Verdict
 
 READY
 
----
+v5 is additive docs, compose YAML, `.env.example`, scripts, and regression
+tests — no new runtime modules, no new API endpoints, no schema migrations,
+no dependencies. Every AC has unambiguous pass/fail criteria, a named test
+file, and a concrete runtime proof path. No clarifications are unresolved.
 
-## v1 Truths
+## Truths
 
-- **T-1**: CAS (`UPDATE ... WHERE status = $expected RETURNING *`) is the ONLY mechanism for wake acquisition. No agent transitions to `awake` without winning a CAS race. Concurrent attempts are naturally coalesced.
-- **T-2**: The `events` table is append-only. No UPDATE, DELETE, or ALTER operations on event rows. Events are the system of record.
-- **T-3**: At most one wake is active per agent at any time. This is enforced structurally by the CAS WHERE clause, not by application-level locking.
-- **T-4**: Agent projections (identity, work_list) and wake summaries are versioned INSERT-only rows, never updated in place. Current state is the latest version.
-- **T-5**: The prompt is bounded — each component (constitution, summaries, identity, work_list, messages) has a cap. Character-based trim drops oldest messages first. Context cannot grow unboundedly.
-- **T-6**: Wake summaries are ≤500 characters each; up to 20 are included in prompt assembly.
-- **T-7**: Every LLM call is recorded in `llm_calls` with model, token counts, latency, prompt hash, and response hash. Full prompts optionally stored in `llm_call_prompts`.
-- **T-8**: Every tool execution is recorded in the event log (tool_call + tool_result events) and optionally in `tool_audit`.
-- **T-9**: The bootstrap endpoint is gated by `OPEN_PINCERY_BOOTSTRAP_TOKEN` from the environment. Without it, no admin user or org can be created.
-- **T-10**: DB-persisted agent lifecycle states are exactly `asleep`, `awake`, `maintenance`. Fine-grained TLA+ states (PromptAssembling, ToolDispatching, etc.) are in-memory runtime states, not persisted.
-- **T-11**: No secrets or credential values appear in source code. All sensitive config flows through environment variables.
-- **T-12**: Shell tool execution uses basic subprocess for v1 (Zerobox deferred to Phase 2). This is a conscious scope decision, not a placeholder.
+Non-negotiable statements that must be true in the shipped v5 system:
 
-## v2 Truths
+- **T-v5-1** `docker-compose.yml` contains no hardcoded secret literals —
+  specifically no `changeme`, `change-me`, or default value for
+  `OPEN_PINCERY_BOOTSTRAP_TOKEN`.
+- **T-v5-2** Every environment variable the binary reads at runtime
+  (every `std::env::var("…")` call site in `src/config.rs`,
+  `src/main.rs` price/metrics blocks, `src/observability/logging.rs`,
+  and `src/cli/**`) is either present in `.env.example` or explicitly
+  listed as intentionally-internal in `tests/env_example_test.rs`.
+- **T-v5-3** `docker-compose.yml` forwards every runtime-relevant variable
+  to the `app` service via `${VAR}` / `${VAR:?…}` / `${VAR:-default}`
+  interpolation — no hardcoded env values for anything the operator is
+  expected to configure.
+- **T-v5-4** Running `docker compose config` with a scrubbed environment
+  (no `OPEN_PINCERY_BOOTSTRAP_TOKEN` or no `LLM_API_KEY`) exits non-zero
+  with a message naming the missing variable.
+- **T-v5-5** The default published port binding is `127.0.0.1:8080:8080`.
+  Compose does not expose the app on `0.0.0.0` out of the box.
+- **T-v5-6** `.env.example` defaults `OPEN_PINCERY_HOST=127.0.0.1`.
+- **T-v5-7** `.env.example` ships OpenRouter as the default
+  `LLM_API_BASE_URL` and includes a commented OpenAI-compatible
+  alternative block.
+- **T-v5-8** Each entry in `.env.example` has an inline comment describing
+  purpose and default.
+- **T-v5-9** `scripts/smoke.sh` completes the full onramp
+  (`docker compose up -d --wait` → poll `/ready` until 200 within 60s →
+  `pcy bootstrap` → `pcy agent create` → `pcy` send message → `pcy events`)
+  and exits 0 only when a real `message_received` event for the created
+  agent is observed in the event log.
+- **T-v5-10** `scripts/smoke.ps1` performs the same steps with equivalent
+  assertions on Windows and exits 0 only under the same observation.
+- **T-v5-11** Failure paths in both smoke scripts emit actionable stderr
+  that references a README Troubleshooting anchor by name.
+- **T-v5-12** README Quick Start contains the three onramps in order
+  (Web UI → `pcy` → curl/HTTP appendix), a "From Signed Release Binary"
+  section referencing v3 AC-20 cosign verification, a Troubleshooting
+  section covering the enumerated failure modes (bootstrap 401,
+  rate-limit 429, silent wake, reset, `LOG_FORMAT=json`, `METRICS_ADDR`
+  scrape, `pg_dump` backup), and a "Going public with HTTPS" subsection
+  anchoring the Caddy overlay.
+- **T-v5-13** Every milestone command executed by `scripts/smoke.sh`
+  appears verbatim (or as a documented equivalent) in the README Quick
+  Start body.
+- **T-v5-14** The README API table includes
+  `POST /api/agents/:id/rotate-webhook-secret` (v4 AC-24).
+- **T-v5-15** `docker-compose.caddy.yml` defines a `caddy` service that
+  fronts `app`; the overlay command
+  `docker compose -f docker-compose.yml -f docker-compose.caddy.yml config`
+  renders without error.
+- **T-v5-16** `Caddyfile.example` parses as valid Caddy configuration
+  (via `caddy validate` when available, else structural parse).
+- **T-v5-17** No v1–v4 AC regresses: core runtime (CAS lifecycle, wake
+  loop, maintenance, drain, event log), API surface, schema, and CLI
+  behavior are unchanged.
 
-- **T-13**: On SIGTERM/SIGINT the process stops accepting new connections, drains in-flight requests and active wake loops for up to 30 seconds, then exits with code 0. No abrupt termination of running wakes.
-- **T-14**: `docker compose up` brings a fully functional stack (app + postgres) from zero. The app container waits for Postgres readiness before accepting traffic.
-- **T-15**: Per-IP rate limiting is enforced at the middleware layer for every API route. Bootstrap gets a stricter limit (10 req/min) than authenticated endpoints (60 req/min). Exceeding the limit returns HTTP 429 with `Retry-After` header.
-- **T-16**: Webhook payloads are verified with HMAC-SHA256 using a per-agent `webhook_secret`. Invalid signatures are rejected with 401 before any side effects occur.
-- **T-17**: Webhook idempotency is enforced via a deduplication table keyed by `X-Idempotency-Key`. Duplicate deliveries return 200 without re-inserting events or re-triggering wakes.
-- **T-18**: Disabled agents (`is_enabled = false`) reject wake acquisition at the CAS level. The `WHERE is_enabled = TRUE` clause in `acquire_wake` and `drain_reacquire` guarantees this structurally.
-- **T-19**: Soft-delete sets `is_enabled = false` and `disabled_reason = 'deleted'`. No rows are removed from the database. The agent's event log, projections, and wake summaries remain intact.
+## Key Links
 
-## v1 Key Links
+Each v5 AC maps to a design artifact, a planned test file, and a runtime
+proof path.
 
-- **L-1** AC-1 → `models/agent.rs` (acquire_wake, transition_to_maintenance, release_to_asleep, drain_reacquire CAS functions) → `tests/lifecycle_test.rs` → Runtime proof: two concurrent wake attempts, exactly one wins
-- **L-2** AC-2 → `models/event.rs` (append_event, recent_events) + migration `create_events.sql` → `tests/event_log_test.rs` → Runtime proof: send message → wake → query event log → verify complete sequence with ordering
-- **L-3** AC-3 → `runtime/prompt.rs` (AssembledPrompt struct) + `models/projection.rs` + `models/prompt_template.rs` → `tests/prompt_test.rs` → Runtime proof: create agent with known projections/events → assemble prompt → verify all 6 components present and ordered
-- **L-4** AC-4 → `runtime/wake_loop.rs` + `runtime/llm.rs` (LlmClient) + `runtime/tools.rs` (dispatch_tool) → `tests/wake_loop_test.rs` → Runtime proof: mock LLM returns tool_call then stop → verify events, iteration count, termination
-- **L-5** AC-5 → `runtime/maintenance.rs` + `models/projection.rs` (new versioned rows) + wake_summaries → `tests/maintenance_test.rs` → Runtime proof: after wake, query projection versions and wake_summary table → confirm new rows with content
-- **L-6** AC-6 → `api/agents.rs` + `api/messages.rs` + `api/events.rs` + `api/bootstrap.rs` → `tests/api_test.rs` → Runtime proof: exercise each endpoint with curl/reqwest → verify status codes and JSON response shapes
-- **L-7** AC-7 → `background/listener.rs` + Postgres LISTEN/NOTIFY → `tests/trigger_test.rs` → Runtime proof: send message to resting agent → measure wake latency < 5 seconds
-- **L-8** AC-8 → `background/stale.rs` → `tests/stale_test.rs` → Runtime proof: set agent to `awake` with wake_started_at 3 hours ago → run recovery job → verify status = `asleep` + `stale_wake_recovery` event
-- **L-9** AC-9 → `runtime/drain.rs` + `models/event.rs` (has_pending_events) + `models/agent.rs` (drain_reacquire) → `tests/drain_test.rs` → Runtime proof: send message during active wake → confirm drain check triggers re-acquire after maintenance
-- **L-10** AC-10 → `api/bootstrap.rs` + `db.rs` (migration runner) → `tests/bootstrap_test.rs` → Runtime proof: start with empty DB → call bootstrap endpoint → verify user, org, workspace rows created
-
-## v2 Key Links
-
-- **L-11** AC-11 → `main.rs` (tokio signal handler + `CancellationToken`) + axum `with_graceful_shutdown` + `background/listener.rs` + `background/stale.rs` (token-aware loops) → `tests/shutdown_test.rs` → Runtime proof: start server, trigger a wake via message, send SIGTERM, confirm wake completes and process exits with code 0 within 30s
-- **L-12** AC-12 → `Dockerfile` (multi-stage build) + `docker-compose.yml` (app + postgres services, healthcheck) → Manual verification → Runtime proof: `docker compose up` from clean state, curl `GET /health` returns `{"status":"ok"}` within 60s
-- **L-13** AC-13 → `api/mod.rs` (custom `governor` middleware with `RateLimiter<IpAddr, DashMapStateStore<IpAddr, DefaultClock>>`, two rate-limit tiers hardcoded in `AppState::new()`) → `tests/rate_limit_test.rs` → Runtime proof: send 61 requests in rapid succession to an authenticated endpoint, confirm 61st returns 429 with `Retry-After` header
-- **L-14** AC-14 → `api/webhooks.rs` (HMAC-SHA256 verify, idempotency dedup) + `models/agent.rs` (`webhook_secret` column) + migration `add_webhook_secrets.sql` + migration `create_webhook_dedup.sql` + `models/event.rs` (append `webhook_received` event) → `tests/webhook_test.rs` → Runtime proof: send signed webhook → confirm `webhook_received` event in log + wake triggered; resend same webhook → confirm 200 without duplicate event; send bad signature → confirm 401
-- **L-15** AC-15 → `api/agents.rs` (PATCH + DELETE handlers) + `models/agent.rs` (`update_agent`, `soft_delete_agent`) → `tests/agent_mgmt_test.rs` → Runtime proof: PATCH to disable agent → send message → confirm no wake occurs; PATCH to rename → confirm name changed; DELETE → confirm `is_enabled = false` and `disabled_reason = 'deleted'`
+- **L-28** AC-28 → `docker-compose.yml` env block (design.md v5 §
+  Modified Files) → `tests/compose_env_test.rs` → VERIFY runs
+  `docker compose config` against a fixture `.env` and inspects the
+  rendered `app.environment` map for passthrough values and absence of
+  `changeme`.
+- **L-29** AC-29 → `.env.example` (design.md v5 § Modified Files) →
+  `tests/env_example_test.rs` → VERIFY parses `.env.example`, scans
+  `src/**/*.rs` for `std::env::var("…")` string literals, diffs against
+  the allowlist-of-allowlists.
+- **L-30** AC-30 → `scripts/smoke.sh` + `scripts/smoke.ps1` (design.md
+  v5 § New Files) → `tests/smoke_script_test.rs` (gated by `DOCKER_SMOKE=1`)
+  for the bash half; PowerShell exercised manually on the Windows dev host
+  during BUILD → VERIFY re-runs `bash scripts/smoke.sh` against a live
+  compose stack and observes a `message_received` event.
+- **L-31** AC-31 → `README.md` Quick Start rewrite (design.md v5 §
+  Modified Files) → `tests/readme_quickstart_test.rs` → VERIFY walks the
+  Quick Start against a live v5 stack step-by-step.
+- **L-32** AC-32 → `docker-compose.yml` published ports +
+  `.env.example` `OPEN_PINCERY_HOST` default → assertions in
+  `tests/compose_env_test.rs` on the ports block and empty-env fail-fast
+  path → VERIFY inspects `docker compose config` output for
+  `127.0.0.1:8080:8080`.
+- **L-33** AC-33 → `docker-compose.caddy.yml` + `Caddyfile.example` +
+  README "Going public with HTTPS" subsection (design.md v5 § New Files)
+  → `tests/caddy_overlay_test.rs` → VERIFY runs the overlay `config`
+  command and confirms the caddy service is present with correct port
+  mapping.
 
 ## Acceptance Criteria Coverage
 
-| AC ID | Build Slice                      | Planned Test                                                                                                                                                                                                                                                                                   | Planned Runtime Proof                                                                                                                                                                               | Notes                                                                                                             |
-| ----- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| AC-1  | Slice 3: CAS lifecycle functions | `lifecycle_test.rs` — two concurrent `acquire_wake` calls; assert exactly one returns `Some`, one returns `None`; test all four transitions (asleep→awake, awake→maintenance, maintenance→asleep, maintenance→awake)                                                                           | Run two tokio tasks racing `acquire_wake`; verify via DB query that only one wake_id is set                                                                                                         | Requires real Postgres; CAS relies on DB atomicity                                                                |
-| AC-2  | Slice 2: Event log model         | `event_log_test.rs` — insert events, query back, verify sequence; attempt UPDATE/DELETE and confirm rejection (DB constraint or no API)                                                                                                                                                        | Send message via API → agent wakes → query `/api/agents/:id/events` → verify event_type ordering: message_received → wake_start → tool_call → tool_result → wake_end                                | Consider adding a DB trigger or CHECK to enforce append-only, or rely on no-UPDATE/DELETE in code                 |
-| AC-3  | Slice 5: Prompt assembly         | `prompt_test.rs` — create agent with seed projections, 25 events, 3 wake summaries, active prompt template → assemble prompt → assert system_prompt contains all 6 components in order; assert messages ≤ 200; assert character trim works                                                     | Assemble prompt for a known agent and inspect output structure. Verify oldest messages dropped first when oversized                                                                                 | Depends on projections, wake_summaries, and prompt_templates tables existing                                      |
-| AC-4  | Slice 6: Wake loop               | `wake_loop_test.rs` — mock LLM via wiremock → tool_calls response → dispatch shell (echo "hello") → result → LLM returns text → implicit sleep; separate test hitting iteration cap at 50                                                                                                      | End-to-end: send message to agent via API → background listener triggers wake → LLM mock responds → verify events sequence → agent returns to asleep                                                | Largest slice; may approach 400-line exception for wake_loop.rs                                                   |
-| AC-5  | Slice 7: Maintenance cycle       | `maintenance_test.rs` — mock maintenance LLM call → provide previous identity/work_list/transcript → verify new projection rows inserted (version incremented) + wake_summary row ≤500 chars                                                                                                   | After a complete wake cycle, query `agent_projections` ORDER BY version DESC LIMIT 2 → confirm version incremented; query `wake_summaries` → confirm new entry                                      | Maintenance uses a separate LLM model config (`LLM_MAINTENANCE_MODEL`)                                            |
-| AC-6  | Slice 10: HTTP API               | `api_test.rs` — test each of 6 endpoints: POST /api/agents (201), GET /api/agents (200 array), GET /api/agents/:id (200 with projections), POST /api/agents/:id/messages (202), GET /api/agents/:id/events (200 with events+total), GET /health (200)                                          | Curl each endpoint against running server; verify JSON shapes match design contracts                                                                                                                | Auth via session_token from bootstrap; 401 on missing/invalid token                                               |
-| AC-7  | Slice 4: Wake triggers           | `trigger_test.rs` — insert message_received event → issue NOTIFY → assert listener receives and spawns wake task within 5s                                                                                                                                                                     | Send POST /api/agents/:id/messages → measure wall-clock time to wake_start event appearing in event log; assert < 5 seconds                                                                         | Requires real Postgres LISTEN/NOTIFY; cannot mock                                                                 |
-| AC-8  | Slice 9: Stale wake recovery     | `stale_test.rs` — set agent status='awake', wake_started_at=NOW()-3h → run stale recovery job → assert status='asleep', wake_id=NULL, stale_wake_recovery event exists                                                                                                                         | Start stale recovery background task → manipulate time or directly set stale timestamp → verify recovery within one job cycle                                                                       | Tests both `awake` and `maintenance` stale states per AC-8                                                        |
-| AC-9  | Slice 8: Drain check             | `drain_test.rs` — complete wake → enter maintenance → insert message_received during maintenance → drain check finds event → assert drain_reacquire CAS succeeds → new wake starts                                                                                                             | Send message mid-wake → let original wake complete + maintenance → verify a second wake starts without a new NOTIFY by checking for two wake_start events with same message visible                 | Most complex sequencing; needs careful test setup with timing control                                             |
-| AC-10 | Slice 1: Bootstrap + migrations  | `bootstrap_test.rs` — start with empty DB → run migrations → POST /api/bootstrap with correct token → verify 201 + user/org/workspace rows; repeat call → verify 409 or idempotent behavior                                                                                                    | Start binary against empty Postgres → call bootstrap → query tables directly → confirm rows exist with expected roles                                                                               | First slice; all other slices depend on this working                                                              |
-| AC-11 | v2 Slice 1: Graceful shutdown    | `shutdown_test.rs` — start server in a child process, send a message to trigger wake, send SIGTERM, assert process exits 0 within 30s; assert no partial wake events (wake_end must exist if wake_start exists)                                                                                | Start server, trigger wake, send SIGTERM via `nix::sys::signal` or `tokio::signal`, confirm clean exit with code 0 and all background tasks stopped                                                 | Requires `CancellationToken` threaded through listener + stale + wake_loop; must also test SIGINT path            |
-| AC-12 | v2 Slice 2: Docker Compose       | Manual test — `Dockerfile` multi-stage build + `docker-compose.yml` with app + postgres services + healthcheck                                                                                                                                                                                 | `docker compose up` from clean state → curl `GET /health` → assert `{"status":"ok"}` within 60s; `docker compose down` clean                                                                        | No automated test — Docker-in-Docker is out of scope; verified manually during BUILD                              |
-| AC-13 | v2 Slice 3: Rate limiting        | `rate_limit_test.rs` — send 61 requests to authenticated endpoint → assert first 60 return 200, 61st returns 429 with `Retry-After` header; separate test for bootstrap at 10 req/min                                                                                                          | Start server, burst 61 authenticated requests → verify 429 + header; burst 11 bootstrap requests → verify 429                                                                                       | Needs `tower-governor` or equivalent crate added to `Cargo.toml`                                                  |
-| AC-14 | v2 Slice 4: Webhook ingress      | `webhook_test.rs` — compute HMAC-SHA256 of payload with agent webhook_secret, send POST with valid signature → assert 202 + `webhook_received` event; send with bad signature → assert 401; resend with same idempotency key → assert 200 without duplicate event                              | Send signed webhook to `/api/agents/:id/webhooks` → query event log → confirm `webhook_received` with correct content; resend → confirm no new event row; bad signature → confirm 401 with no event | Requires 2 new migrations (webhook_secret column + dedup table)                                                   |
-| AC-15 | v2 Slice 5: Agent management     | `agent_mgmt_test.rs` — PATCH disable agent → assert `is_enabled = false`; send message → assert no wake (acquire_wake returns None); PATCH enable → send message → assert wake succeeds; PATCH rename → assert name changed; DELETE → assert `is_enabled = false, disabled_reason = 'deleted'` | PATCH to disable → POST message → query agent → confirm still asleep; PATCH enable → POST message → confirm wake; DELETE → confirm soft-delete fields                                               | CAS `WHERE is_enabled = TRUE` already in v1 acquire_wake — just needs the management endpoints to toggle the flag |
+| AC ID | Build Slice                                                        | Planned Test                                                                                                                                                                                                                                                                                                                                                            | Planned Runtime Proof                                                                                                                                                | Notes                                                                                                                            |
+| ----- | ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| AC-28 | (1) compose + `.env.example` rewrite                               | `tests/compose_env_test.rs` — renders `docker compose config` against a fixture `.env`; asserts each required var appears in the rendered `app.environment` map; asserts no `changeme` literal anywhere in the rendered yaml; asserts fail-fast on missing required secret                                                                                              | `docker compose config` output inspected during VERIFY; fixture `.env` values appear in the rendered yaml; empty env exits non-zero                                  | Coupled to AC-29 and AC-32 — same compose file, same `.env.example`                                                              |
+| AC-29 | (1) compose + `.env.example` rewrite; (2) test                     | `tests/env_example_test.rs` — regex-scans `src/**/*.rs` for `std::env::var("KEY")` literals; parses `.env.example` keys; diffs against the internal allowlist; asserts every runtime-read key is covered                                                                                                                                                                | VERIFY compares parsed `.env.example` key set against the live `env::var` call-site set at HEAD                                                                      | Test must scan actual string literals, not just section headers in `.env.example`                                                |
+| AC-30 | (3) `scripts/smoke.sh` + integration test; (4) `scripts/smoke.ps1` | `tests/smoke_script_test.rs` gated by `DOCKER_SMOKE=1` invoking `scripts/smoke.sh` end-to-end against the running test-DB stack; `scripts/smoke.ps1` exercised manually on the Windows dev host during BUILD; CI-side PowerShell validation is structural syntax parse only per design.md                                                                               | VERIFY executes `bash scripts/smoke.sh` against a running compose stack, observes exit 0 and a `message_received` event in `pcy events` output for the created agent | Per scope.md v5 clarifications — PowerShell half is structural in CI; real execution happens on the author's Windows workstation |
+| AC-31 | (5) README rewrite + test                                          | `tests/readme_quickstart_test.rs` — `include_str!("../README.md")` followed by substring assertions for each named anchor (Quick Start, Web UI, pcy, curl/HTTP appendix, From Signed Release Binary, Troubleshooting subsections by anchor, Going public with HTTPS) and for each smoke-script milestone command                                                        | VERIFY reads the rendered README and walks through Quick Start manually against a live v5 stack                                                                      | Anchors must match the smoke-script step names and Troubleshooting slug IDs, not just section headings                           |
+| AC-32 | (1) compose + `.env.example` rewrite                               | `tests/compose_env_test.rs` — published-ports assertion on `127.0.0.1:8080:8080`; second assertion runs `docker compose config` with empty env and asserts non-zero exit with a message naming the missing required var                                                                                                                                                 | VERIFY inspects `docker compose config` output for the loopback binding; attempts `docker compose up` with empty env and observes refusal                            | Same test file as AC-28; distinct assertions                                                                                     |
+| AC-33 | (6) Caddy overlay + example + test + README subsection             | `tests/caddy_overlay_test.rs` — runs `docker compose -f docker-compose.yml -f docker-compose.caddy.yml config` and asserts `caddy` service present with 80/443 published; runs `caddy validate --config Caddyfile.example` when the `caddy` binary is available, falls back to structural parse otherwise; asserts README contains the "Going public with HTTPS" anchor | VERIFY manually activates the overlay on a staging domain, or at minimum inspects the rendered overlay compose config                                                | Per design.md: `caddy` binary is not required in CI; structural parse fallback is the documented path                            |
 
 ## Scope Reduction Risks
 
-### v1 Risks (carried forward)
+Places where BUILD might be tempted to ship a shell and close an AC
+dishonestly. Each is paired with an explicit guard that must be present
+in the test or the slice output.
 
-- **Shell tool becomes a no-op stub**: AC-4 requires the agent to "make at least one tool call." If the shell tool is implemented as a stub that returns a canned string without actually executing a subprocess, the wake loop appears to work but the system is not a real agent runtime. BUILD must implement `tokio::process::Command` with stdout/stderr capture, timeout, and exit code recording.
-
-- **Prompt assembly skips character trim**: AC-3 specifies "character-based trim drops oldest messages first." If BUILD omits the trim logic and simply includes all messages, the criterion technically passes for small test cases but breaks at scale. BUILD must implement an explicit `max_prompt_chars` config with trim logic.
-
-- **Drain check returns false unconditionally**: AC-9 is the most complex sequencing criterion. It's tempting to always return "no pending events" and skip re-acquisition. The test must insert a message during an active wake and verify a second wake starts.
-
-- **Maintenance LLM call returns identity/work_list unchanged**: AC-5 requires the maintenance to return "updated" projections. If the mock always returns the input verbatim, it doesn't test that new versioned rows are written. The mock must return _different_ content and the test must verify the delta.
-
-- **Session auth becomes a pass-through**: AC-6 includes `Authorization: Bearer <session_token>` on all endpoints. If auth middleware is skipped or always returns 200, the bootstrap token gating (AC-10) is meaningless. BUILD must implement real session lookup from `user_sessions` table.
-
-- **LLM call auditing silently dropped**: T-7 requires every LLM call to be recorded. If `llm_calls` inserts are commented out or made optional-and-never-enabled, observability is gone. Tests must query `llm_calls` after wake + maintenance and verify rows exist.
-
-### v2 Risks
-
-- **Graceful shutdown waits 0 seconds**: AC-11 requires a 30-second drain window. If shutdown immediately cancels all tasks (e.g. token is cancelled without awaiting in-flight work), active wakes are terminated mid-flight. The test must start a wake, send SIGTERM, and confirm the wake completes before exit.
-
-- **Rate limiting applied but with wrong limits or missing `Retry-After`**: AC-13 specifies exact thresholds (60/min auth, 10/min bootstrap) and requires `Retry-After` header. A rate limiter that uses different defaults or omits the header technically fails the criterion even though limiting occurs.
-
-- **Webhook HMAC check uses timing-unsafe comparison**: T-16 requires HMAC-SHA256 verification. Using `==` instead of constant-time comparison introduces a timing side-channel. BUILD must use `hmac` crate's `verify_slice` or equivalent constant-time comparison.
-
-- **Webhook dedup table grows unboundedly**: The idempotency dedup table has no TTL or cleanup. For v2, this is acceptable (mentioned as a bounded assumption below), but BUILD should not silently skip the dedup insert.
-
-- **Agent soft-delete actually hard-deletes**: AC-15 requires `DELETE` to set `is_enabled = false` and `disabled_reason = 'deleted'`, not to remove the row. The test must query the agent after DELETE and confirm the row still exists with correct fields.
+- **R-1 (AC-30 — smoke script exits 0 without really exercising the
+  onramp)**: Guard — the bash test must parse `pcy events` output and
+  grep for `message_received` scoped to the created agent's ID. "No
+  command returned non-zero" is not sufficient proof.
+- **R-2 (AC-29 — env test only checks key presence in `.env.example`)**:
+  Guard — the test must walk `src/**/*.rs`, extract `env::var("…")`
+  string literals via regex, and diff against the parsed example file.
+  A test that tautologically compares `.env.example` to itself is
+  rejected.
+- **R-3 (AC-31 — README test only matches section headings)**: Guard —
+  the test must assert on step content: the actual command strings
+  (`docker compose up -d --wait`, `pcy bootstrap`, curl examples) and
+  each Troubleshooting anchor slug (e.g. `#bootstrap-401`,
+  `#rate-limit-429`, `#silent-wake`, `#reset`, `#log-format-json`,
+  `#metrics-scrape`, `#backup-one-liner`). Heading-only assertions fail.
+- **R-4 (AC-33 — Caddy test only checks files exist)**: Guard — the
+  test must render the overlay via `docker compose config` and inspect
+  the service map; and must at minimum structurally parse
+  `Caddyfile.example` (verify site block, `reverse_proxy` directive,
+  TLS email/domain placeholders) when `caddy` is unavailable.
+- **R-5 (AC-28 — compose test only greps for `${VAR}` tokens)**:
+  Guard — the test must run `docker compose config` against a fixture
+  `.env` and inspect the **rendered** environment map for the expected
+  values. A syntactic grep on the source yaml is rejected.
+- **R-6 (AC-30 PowerShell half — script is copy-pasted from bash and
+  never executed)**: Guard — `scripts/smoke.ps1` must be exercised on
+  the Windows host during BUILD (the author is on Windows). The BUILD
+  log entry for that slice must record actual `pwsh scripts/smoke.ps1`
+  output, not just "syntax parses."
+- **R-7 (AC-28 fail-fast test passes because the operator has env vars
+  exported)**: Guard — the test must invoke `docker compose config`
+  with an explicitly scrubbed environment (empty env or
+  `--env-file /dev/null` equivalent) to prove the `:?` guard triggers.
+- **R-8 (AC-32 — ports assertion accepts either `0.0.0.0` or
+  `127.0.0.1`)**: Guard — the test must assert on the literal string
+  `127.0.0.1:8080:8080` in the rendered yaml. Accepting either binding
+  defeats the point of the AC.
+- **R-9 (AC-31 — API table skips `rotate-webhook-secret`)**: Guard —
+  `readme_quickstart_test.rs` must substring-check for
+  `/api/agents/:id/rotate-webhook-secret` specifically, not just any
+  `rotate` string.
 
 ## Clarifications Needed
 
-### v1 Clarifications (carried forward)
+None. Scope.md v5 and design.md v5 explicitly resolve all open questions:
 
-- **Prompt character budget**: AC-3 says "character-based trim" but no specific limit is defined in scope or design. **Bounded assumption**: use a configurable `MAX_PROMPT_CHARS` env var defaulting to 100,000 characters. This does not change the pass/fail of AC-3.
-
-- **Append-only enforcement mechanism**: AC-2 says events are "never updated or deleted." The design enforces this by simply never issuing UPDATE/DELETE in application code. **Bounded assumption**: application-level enforcement is sufficient for v1.
-
-- **Bootstrap idempotency**: AC-10 says "on first run with an empty database" but doesn't specify behavior on repeat calls. **Bounded assumption**: the bootstrap endpoint returns 409 Conflict if bootstrap has already been completed.
-
-### v2 Clarifications
-
-- **Webhook dedup TTL**: The dedup table stores idempotency keys but scope does not specify a retention window. **Bounded assumption**: keys are stored indefinitely for v2; a TTL cleanup job is deferred to v3. This does not change AC-14's pass/fail — deduplication works regardless of retention policy.
-
-- **Rate limit scope (per-IP vs per-token)**: AC-13 says "per-IP." This means unauthenticated and authenticated requests from the same IP share no state — they are tracked on separate middleware instances with different limits. **Bounded assumption**: `governor::RateLimiter<IpAddr, DashMapStateStore<IpAddr>, DefaultClock>` keyed by `ConnectInfo<SocketAddr>` peer IP, two `KeyedRateLimiter` instances with hardcoded configs in `AppState::new()`. Configurable rate limits deferred to v3.
-
-- **Shutdown signal on Windows**: SIGTERM/SIGINT are Unix signals. On Windows, `tokio::signal::ctrl_c()` covers Ctrl+C. **Bounded assumption**: v2 uses `tokio::signal::ctrl_c()` for cross-platform support plus Unix-specific SIGTERM handling behind `#[cfg(unix)]`. This does not change AC-11's pass/fail — the test verifies the behavior, not the signal type.
-
-- **Webhook secret provisioning**: AC-14 mentions "per-agent webhook secret" but scope defers UI management of webhook secrets to v3. **Bounded assumption**: `webhook_secret` is auto-generated (random 32-byte hex) when the agent is created and returned in the create-agent response. API consumers read it once and configure their webhook source. No rotation API in v2.
+- OpenRouter is the default `LLM_API_BASE_URL`; OpenAI ships as a
+  commented alternative in `.env.example`.
+- Default port binding is `127.0.0.1:8080:8080`; `0.0.0.0` override is
+  documented in README Troubleshooting.
+- PowerShell smoke script is shipped with structural validation in CI;
+  real end-to-end execution happens on the Windows dev host.
+- Caddy binary is not required in CI; the test falls back to structural
+  parse.
 
 ## Build Order
 
-### v1 Slices (completed)
+Dependencies flow left-to-right; each step produces a committable
+checkpoint, closes the cited AC(s), and must pass its test before the
+next step starts.
 
-1. **AC-10 — Bootstrap + Migrations** (Slice 1)
-2. **AC-2 — Event Log** (Slice 2)
-3. **AC-1 — CAS Lifecycle** (Slice 3)
-4. **AC-7 — Wake Triggers** (Slice 4)
-5. **AC-3 — Prompt Assembly** (Slice 5)
-6. **AC-4 — Wake Loop** (Slice 6)
-7. **AC-5 — Maintenance Cycle** (Slice 7)
-8. **AC-9 — Drain Check** (Slice 8)
-9. **AC-8 — Stale Wake Recovery** (Slice 9)
-10. **AC-6 — HTTP API** (Slice 10)
+1. **Rewrite `docker-compose.yml` + `.env.example` together**
+   (closes AC-28 partial, AC-29 partial, AC-32 partial). They are
+   coupled — every compose `${VAR:-default}` must match the
+   `.env.example` default byte-for-byte.
+2. **Write `tests/compose_env_test.rs` + `tests/env_example_test.rs`**
+   (closes AC-28, AC-29, AC-32). Machine-checked contract locked in
+   before any docs or scripts depend on it.
+3. **Write `scripts/smoke.sh` + `tests/smoke_script_test.rs`**
+   (closes AC-30 bash half). Exercise the script against the existing
+   compose/test-DB stack. This step produces the canonical list of
+   milestone commands that README must subsequently match.
+4. **Port to `scripts/smoke.ps1`** (closes AC-30 Windows half).
+   Exercise it on the author's Windows box; capture output in the BUILD
+   log. CI test is structural (syntax parse) per design.md.
+5. **Rewrite README Quick Start + `tests/readme_quickstart_test.rs`**
+   (closes AC-31). Anchors and step content must mirror step 3
+   exactly. Includes updating the API table with
+   `POST /api/agents/:id/rotate-webhook-secret`.
+6. **Write `docker-compose.caddy.yml` + `Caddyfile.example` +
+   `tests/caddy_overlay_test.rs` + README "Going public with HTTPS"
+   subsection** (closes AC-33). Last because the README structure
+   from step 5 must be in place before the subsection is added.
 
-### v2 Slices (appended)
-
-11. **AC-11 — Graceful Shutdown** (v2 Slice 1): Add `tokio_util::sync::CancellationToken` to `main.rs`. Wire `tokio::signal` for SIGTERM/SIGINT. Thread token through background listener and stale recovery task loops. Use `axum::serve(...).with_graceful_shutdown(...)` for HTTP. Wait up to 30s for in-flight wake loops via `JoinSet` or task tracking. Files: `main.rs`, `background/listener.rs`, `background/stale.rs`, `Cargo.toml` (add `tokio-util`). Foundation for all other v2 slices (clean shutdown needed before Docker).
-
-12. **AC-12 — Docker Compose** (v2 Slice 2): Create `Dockerfile` (multi-stage: builder with cargo-chef + runtime with Debian slim). Update `docker-compose.yml` to add app service with healthcheck, depends_on postgres with condition `service_healthy`, env vars. Files: `Dockerfile`, `docker-compose.yml`. No Rust code changes. Manual verification only.
-
-13. **AC-13 — Rate Limiting** (v2 Slice 3): Add `governor` to `Cargo.toml`. Create two `KeyedRateLimiter` instances in `AppState::new()` with hardcoded limits (10/min bootstrap, 60/min auth). Implement `unauth_rate_limit` and `auth_rate_limit` as custom axum middleware functions in `api/mod.rs` that return `Response` with `Retry-After` header on 429. Files: `api/mod.rs`, `Cargo.toml`. Test: `rate_limit_test.rs`.
-
-14. **AC-14 — Webhook Ingress** (v2 Slice 4): Create `api/webhooks.rs` with HMAC-SHA256 verification, idempotency dedup lookup/insert, event append + NOTIFY. Add two migrations: `add_webhook_secrets.sql` (add `webhook_secret` column to agents), `create_webhook_dedup.sql` (idempotency key table). Register route in `api/mod.rs`. Add `hmac` + `sha2` crates (sha2 already present). Files: `api/webhooks.rs`, `api/mod.rs`, 2 migrations, `models/agent.rs` (expose webhook_secret in create). Test: `webhook_test.rs`.
-
-15. **AC-15 — Agent Management** (v2 Slice 5): Add `update_agent` and `soft_delete_agent` functions to `models/agent.rs`. Add PATCH and DELETE handlers to `api/agents.rs`. Wire routes in agent router. Files: `models/agent.rs`, `api/agents.rs`. Test: `agent_mgmt_test.rs`. Depends on AC-11 implicitly (disabled wake rejection uses existing CAS WHERE clause).
+Each step ends with `cargo test` green (plus `pwsh` validation for step
+4), a `git add -A && git commit` checkpoint, and a `scaffolding/log.md`
+entry referencing the closed `AC-*` IDs.
 
 ## Complexity Exceptions
 
-### v1 Exceptions (carried forward)
+None. Per design.md v5 addendum:
 
-- **`wake_loop.rs` may exceed 300 lines (target ≤400)**: The LLM interaction loop, tool dispatch, iteration cap, event recording, and error handling are tightly coupled in a single control flow.
-
-- **13+ migration files**: Each TLA+-specified table gets its own migration per preferences.md convention.
-
-- **Slice 6 (Wake Loop) touches ~5 files**: Inherently coupled — the wake loop, LLM client, and tool dispatch form a single vertical slice.
-
-### v2 Exceptions
-
-- **v2 Slice 1 (Graceful Shutdown) touches 4 files**: `main.rs`, `background/listener.rs`, `background/stale.rs`, `Cargo.toml`. The `CancellationToken` must be threaded into every long-running task, making this inherently cross-cutting. Each file change is small (adding token parameter + select! on cancellation).
+- Every new file stays under 300 lines.
+- Compose baseline has zero added complexity for operators who skip
+  TLS — the Caddy overlay is a separate file activated with an extra
+  `-f` flag.
+- The v4 `src/cli/**` 600-line budget is unchanged — v5 touches no
+  Rust source outside the `tests/` directory.
 
 ---
 
-## v3 Truths
+_Readiness records for v1–v4 live in git history (see commit `9013ff7` and
+earlier tags). This file is authoritative for v5 only._
 
-- **T-18**: `.github/workflows/ci.yml` runs fmt, clippy (`-D warnings`), tests (against a real Postgres 16 service container), and `cargo deny check` on every push and pull request. CI is the authoritative gate — local "it compiles on my machine" is no longer sufficient.
-- **T-19**: Logging format is controlled by `LOG_FORMAT`. Default is human-readable; `LOG_FORMAT=json` produces one JSON object per line with `timestamp`, `level`, `target`, `message`, and span context fields. Other values fall back to the default.
-- **T-20**: The Prometheus metrics listener is opt-in. When `METRICS_ADDR` is unset, no listener is started and no extra port is bound. When set, a separate axum app binds to that address and serves only `GET /metrics`. The main API port is never used for `/metrics`.
-- **T-21**: `/health` is liveness only (returns 200 whenever the process is up). `/ready` is readiness (returns 200 only when DB reachable, migrations applied, background tasks running; 503 otherwise with `failing` field naming the failed check). Load balancers and container orchestrators should use `/ready` for traffic routing; `/health` for restart decisions.
-- **T-22**: Release artifacts for tags matching `v*` are reproducibly built with LTO + strip, signed with cosign keyless (GitHub OIDC), and accompanied by a CycloneDX SBOM and SHA-256 checksums. Consumers can verify provenance with `cosign verify-blob` without possessing any long-lived keys.
-- **T-23**: Operator knowledge for stale wakes, DB restore, migration rollback, rate-limit tuning, and webhook debugging lives in `docs/runbooks/` as markdown files with Symptom / Diagnostic Commands / Remediation / Escalation sections. Not tribal, not Slack threads, not in the head of whoever wrote it.
+<!-- Historical v1–v4 readiness content intentionally removed from this file.
+     Retrieve with: `git show 9013ff7:scaffolding/readiness.md` -->
+
+<!-- HISTORICAL_TAIL_REMOVED
 
 ## v3 Key Links
 
@@ -296,3 +355,6 @@ Carried forward from `scaffolding/design.md` v4 section:
 
 - **`static/js/**`— split by concern, no single-file ceiling.** BUILD moved away from the original single-file`static/app.js` plan to four ES-module layers (`app.js`, `api.js`, `state.js`, `ui.js`) plus one file per view (`views/{login,agents,detail,settings}.js`). Served as-is by the existing axum static handler via `<script type="module" src="/js/app.js">`— still no bundler, no framework, no build step, no CDN fetches. Largest file:`views/detail.js` at 132 lines. The previous ~400-line single-file ceiling is retired; if any single module grows past ~200 lines, split it further.
 - **`src/cli/**`— 600-line total budget** across`src/cli/mod.rs`, `src/cli/config.rs`, and `src/cli/commands/\*.rs`. Justification: a second binary in the same crate is cohesive with the runtime and shares `src/api_client.rs`; extracting to a separate workspace member is premature at v4 size. If v5 pushes the CLI past 600 lines, extract to a workspace member per preferences.md convention.
+
+HISTORICAL_TAIL_REMOVED -->
+

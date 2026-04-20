@@ -198,7 +198,6 @@ None. All six ACs have unambiguous pass/fail criteria and do not depend on exter
 - Performance baselining and load-test harness — separate iteration.
 - Binary signing with non-keyless cosign (hardware-token backed) — future enterprise release line.
 
-
 ---
 
 ## v4 — Usable Self-Host (CLI + Minimal UI + Safety Hardening)
@@ -333,4 +332,3 @@ None. All six ACs have unambiguous pass/fail criteria. OpenRouter remains the de
 - **TLA+ enum-name alignment** (runtime raw status strings → spec variant names) — v6 RECONCILE work, carried forward from v4
 - **Real signup/login flow, multi-tenant RBAC enforcement, per-workspace rate limits, account suspension** — previously tagged v5 in v4 Deferred; reassigned to v6 because v5 is operator-onramp only
 - **CLI auth subcommands beyond `bootstrap`/`login`** — reassigned to v6 with the auth flow above
-

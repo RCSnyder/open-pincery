@@ -454,3 +454,11 @@
 - **Changes**: `scaffolding/design.md` only.
 - **Retries**: 0
 - **Next**: ANALYZE.
+
+## v5 ANALYZE — 2026-04-19T00:20Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: `scaffolding/readiness.md` produced by the analyze subagent — v5 overwrites v4 (v4 lives in git history). Verdict READY. 17 Truths (T-v5-1..T-v5-17). AC-28..AC-33 coverage table with named test files and runtime proof paths. Build order locked at six slices: (1) compose + .env.example rewrite covering AC-28/AC-29/AC-32, (2) compose + env regression tests, (3) bash smoke script, (4) PowerShell smoke script, (5) README rewrite + readme_quickstart_test, (6) Caddy overlay + test + Going-Public subsection. Scope Reduction Risks explicit. Clarifications Needed: None. Complexity Exceptions: None.
+- **Changes**: `scaffolding/readiness.md` replaced with v5 content (v4 content preserved in git history at `9013ff7`).
+- **Retries**: 0
+- **Next**: BUILD.
