@@ -1,8 +1,8 @@
-# DELIVERY.md — Open Pincery v3
+# DELIVERY.md — Open Pincery v4
 
 ## What Was Built
 
-A multi-agent platform runtime implementing the Open Pincery architecture: event-sourced agents with CAS lifecycle management, LLM-powered wake/sleep cycles, maintenance projections, HTTP API, graceful shutdown, Docker Compose deployment, API rate limiting, webhook ingress, agent management, structured JSON logging, Prometheus metrics, health/readiness split, CI pipeline, signed release artifacts with SBOMs, and operator runbooks. Single-binary Rust server backed by PostgreSQL.
+A multi-agent platform runtime implementing the Open Pincery architecture: event-sourced agents with CAS lifecycle management, LLM-powered wake/sleep cycles, maintenance projections, HTTP API, graceful shutdown, Docker Compose deployment, API rate limiting, webhook ingress, agent management, structured JSON logging, Prometheus metrics, health/readiness split, CI pipeline, signed release artifacts with SBOMs, and operator runbooks. v4 adds self-host hardening: non-root container user, runtime budget-cap enforcement with transactional cost accounting, authenticated webhook-secret rotation, a `pcy` CLI binary, a vanilla-JS control plane UI, and a published v4 API stability contract. Single-binary Rust server backed by PostgreSQL.
 
 ## How to Use It
 
@@ -52,15 +52,25 @@ A multi-agent platform runtime implementing the Open Pincery architecture: event
 - AC-20: Tag-triggered signed release workflow (`.github/workflows/release.yml`). Builds `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` binaries with LTO + strip + codegen-units=1 (`[profile.release]` in `Cargo.toml`), generates CycloneDX SBOM, signs binary + SBOM with cosign keyless (GitHub OIDC), publishes via `softprops/action-gh-release`. Prerelease auto-detected from `-rc/-beta/-alpha` tag suffixes.
 - AC-21: Five operator runbooks under `docs/runbooks/` — stale wake triage, DB restore, migration rollback, rate-limit tuning, webhook debugging. Each includes Symptom / Diagnostic Commands / Remediation / Escalation sections with concrete copy-paste commands.
 
+## v4 Changes (from v3)
+
+- AC-22: Dockerfile runtime stage now creates a dedicated `pcy` system user (UID 10001) and drops to it via `USER pcy`; all runtime `COPY` directives use `--chown=pcy:pcy`. Verified by a static guard test (`tests/dockerfile_nonroot_test.rs`).
+- AC-23: Runtime LLM budget cap enforced before CAS wake acquire. `background::listener` checks `agents.budget_used_usd` against `agents.budget_limit_usd` and appends a `budget_exceeded` event instead of waking when the cap is reached. Cost accounting is now real end-to-end: `LlmClient` carries a `Pricing` struct for primary and maintenance calls, `wake_loop`/`maintenance` compute `cost_usd = llm.estimate_cost(usage, is_maintenance)`, and `insert_llm_call` increments `agents.budget_used_usd` in the same transaction as the `llm_calls` insert. Configured via `LLM_PRICE_INPUT_PER_MTOK` / `LLM_PRICE_OUTPUT_PER_MTOK` / `LLM_MAINTENANCE_PRICE_INPUT_PER_MTOK` / `LLM_MAINTENANCE_PRICE_OUTPUT_PER_MTOK` (defaults 3.0 / 15.0 / 3.0 / 15.0 USD per million tokens).
+- AC-24: Authenticated webhook-secret rotation endpoint `POST /api/agents/:id/rotate-webhook-secret`. Workspace-scoped via `scoped_agent`, returns the new secret exactly once, appends a `webhook_secret_rotated` event (no secret material in payload), and rotates the agent row atomically in the same transaction.
+- AC-25: `pcy` CLI binary (`[[bin]] pcy` in `Cargo.toml`) with subcommands `bootstrap`, `login`, `agent` (`create`/`list`/`show`/`disable`/`rotate-secret`), `message`, `events`, `budget` (`show`/`set`/`reset`), and `status`. Thin shim at `src/bin/pcy.rs`; shared HTTP client at `src/api_client.rs`.
+- AC-26: Vanilla-JS ES-module control plane UI served at `/` from `static/`. Split across `static/js/{app,api,state,ui}.js` plus `static/js/views/{login,agents,detail,settings}.js`; no bundler, no CDN, no single file exceeds 132 lines. Covers login, agent list, agent detail with long-poll event stream, and settings including secret rotation.
+- AC-27: `docs/api.md` publishes the v4 HTTP surface as the stable contract, documents the three auth models (bootstrap token, session token, webhook HMAC), the common error shape, every endpoint with request/response examples, and the client coverage matrix against the `pcy` CLI and the static UI.
+
+## Known Limitations
+
 - **No sandboxing**: Shell tool runs with host privileges (future: Zerobox container isolation)
 - **No inter-agent messaging**: Single-agent operation only
-- **Single workspace**: Multi-tenancy schema exists but not enforced in API authorization
-- **No UI beyond status page**: API-first interface
-- **Webhook secrets**: Only visible on agent creation — if lost, requires database access to retrieve
+- **Single workspace enforcement**: Multi-tenancy schema exists; `scoped_agent` enforces workspace isolation on agent-level handlers, but cross-workspace administration is not yet exposed via API
+- **Webhook secrets**: Still surfaced exactly once — on creation or after `POST /api/agents/:id/rotate-webhook-secret`. Operators must capture the response immediately.
 - **Rate limiting is in-process**: Not shared across multiple server instances
 - **Metrics recorder is process-global**: Only one Prometheus recorder per process; unit tests that install a recorder must run single-threaded.
 - **Release workflow not yet exercised**: `cosign verify-blob` against a real tagged artifact will happen on first `v*` tag push.
-- **Dockerfile runs as root**: No `USER` directive yet; acceptable for self-host single-operator deployments.
+- **RUSTSEC-2023-0071** (medium, CVSS 5.9): `rsa 0.9.10` pulled in transitively via unused `sqlx-mysql`. Not exploitable in this codebase (MySQL driver is never loaded). No upstream fix yet; acceptable per build gate (no high/critical).
 
 - **Runtime**: Single Rust binary (~15MB release), or Docker image
 - **Database**: PostgreSQL 16 (16 migration files)

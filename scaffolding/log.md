@@ -406,3 +406,35 @@
 - **Documents updated**: `scaffolding/design.md`, `scaffolding/readiness.md`, `scaffolding/log.md`.
 - **Confidence**: REPAIRED.
 - **Next**: VERIFY.
+
+## v4 VERIFY — 2026-04-20T03:00Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: `verify` subagent ran independently against HEAD `1f94952` and returned verdict **PASS**.
+  - Re-ran `cargo test --all-targets -- --test-threads=1` against live Postgres (`TEST_DATABASE_URL=postgres://open_pincery:open_pincery@localhost:5433/open_pincery_test`): **42/42 passed**, 0 failed, 0 ignored across 22 integration binaries + 4 library unit tests.
+  - Test-quality audit: non-trivial assertions (real HTTP status codes, row counts, CAS race outcomes, signal exit codes), real code paths (live axum router + real pg pool + real background listeners), edge cases covered (concurrent-wake race, bad HMAC, duplicate delivery, 61st-request rate-limit, SIGTERM mid-wake, budget refusal, DB-down readiness).
+  - AC-1..AC-27 walked one by one with code path + test + (where relevant) runtime proof. Live-server smoke against the just-built debug binary confirmed `GET /health` → `200 {"status":"ok"}`, `GET /ready` → `200 {"status":"ready"}`, `POST /api/bootstrap` idempotency (`{"error":"System already bootstrapped"}`). `target/debug/pcy.exe --help` enumerated all 7 subcommands; `pcy agent --help` and `pcy budget --help` showed the full subcommand trees for AC-25.
+  - Security: no high-entropy credential patterns in `src/`, `tests/`, or `static/`; HMAC verification uses constant-time `mac.verify_slice`; `auth_middleware` + `scoped_agent` enforce workspace isolation on every agent handler including AC-24 rotate; Dockerfile non-root via `USER pcy` (UID 10001).
+  - Dependency audit: `cargo audit` reported **1 medium, 0 high, 0 critical**. Only advisory is RUSTSEC-2023-0071 (rsa 0.9.10 Marvin timing sidechannel, CVSS 5.9), confined to the unused `sqlx-mysql` transitive path; no fix available upstream. Below the high/critical gate threshold.
+  - Deployment readiness: `Dockerfile` multi-stage + non-root + healthcheck present; `docker-compose.yml` wires `build: .` + healthcheck + `depends_on: service_healthy`; 16 sequential migrations `20260418000001`..`20260418000016` without gaps; `README.md`, `DELIVERY.md`, 5 runbooks, `docs/api.md` all present; CI + release workflows valid; `target/` not committed.
+- **Retries**: 0
+- **Next**: DEPLOY.
+
+## v4 DEPLOY — 2026-04-20T03:30Z
+
+- **Gate**: PASS (attempt 1)
+- **Deploy target**: `self_host_individual` (unchanged from scope.md) — single Rust binary + PostgreSQL, Docker Compose provided. No cloud push. "Deploy" here means: the deployable artifacts are buildable, the release workflow is wired, and the operator-facing docs reflect what shipped.
+- **Evidence**:
+  - `docker compose config --quiet` EXIT=0 (compose file is syntactically valid and all env interpolations resolve).
+  - `target/release/pcy.exe --help` listed all 7 top-level subcommands + help (release binary smoke-OK; produced by the release profile with LTO + strip + codegen-units=1).
+  - Release workflow remains at `.github/workflows/release.yml`, tag-triggered; no execution required for v4 (no new `v*` tag pushed; the workflow is an artifact to exercise when the operator chooses to cut a release).
+  - 16 migrations sequenced `20260418000001`..`20260418000016` with no gaps or conflicts.
+  - `README.md` v3 status paragraph bumped to v4: now calls out AC-22 (non-root container), AC-23 (budget cap with `LLM_PRICE_*_PER_MTOK` env vars), AC-24 (authenticated rotation endpoint), AC-25 (`pcy` CLI), AC-26 (ES-module control plane), AC-27 (v4 API stability contract).
+  - `DELIVERY.md` bumped to v4: new `## v4 Changes (from v3)` section with one bullet per AC; `## Known Limitations` refreshed — the stale "Dockerfile runs as root" and "No UI beyond status page" bullets removed, webhook-rotation availability noted, and the RUSTSEC-2023-0071 posture recorded.
+- **Operator handoff (how to run)**:
+  - `cp .env.example .env` and set `LLM_API_KEY`, `OPEN_PINCERY_BOOTSTRAP_TOKEN`, and (optionally) the new `LLM_PRICE_*_PER_MTOK` overrides.
+  - `docker compose up -d` to launch; `POST /api/bootstrap` to obtain a session token; `pcy login` / `pcy agent create` / `pcy message` / `pcy events` / `pcy budget set`.
+  - Control-plane UI at `/` (same port as the API).
+  - Five operator runbooks under `docs/runbooks/` cover stale-wake, DB restore, migration rollback, rate-limit tuning, and webhook debugging.
+- **Retries**: 0
+- **Next**: STOP (v4 delivered; awaiting operator feedback for a possible v5 `/iterate`).
