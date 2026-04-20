@@ -262,3 +262,75 @@ None. Vanilla JS without a type-check step is locked. CLI name `pcy` is locked. 
 - **WASM UI rewrite** — possible v7+ if SPA features are actually needed; v4 vanilla JS stays the canonical UI until proven inadequate
 - **CLI auth subcommands beyond `bootstrap`/`login`** (e.g. `pcy logout`, `pcy whoami`) — v5 when real auth lands
 - **UI styling beyond a minimal reset** — out of scope; intentionally utilitarian
+
+---
+
+## v5 — Operator Onramp
+
+### Problem (v5)
+
+v4 shipped the pieces a self-hoster needs (non-root container, budget cap, webhook rotation, `pcy` CLI, UI, API contract) but the **day-zero path** from "clone the repo" to "first working agent" is still broken. Concrete blockers verified in the v4 artifact:
+
+- `docker-compose.yml` hardcodes `OPEN_PINCERY_BOOTSTRAP_TOKEN: changeme` so the operator's `.env` is ignored and bootstrap returns 401.
+- Compose only forwards `LLM_API_BASE_URL` and `LLM_API_KEY` — `LLM_MODEL`, `LLM_MAINTENANCE_MODEL`, all four `LLM_PRICE_*_PER_MTOK` (v4), `LOG_FORMAT`/`METRICS_ADDR` (v3), and `RUST_LOG` are silently dropped.
+- `.env.example` is v3-shaped and missing every v4 variable.
+- Quick Start in README is v3-era with contradictory Option A/B steps, no `pcy`, no web UI, no Troubleshooting, no reset, no observability pointers, no signed-binary install path (v3 AC-20), and no backup pointer (v3 AC-21 runbook exists but is invisible from the landing page).
+- Compose publishes on `0.0.0.0:8080` by default — unacceptable for a platform whose explicit purpose is remote shell execution.
+- No Caddy/TLS example exists despite `preferences.md` naming Caddy as the self-host default (gap also called out in `docs/input/self_host_readiness.md` §2).
+
+This iteration is **operator-experience only** — no new runtime features, no interface changes, no new dependencies. Every shipped v1–v4 capability must become reachable via a single linear onramp with test-enforced docs/config consistency.
+
+### Changes from v4
+
+- `docker-compose.yml` env block rewritten to use `${VAR}` interpolation with fail-fast `:?` guards for required secrets and safe `${VAR:-default}` for optional settings
+- `.env.example` refreshed with all config-read variables, grouped + commented, OpenRouter default + OpenAI alternative block
+- `README.md` Quick Start rewritten: UI-primary → `pcy`-secondary → curl-appendix, plus Troubleshooting, Reset, Backup one-liner, and signed-binary install path referencing v3 AC-20 release artifacts
+- New `scripts/smoke.sh` and `scripts/smoke.ps1` proving the onramp end-to-end
+- New `docker-compose.caddy.yml` + sample `Caddyfile` as the documented localhost→HTTPS overlay
+- New regression tests enforcing compose/env/readme consistency
+
+No changes to core runtime (CAS lifecycle, wake loop, maintenance, drain, event log), API surface, schema, or any existing v1–v4 AC behavior.
+
+### v5 Acceptance Criteria
+
+- **AC-28** (Compose Honors `.env`): `docker-compose.yml` passes every runtime-relevant variable to the `app` container via `${VAR}` interpolation. `OPEN_PINCERY_BOOTSTRAP_TOKEN` and `LLM_API_KEY` are required and compose fails fast with a clear error when unset. `LLM_API_BASE_URL`, `LLM_MODEL`, `LLM_MAINTENANCE_MODEL`, `LLM_PRICE_INPUT_PER_MTOK`, `LLM_PRICE_OUTPUT_PER_MTOK`, `LLM_MAINTENANCE_PRICE_INPUT_PER_MTOK`, `LLM_MAINTENANCE_PRICE_OUTPUT_PER_MTOK`, `LOG_FORMAT`, `METRICS_ADDR`, `RUST_LOG`, `OPEN_PINCERY_HOST`, `OPEN_PINCERY_PORT` all flow through with sensible defaults. Verified by `tests/compose_env_test.rs`: runs `docker compose config` against a fixture `.env`, asserts the rendered app env contains the fixture values, contains no literal `changeme`, and that compose fails fast when a required secret is missing.
+
+- **AC-29** (`.env.example` Is Current): `.env.example` contains every variable read by `src/config.rs`, `src/runtime/llm.rs` pricing, and `src/observability/`. Each entry has an inline comment describing what it does and its default. Includes a commented OpenAI-compatible alternative block alongside the OpenRouter default. Verified by `tests/env_example_test.rs`: parses keys from `.env.example`, scans the source tree for `std::env::var("…")` call sites against an allowlist-of-allowlists, and asserts every read variable is either present in `.env.example` or listed as intentionally-internal in the test.
+
+- **AC-30** (End-to-End Smoke Script): `scripts/smoke.sh` (bash) and `scripts/smoke.ps1` (PowerShell) execute the full onramp against a running compose stack: `docker compose up -d --wait`, poll `/ready` until 200 (max 60s), bootstrap via `pcy`, create an agent, send a message, tail events, assert a `message_received` event exists for the created agent. Exit 0 on success, non-zero with actionable stderr on failure (each failure mode references a Troubleshooting entry by anchor). Verified by a test that runs the bash smoke script against the existing test database stack and asserts exit 0 plus the expected event.
+
+- **AC-31** (README Quick Start Matches Reality): README Quick Start presents three onramps in order of expected use — (1) Web UI at `http://localhost:8080`, (2) `pcy` CLI, (3) curl/HTTP appendix — plus a "From Signed Release Binary" section referencing v3 AC-20 cosign verification, plus Troubleshooting covering: bootstrap 401, 429 rate limit, silent wake (check `LLM_API_KEY` and `docker compose logs -f app`), "already bootstrapped" reset (`docker compose down -v`), `LOG_FORMAT=json` enablement, `METRICS_ADDR` Prometheus scrape example, and a `pg_dump` backup one-liner linking to `docs/runbooks/db-restore.md`. The API table includes `POST /api/agents/:id/rotate-webhook-secret` (v4 AC-24). Verified by `tests/readme_quickstart_test.rs`: greps README for each of the named anchor strings and for every step executed by `scripts/smoke.sh`.
+
+- **AC-32** (Secure-By-Default Compose): Out-of-box `docker-compose.yml` publishes the app port bound to `127.0.0.1:8080:8080` (loopback only), not `0.0.0.0:8080`. `.env.example` defaults `OPEN_PINCERY_HOST=127.0.0.1`. No literal default exists for `OPEN_PINCERY_BOOTSTRAP_TOKEN` anywhere — compose refuses to start when unset. Verified by `tests/compose_env_test.rs` assertions on the published ports block and by a `docker compose config` run with empty env that exits non-zero.
+
+- **AC-33** (Caddy TLS Overlay): `docker-compose.caddy.yml` and `Caddyfile.example` ship as the documented path from localhost HTTP to public HTTPS. Overlay is activated via `docker compose -f docker-compose.yml -f docker-compose.caddy.yml up -d`, puts Caddy in front of the app service, and obtains a TLS cert for a configurable domain. README Quick Start links to a "Going public with HTTPS" subsection documenting the overlay. Verified by a test that runs `caddy validate --config Caddyfile.example` (or equivalent syntax check) and asserts the README links to the subsection anchor.
+
+### v5 Deployment Target
+
+Same as v1–v4: `self_host_individual`. Everything new is opt-in docs, overlay, or config — an operator already running v4 sees no behavior change unless they re-read the rewritten Quick Start.
+
+### v5 Estimated Cost
+
+$0. All changes are docs, compose YAML, `.env.example`, scripts, and tests. No runtime dependencies added.
+
+### v5 Quality Tier
+
+Still skyscraper. v5 closes the operator-UX gate that skyscraper tier implies but v1–v4 carried as debt.
+
+### v5 Clarifications Needed
+
+None. All six ACs have unambiguous pass/fail criteria. OpenRouter remains the default LLM base URL; OpenAI ships as a commented alternative.
+
+### v5 Deferred (from this iteration)
+
+- **Bootstrap token rotation/expiry rules** (`self_host_readiness.md` §1) — v6
+- **`self_host_team` split-topology docs and compose overlay** (readiness §2) — v6
+- **Upgrade runbook and backup-encryption guidance** (readiness §5) — v6
+- **Local admin lockout recovery and MFA policy** (readiness §3) — v6
+- **UI first-run wizard / `pcy status` unbootstrapped auto-detect** — v6
+- **Machine-readable `AGENTS.md` for operator agents** — v6
+- **Published OCI images on `ghcr.io`** — v6 (pairs with team-topology work)
+- **TLA+ enum-name alignment** (runtime raw status strings → spec variant names) — v6 RECONCILE work, carried forward from v4
+- **Real signup/login flow, multi-tenant RBAC enforcement, per-workspace rate limits, account suspension** — previously tagged v5 in v4 Deferred; reassigned to v6 because v5 is operator-onramp only
+- **CLI auth subcommands beyond `bootstrap`/`login`** — reassigned to v6 with the auth flow above
+

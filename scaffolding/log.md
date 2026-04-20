@@ -438,3 +438,11 @@
   - Five operator runbooks under `docs/runbooks/` cover stale-wake, DB restore, migration rollback, rate-limit tuning, and webhook debugging.
 - **Retries**: 0
 - **Next**: STOP (v4 delivered; awaiting operator feedback for a possible v5 `/iterate`).
+
+## v5 EXPAND — 2026-04-19T00:00Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: `scaffolding/scope.md` appended with v5 section — Problem, Changes from v4, AC-28..AC-33 (six ACs each with measurable thresholds and declared test file), Deployment Target (unchanged), Cost ($0), Quality Tier (skyscraper), Clarifications (None), Deferred (9 items reassigned or flagged for v6). Each AC has a stable ID, a planned verification path, and named test artifact.
+- **Changes**: `scaffolding/scope.md` only.
+- **Retries**: 0
+- **Next**: DESIGN (minor: onramp contract subsection in `scaffolding/design.md`).
