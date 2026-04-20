@@ -1,12 +1,12 @@
 # Stage 1: Build
-FROM rust:1.87-bookworm AS builder
+FROM rust:1.88-bookworm AS builder
 
 WORKDIR /app
 
 # Cache dependency builds
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs
-RUN cargo build --release && rm -rf src target/release/deps/open_pincery*
+RUN mkdir -p src/bin && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs && echo "fn main() {}" > src/bin/pcy.rs
+RUN cargo build --release && cargo clean -p open-pincery --release && rm -rf src
 
 # Build actual source
 COPY src/ src/
