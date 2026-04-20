@@ -1,9 +1,15 @@
 [package]
 name = "open-pincery"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Multi-agent platform for durable, event-driven AI agents"
 license = "MIT"
+repository = "https://github.com/RCSnyder/open-pincery"
+homepage = "https://github.com/RCSnyder/open-pincery"
+readme = "README.md"
+keywords = ["agents", "ai", "llm", "event-sourcing", "axum"]
+categories = ["command-line-utilities", "web-programming::http-server"]
+rust-version = "1.88"
 
 [dependencies]
 axum = { version = "0.8", features = ["json"] }

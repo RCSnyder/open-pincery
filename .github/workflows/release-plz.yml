@@ -1,0 +1,52 @@
+# release-plz: after CI passes on main, automatically bumps version + CHANGELOG
+# and pushes a `vX.Y.Z` tag. The tag push triggers release.yml (signed artifacts
+# + SBOM + GitHub Release). No PR, no manual merge.
+#
+# Gated on CI success via `workflow_run` — if fmt/clippy/test/deny fail, this
+# workflow does not run and no release is cut.
+#
+# NOTE: requires a repo secret `RELEASE_PLZ_TOKEN` — a Personal Access Token
+# (classic: `repo` scope, or fine-grained with contents+pull-requests R/W).
+# The default GITHUB_TOKEN cannot be used here because tag pushes it performs
+# do not trigger downstream workflows (GitHub's recursion guard), which would
+# prevent release.yml from running.
+
+name: release-plz
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-plz:
+    name: release-plz
+    runs-on: ubuntu-latest
+    # Only run if CI succeeded AND the head commit isn't release-plz's own.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      !startsWith(github.event.workflow_run.head_commit.message, 'chore: release')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          # workflow_run runs on the default branch ref; check out the exact
+          # commit that CI passed against so we tag the right SHA.
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Default command runs `release-plz update` (bumps Cargo.toml + CHANGELOG,
+      # commits directly to main) followed by `release-plz release` (pushes the
+      # vX.Y.Z tag and runs `cargo publish` to crates.io). No PR is opened.
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

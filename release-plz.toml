@@ -1,0 +1,26 @@
+# release-plz configuration.
+# Automates Conventional Commits -> semver bump + CHANGELOG + git tag.
+# Direct-commit flow (no release PR): release-plz commits the version bump
+# straight to main and pushes the `vX.Y.Z` tag, which triggers
+# `.github/workflows/release.yml` to build and publish signed artifacts.
+
+[workspace]
+# Publish to crates.io on release.
+publish = true
+# Maintain CHANGELOG.md at the repo root.
+changelog_update = true
+# Don't create the GitHub Release here — release.yml does that with signed
+# artifacts + SBOM.
+git_release_enable = false
+# Push the `vX.Y.Z` tag that release.yml listens for.
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+# Skip semver-check (cargo semver-checks); enable later if we publish a lib API.
+semver_check = false
+
+[[package]]
+name = "open-pincery"
+# Enabled at 1.0.0. On every push to main containing `feat:` / `fix:` commits,
+# release-plz computes the next semver, commits the bump + CHANGELOG to main,
+# and pushes the tag — all automatically.
+release = true
