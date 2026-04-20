@@ -507,3 +507,11 @@
 - **Changes**: None (read-only verification).
 - **Retries**: 0
 - **Next**: DEPLOY.
+
+## v5 DEPLOY — 2026-04-20T00:00Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: All v5 changes committed. README.md updated with setup + run instructions. DELIVERY.md updated to v5 with AC-28..AC-33 changelog. Self-host deployment target unchanged from v4 (Docker Compose). No stateful changes beyond v4.
+- **Changes**: `DELIVERY.md` updated to v5, `scaffolding/log.md` finalized.
+- **Retries**: 0
+- **Next**: STOP (v5 delivered).
