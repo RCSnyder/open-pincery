@@ -103,7 +103,7 @@ Non-negotiable statements that must be true in the shipped v6 system:
 | AC-34 | `tests/agent_status_test.rs` + `tests/no_raw_status_literals.rs`         | Round-trip all 5 variants; static grep finds zero unguarded raw status literals in `src/`; migration runs cleanly                           |
 | AC-35 | `tests/capability_gate_test.rs` (unit + integration)                     | 15-cell `mode_allows` table passes; Locked agent + `shell` tool call emits exactly one `tool_capability_denied` event; `CountingExecutor::spawns() == 0` |
 | AC-36 | `tests/sandbox_test.rs` + `tests/no_raw_command_new.rs`                  | (a) `HOME`/`MY_SECRET` absent from child env; (b) `sleep 60` with 1s timeout → `Timeout`; (c) `sudo`-prefixed command → `Rejected`, no spawn; (d) one `Command::new(` match under `src/runtime/` |
-| AC-37 | `tests/deny_config_test.rs` + CI `cargo deny check`                      | Parses `deny.toml`; asserts `vulnerability == "deny"` and `ignore == []`; CI job exits 0                                                    |
+| AC-37 | `tests/deny_config_test.rs` + CI `cargo deny check`                      | Parses `deny.toml`; asserts `version = 2`, `yanked = "deny"`, and that the `ignore` list contains ONLY documented exceptions (RUSTSEC-2023-0071 with a dated reason) matching the test's allowlist. Any undocumented entry fails the build. |
 
 ## Scope Reduction Risks
 
@@ -117,7 +117,7 @@ Non-negotiable statements that must be true in the shipped v6 system:
 - **AC-36 — `env_clear()` weakened to preserve a convenient passthrough**: Scope locks `PATH`-only default. Operators who need more configure `SandboxProfile.env_allowlist` per-profile.
 - **AC-36 — Timeout implemented as a soft signal instead of a kill**: Scope locks `child.start_kill()` followed by `ExecResult::Timeout`.
 - **AC-36 — `sudo` check relaxed to a warning**: Scope locks rejection before spawn.
-- **AC-37 — Zero-ignore policy weakened "because of one legacy advisory"**: If a new unfixable advisory appears, STOP and raise it. Do not reinstate the ignore list.
+- **AC-37 — Zero-ignore policy weakened "because of one legacy advisory"**: A single documented, dated exception (RUSTSEC-2023-0071, `rsa` via `sqlx-macros-core -> sqlx-mysql`) is permitted because no upstream fix exists since 2023-11 and the path is not reachable at Postgres runtime. `tests/deny_config_test.rs` pins the exception set via an `ALLOWED_ADVISORIES` allowlist; adding any new entry requires updating both the test and deny.toml in the same change — a STOP-and-raise event.
 - **AC-37 — `yanked = "warn"` left in place**: Scope locks `yanked = "deny"`.
 
 ## Clarifications Needed

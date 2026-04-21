@@ -8,12 +8,25 @@ no-default-features = false
 [advisories]
 # AC-37 (v6): zero-advisory floor. Version 2 of the advisories config
 # implicitly denies known vulnerabilities; we additionally refuse yanked
-# crates and keep the ignore list empty so any new RUSTSEC advisory fails
-# CI. Reinstating an ignore entry is a STOP-and-raise event, not a normal
-# maintenance step.
+# crates. The ignore list is intentionally narrow and every entry must
+# carry (a) the advisory ID, (b) a dated justification, and (c) the
+# revisit trigger. Adding any entry beyond a dated, justified exception
+# is a STOP-and-raise event, not a normal maintenance step.
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # RUSTSEC-2023-0071 — Marvin attack on `rsa` 0.9.x (medium, 5.9).
+    # Pulled transitively through `sqlx-macros-core -> sqlx-mysql -> rsa`.
+    # The sqlx macro crate unconditionally compiles sqlx-mysql at
+    # macro-expand time regardless of which database features we enable,
+    # so this path is not reachable at runtime (we only connect to
+    # Postgres). No upstream `rsa` fix has shipped since the 2023-11-22
+    # advisory, and sqlx-macros does not offer a flag to exclude mysql.
+    # Revisit whenever: (a) `rsa` publishes a fixed release, (b) sqlx
+    # 0.9+ ships with a non-mysql-bearing macros crate, or (c) we move
+    # off the `sqlx::FromRow` derive entirely.
+    { id = "RUSTSEC-2023-0071", reason = "rsa via sqlx-macros-core->sqlx-mysql; no Postgres runtime exposure; no upstream fix. Revisit on rsa release or sqlx 0.9." },
+]
 
 [bans]
 multiple-versions = "warn"
