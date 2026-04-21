@@ -1,5 +1,13 @@
 # Open Pincery — Experiment Log
 
+## ANALYZE v8 — 2026-04-21T16:00Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: readiness.md appended with v8 addendum (`## v8 Readiness Addendum — Unified API Surface`, ~398 new lines bringing file from 275 → ~673 lines). Post-analyze gate conditions verified: (a) readiness.md exists with v8 section; (b) Verdict is READY; (c) every AC-44..AC-52 appears in the coverage table with both a planned test file and a concrete runtime verification (AC-52 split into AC-52a/AC-52b matching design); (d) Truths (T-v8-1..T-v8-13) and Clarifications Needed (4 bounded design-resolved items, none with BUILD pass/fail impact) are in separate sections; (e) Scope Reduction Risks section enumerates 15 concrete regressions BUILD could ship as a shell/placeholder — including MCP `tools/list` hard-coding, resolver-only-handles-UUIDs, silent cosign skip, `--output table` falling through to JSON, legacy shim no-ops, manual migration deferral, and v1–v7 regression risk; (f) Build Order has 6 slices covering all 9 ACs with explicit dependencies (Slice 1 OpenAPI foundation unblocks AC-49+AC-52a; Slice 2 bundles AC-46+AC-47+AC-48 due to shared root `Cli` surgery; Slice 3 AC-45 depends on context storage; Slice 4 AC-49 depends on `ApiDoc`; Slice 5 AC-50+AC-51 independent; Slice 6 AC-52 audits everything); (g) Complexity Exceptions carries forward the 4 from design.md (mcp/mod.rs ≤300, cli/output.rs ≤250, legacy shim duplication, utoipa verbosity). Key Links provide unambiguous AC → component → test → runtime-proof chains for all 9 ACs. No unresolved clarification would change pass/fail semantics for any AC.
+- **Changes**: appended v8 readiness addendum to `scaffolding/readiness.md`
+- **Retries**: 0
+- **Next**: BUILD (v8) — begin Slice 1 (AC-44 utoipa foundation + `/openapi.json` endpoint)
+
 ## DESIGN v8 — 2026-04-21T15:00Z
 
 - **Gate**: PASS (attempt 1)

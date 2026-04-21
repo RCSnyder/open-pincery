@@ -273,3 +273,408 @@ clippy --all-targets -- -D warnings` + `cargo fmt --all -- --check` +
 
 None. File budgets tracked in `design.md` v7 addendum
 ("Complexity Exceptions" subsection).
+
+---
+
+## v8 Readiness Addendum — Unified API Surface
+
+> v7 is shipped; AC-38..AC-43 coverage is locked by the v7 suite and not
+> re-planned here. v8 covers AC-44 through AC-52 only. v8 is
+> surface-only: no schema changes, no runtime-semantic changes to any
+> existing handler, no change to the authenticated contract shape.
+> Every v1–v7 AC must still pass unchanged after v8 BUILD; regressing
+> an older AC is a v8 blocker.
+
+### Verdict
+
+READY
+
+Every AC-44..AC-52 has a named design component, a named test file, a
+concrete runtime proof path, and an unambiguous pass/fail assertion.
+The four design-time scope adjustments (kubectl JSONPath subset, pinned
+MCP `2025-06-18`, Windows-via-WSL for `install.sh`, PUT-ban as lint not
+arch) sharpen AC semantics without softening any invariant. No
+outstanding clarification would change the pass/fail meaning of any
+AC. BUILD may begin.
+
+### Truths
+
+Non-negotiable statements that must be true in the shipped v8 system:
+
+- **T-v8-1** `src/api/openapi.rs` defines a single
+  `#[derive(utoipa::OpenApi)] pub struct ApiDoc` whose `paths(...)`
+  list contains **every** route registered by `api::router()` plus the
+  unauth routes (`/api/bootstrap`, `/api/webhooks/*`). `AC-44` lint
+  fails closed if the two enumerations diverge.
+- **T-v8-2** `GET /openapi.json` returns a JSON body that parses as
+  `openapiv3::OpenAPI` with `openapi == "3.1.0"`, shares the `/health`
+  rate-limit bucket, is unauthenticated, and sets
+  `Content-Type: application/json`. `GET /openapi.yaml` returns the
+  YAML serialization with `Content-Type: application/yaml`.
+- **T-v8-3** `pcy login` is idempotent: on a fresh server with
+  `OPEN_PINCERY_BOOTSTRAP_TOKEN` set it calls `POST /api/bootstrap`;
+  on an already-bootstrapped server it calls `POST /api/login`; on
+  either path exit is 0 and stdout is exactly one line matching
+  `^Logged in to <context> as <email>$`. **Re-running `pcy login`
+  against an already-bootstrapped server never surfaces a `409`.**
+- **T-v8-4** The clap root `Cli` exposes the v8 nouns
+  (`agent credential budget event context auth api completion mcp
+  whoami login`) plus hidden shim variants (`bootstrap message events`)
+  that emit exactly one `warning:` stderr line via
+  `nouns::warn_deprecated` and delegate to the new verb. `--help`
+  output lists the new tree; `--help --all` (or equivalent) surfaces
+  the hidden shims.
+- **T-v8-5** Every verb accepting an agent/credential/budget/event
+  target resolves via `src/cli/resolve.rs`: valid UUID → single GET
+  confirmation; non-UUID → LIST filtered by exact `name` equality;
+  multiple matches → exit 2 with a two-column `ID  NAME` table on
+  stderr; zero matches → exit 1 with `not found: <needle>` on stderr.
+  **Name matching is never a substring or prefix match.**
+- **T-v8-6** Every command that prints structured data accepts
+  `--output {table|json|yaml|jsonpath=<expr>|name}`. Default is
+  `table` when `io::stdout().is_terminal()`, `json` otherwise.
+  `NO_COLOR` suppresses ANSI from `table`. `jsonpath=<expr>` evaluates
+  through `jsonpath-rust` covering the kubectl subset
+  (`.foo.bar`, `.items[*].name`, `.items[0]`, `[?(@.k==v)]`). `name`
+  emits one name per line. `--format` is accepted for one release as a
+  deprecated alias that warns once.
+- **T-v8-7** `~/.config/open-pincery/config.toml` with v4 flat schema
+  is auto-migrated on first v8 load: `src/cli/migrate.rs` writes a
+  backup at `config.toml.pre-v8` then rewrites to
+  `current-context = "default"` + `[contexts.default]` preserving
+  `url`/`token`/`workspace_id`/`user_id`. Migration is idempotent
+  (second load is a no-op). Context precedence is `--context` flag >
+  `OPEN_PINCERY_CONTEXT` env > file `current-context`.
+- **T-v8-8** `pcy mcp serve` is a stdio JSON-RPC server speaking MCP
+  revision `2025-06-18` with newline-delimited framing. `tools/list`
+  returns one tool per `ApiDoc::openapi()` operation named
+  `<tag>.<operation>` (e.g. `agent.create`, `credential.list`) with
+  `description` from the operation summary and `inputSchema` from the
+  request body + path/query parameters. **The tool list is derived
+  from `ApiDoc`, never hard-coded.** `tools/call` proxies through
+  `ApiClient` using the active context's token; HTTP failures map to
+  the fixed error-code table (`-32001` unreachable, `-32002`
+  unauthorized, `-32003` rate-limited, `-32004` not-found, `-32000`
+  generic). stdout carries only JSON-RPC; debug and framing errors go
+  to stderr.
+- **T-v8-9** `install.sh` at the repo root, when piped to `bash`,
+  detects OS+arch via `uname`, resolves the release tag, downloads the
+  matching asset and its `.sha256`, **enforces sha256**, and attempts
+  cosign verification. Without `cosign` on `PATH` it prints a
+  `warning:` line and proceeds; with `--require-cosign` it exits
+  non-zero. `shellcheck -S warning` is clean. sha256 mismatch **always**
+  exits non-zero and refuses to install the asset.
+- **T-v8-10** `pcy completion {bash|zsh|fish|powershell}` emits a
+  non-empty completion script via `clap_complete` containing a
+  shell-specific marker (`_pcy`/`#compdef`/`complete -c pcy`/
+  `Register-ArgumentCompleter`). README documents the one-line install
+  for each shell.
+- **T-v8-11** `tests/api_naming_test.rs` walks `ApiDoc::openapi()` at
+  test time and asserts: every collection path segment is plural; every
+  primary-key path parameter is named `{id}` (explicit allowlist for
+  compound keys); every operation has a non-empty summary ≤ 72 chars
+  ending without a period; no `PUT` method appears (allowlist is
+  empty at v8 ship); no schema uses `format: "uuid-v7"` (only
+  `format: "uuid"`). `tests/cli_naming_test.rs` walks the clap
+  `Command` tree and asserts: every command/subcommand has a non-empty
+  `about`; every leaf that prints data exposes `--output`; no leaf
+  exposes `--format` except behind the hidden deprecated alias; no leaf
+  uses `--yes` (only `--force`).
+- **T-v8-12** `scripts/demo.sh` replaces the former `pcy demo`
+  subcommand. `pcy demo` is deleted (not hidden). The smoke script in
+  `scripts/smoke.sh` + `scripts/smoke.ps1` invokes `pcy login` and
+  asserts `/openapi.json` returns 200.
+- **T-v8-13** v1–v7 acceptance criteria remain green after v8 BUILD.
+  `cargo test --all-targets -- --test-threads=1`,
+  `cargo clippy --all-targets -- -D warnings`,
+  `cargo fmt --all -- --check`, and `cargo deny check advisories` all
+  pass at the post-BUILD gate.
+
+### Key Links
+
+- **AC-44** → scope.md v8 AC-44 → `src/api/openapi.rs` (`ApiDoc`,
+  `openapi_router`) + `#[utoipa::path]` annotations on every handler
+  in `src/api/{agents,credentials,me,events,messages,webhooks,
+  bootstrap}.rs` + `src/api/mod.rs` (mount on unauth router) →
+  `tests/openapi_spec_test.rs` → runtime proof: in-process
+  `api::router()` spin-up; `GET /openapi.json` parses as
+  `openapiv3::OpenAPI`; path enumeration diff vs `router()` is empty;
+  `Content-Type` is `application/json`; rate-limit bucket is the
+  `/health` bucket; YAML variant returns the same document.
+- **AC-45** → scope.md v8 AC-45 → `src/cli/nouns/auth.rs` (`login`
+  verb) + `src/api_client.rs` (bootstrap-or-login branch) +
+  `src/cli/commands/mod.rs` (`bootstrap_shim`) →
+  `tests/cli_login_idempotent_test.rs` → runtime proof:
+  docker-compose fresh reset + `pcy login` → exit 0; second `pcy
+  login` against same server → exit 0, **no 409**; `pcy bootstrap`
+  alias emits exactly one `warning:` stderr line and delegates;
+  `pcy --help` does not list `bootstrap`; stdout on both runs matches
+  `^Logged in to <context> as <email>$`.
+- **AC-46** → scope.md v8 AC-46 → `src/cli/mod.rs` (v8 `Commands`
+  enum) + `src/cli/nouns/{agent,credential,budget,event,context,auth,
+  completion,mcp}.rs` + `src/cli/resolve.rs` + `src/cli/commands/mod.rs`
+  (shim delegates) → `tests/cli_noun_verb_test.rs` → runtime proof:
+  parameterized `(legacy_cmd, new_cmd)` pairs produce byte-identical
+  stdout against a common fixture; ambiguous-name case exits 2 with
+  two-column `ID  NAME` table on stderr; not-found exits 1; UUID path
+  works; hidden shims each emit exactly one deprecation warning.
+- **AC-47** → scope.md v8 AC-47 → `src/cli/output.rs` (`OutputFormat`,
+  `TableRow`, `render`, `default_for_tty`) + per-noun `TableRow`
+  impls in `src/cli/nouns/*` + root `Cli` gains `--output` flag →
+  `tests/cli_output_flag_test.rs` → runtime proof: `--output json`
+  parses as JSON; `--output yaml` parses as YAML; `--output name`
+  emits one name per line; `--output jsonpath='{.items[*].name}'`
+  filters correctly over fixture data; PTY fixture confirms TTY
+  default is `table` and pipe default is `json`; `NO_COLOR=1`
+  suppresses ANSI in `table`; `--format json` warns once then behaves
+  as `--output json`; `--yes` warns once then behaves as `--force`.
+- **AC-48** → scope.md v8 AC-48 → `src/cli/config.rs` (v8
+  `ContextConfig`/`CliConfig`) + `src/cli/migrate.rs` +
+  `src/cli/nouns/context.rs` (list/current/use/set/delete) + root
+  `Cli` gains `--context` flag → `tests/cli_context_test.rs` →
+  runtime proof: v4 flat fixture file on disk → `pcy context list`
+  migrates in place, writes `config.toml.pre-v8` backup, idempotent
+  on re-run; two-context file → `pcy context use prod` flips
+  `current-context`; `--context prod` flag overrides env; env
+  overrides file; `pcy whoami` against a context with a bad token
+  exits non-zero; atomic save (tempfile + rename) verified by
+  mid-write crash simulation.
+- **AC-49** → scope.md v8 AC-49 → `src/mcp/mod.rs` (`run_stdio` event
+  loop) + `src/mcp/protocol.rs` (`JsonRpcRequest`/`Response`/`Tool`/
+  `CallToolResult`) + `src/mcp/tools.rs` (`OpenApiToolRegistry`) +
+  `src/mcp/bridge.rs` (tool → HTTP) + `src/cli/nouns/mcp.rs` (`serve`
+  verb) + `src/lib.rs` (`pub mod mcp`) → `tests/mcp_smoke_test.rs` →
+  runtime proof: spawn `pcy mcp serve` subprocess with a running
+  compose; `initialize` returns `serverInfo`/`capabilities`;
+  `tools/list` diff against `ApiDoc::openapi()` operations is empty
+  (not hard-coded); `tools/call name="agent.create"` creates an agent
+  and the corresponding `agent_created` row lands in `events`; stdout
+  carries only JSON-RPC (no stray log bytes); framing error on stdin
+  is logged to stderr, not stdout.
+- **AC-50** → scope.md v8 AC-50 → `install.sh` at repo root +
+  `tests/installer_test.rs` (behind `#[cfg(feature = "installer-e2e")]`)
+  + `docs/runbooks/cli-install.md` → runtime proof: `bash -n
+  install.sh` clean; `shellcheck -S warning install.sh` clean;
+  local-fixture GitHub mirror drives end-to-end install; sha256
+  mismatch exits non-zero and leaves no binary installed; cosign
+  absent + `--require-cosign` exits non-zero; cosign absent + default
+  prints `warning:` and installs; cosign present with bad signature
+  exits non-zero.
+- **AC-51** → scope.md v8 AC-51 → `src/cli/nouns/completion.rs`
+  (clap_complete dispatch) + `Cargo.toml` (`clap_complete` dev-dep or
+  runtime dep per design) + README + `docs/runbooks/cli-install.md` →
+  `tests/cli_completion_test.rs` → runtime proof: `pcy completion
+  bash` exits 0 with non-empty stdout containing `_pcy`; zsh output
+  contains `#compdef`; fish contains `complete -c pcy`; powershell
+  contains `Register-ArgumentCompleter`.
+- **AC-52** → scope.md v8 AC-52 → `tests/api_naming_test.rs` (AC-52a,
+  walks `ApiDoc::openapi()`) + `tests/cli_naming_test.rs` (AC-52b,
+  walks clap `Command` tree) → runtime proof: every collection
+  segment plural; every primary-key param is `{id}` (allowlist
+  empty); every operation summary non-empty, ≤ 72 chars, no trailing
+  period; no `PUT` appears; no `format: "uuid-v7"` schemas; every
+  clap command has `about`; every data-printing leaf exposes
+  `--output`; `--format` only under the deprecated alias; `--yes`
+  absent outside deprecation.
+
+### Acceptance Criteria Coverage
+
+| AC    | Planned Test                           | Planned Runtime Verification                                                                                                            | Status  |
+| ----- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| AC-44 | `tests/openapi_spec_test.rs`           | `/openapi.json` returns 200 + parses as `openapiv3::OpenAPI`; path diff vs `api::router()` is empty; YAML variant parses; unauth + `/health` rate-limit bucket | Planned |
+| AC-45 | `tests/cli_login_idempotent_test.rs`   | Fresh compose + `pcy login` × 2 both exit 0 (no 409); `bootstrap` alias emits one warn; `--help` excludes `bootstrap`; stdout regex match | Planned |
+| AC-46 | `tests/cli_noun_verb_test.rs`          | Parameterized (legacy, new) pairs → byte-identical stdout; ambiguous-name exit 2 + stderr table; not-found exit 1; UUID path works       | Planned |
+| AC-47 | `tests/cli_output_flag_test.rs`        | json/yaml/name/jsonpath all parse; PTY fixture confirms TTY default table, pipe default json; NO_COLOR suppresses ANSI; `--format`/`--yes` warn | Planned |
+| AC-48 | `tests/cli_context_test.rs`            | v4 flat → v8 migration writes `.pre-v8` backup, idempotent; `use` switches `current-context`; flag > env > file precedence; atomic save  | Planned |
+| AC-49 | `tests/mcp_smoke_test.rs`              | `pcy mcp serve` subprocess: `initialize` + `tools/list` diff vs `ApiDoc` empty + `tools/call agent.create` → event lands server-side    | Planned |
+| AC-50 | `tests/installer_test.rs` (feature-gated) | `bash -n` + `shellcheck -S warning` clean; fixture-served install succeeds; sha256 mismatch + cosign-required both exit non-zero        | Planned |
+| AC-51 | `tests/cli_completion_test.rs`         | Four shells each exit 0 with non-empty stdout containing shell-specific marker (`_pcy`/`#compdef`/`complete -c pcy`/`Register-Argument…`) | Planned |
+| AC-52a| `tests/api_naming_test.rs`             | `ApiDoc::openapi()` walk: plural collection paths, `{id}` params, summaries ≤72 no-period, no PUT, no `format:"uuid-v7"`                 | Planned |
+| AC-52b| `tests/cli_naming_test.rs`             | clap `Command` walk: every command has `about`; every data leaf exposes `--output`; `--format`/`--yes` absent outside deprecated shim   | Planned |
+
+### Scope Reduction Risks
+
+Concrete places BUILD may be tempted to ship a shell/placeholder. Each
+is locked by a named assertion in the coverage table above.
+
+- **AC-44 — utoipa annotations skipped on "obvious" endpoints.** Tempting
+  to annotate only new routes. `openapi_spec_test.rs`'s path-diff
+  assertion fails closed if any route in `api::router()` is absent from
+  `ApiDoc::paths(...)`. Webhooks and bootstrap are in scope.
+- **AC-44 — `/openapi.json` returns a hand-maintained JSON file.** The
+  source of truth must be `ApiDoc::openapi()` serialized at request
+  time (or once at startup, cached). A checked-in JSON would drift.
+  Test asserts the served document equals `ApiDoc::openapi()` exactly
+  after canonicalization.
+- **AC-45 — `pcy login` 409s on re-run.** Tempting to just call
+  `/api/bootstrap` unconditionally. Scope locks: first call probes (or
+  handles `409` by falling through to `/api/login`). Re-run must exit
+  0, not "already bootstrapped" non-zero.
+- **AC-46 — name-or-UUID resolver only handles UUIDs.** Falling back
+  to "not found" for a valid name would silently break operator
+  muscle memory. Scope locks: non-UUID input triggers a LIST filtered
+  by exact name; ambiguity and zero-match have distinct exit codes
+  (2 vs 1). Substring match is **explicitly forbidden**.
+- **AC-46 — legacy shim commands become no-ops or error.** Shims must
+  delegate and warn once. The parameterized (legacy, new) byte-equal
+  test would fail if the shim printed nothing.
+- **AC-47 — `--output table` falls through to JSON.** Tempting to
+  defer `TableRow` impls ("we have JSON, ship it"). The PTY fixture
+  test asserts `table` output structure; absence of headers or a
+  JSON object on stdout fails it.
+- **AC-47 — `jsonpath` silently accepts unsupported expressions.**
+  Scope locks the kubectl subset; unsupported syntax must exit
+  non-zero with a specific error, not silently return `[]` or the
+  whole document.
+- **AC-48 — context migration deferred to a manual command.** Scope
+  locks **automatic** migration on first v8 load with backup written
+  to `config.toml.pre-v8`. A "`pcy context migrate`" subcommand is
+  not a substitute. Migration is idempotent.
+- **AC-49 — MCP `tools/list` returns a hard-coded list.** Scope locks
+  derivation from `ApiDoc::openapi()`. Smoke test diffs the tool-name
+  set against the operation set; any manual list drifts the moment
+  a new handler lands.
+- **AC-49 — `tools/call` proxies via a shell-out to `pcy` instead of
+  `ApiClient`.** Scope locks direct HTTP via `src/mcp/bridge.rs`.
+  Shelling out would reparse JSON, double-log, and lose typed errors.
+- **AC-50 — `install.sh` skips cosign verification silently when the
+  binary is absent.** Scope locks a visible `warning:` stderr line on
+  soft-fail and a hard exit under `--require-cosign`. A silent skip
+  would make the signing pipeline theater.
+- **AC-50 — sha256 mismatch warns and installs anyway.** Scope locks
+  non-zero exit with no binary installed on mismatch. Checksum is
+  mandatory; cosign is the optional second factor.
+- **AC-51 — completion scripts generated but never tested for
+  correctness.** Marker-string assertions per shell are the minimum;
+  empty stdout or generic stub fails the test.
+- **AC-52 — lint tests allowlist every existing violation at ship.**
+  Scope locks a clean run: the allowlists for `{id}` compound keys,
+  PUT methods, and `--format` usages are **empty** at v8 ship. Any
+  future exception requires a justification comment in the allowlist,
+  reviewed at REVIEW time.
+- **v1–v7 regression risk.** Annotating existing handlers and
+  restructuring the CLI tree both touch code the v1–v7 suite
+  exercises. BUILD must rerun the full test suite per slice; a slice
+  that passes its own new test but breaks an older test is not done.
+
+### Clarifications Needed
+
+None with BUILD impact. The four design-time resolutions below are
+bounded and do not change pass/fail for any AC:
+
+1. **AC-47 `jsonpath` is a kubectl-compatible subset**
+   (`.foo.bar`, `.items[*].name`, `.items[0]`, `[?(@.k==v)]`) via
+   `jsonpath-rust`. Full JQ is reachable via `-o json | jq`. Test
+   fixtures only assert the documented subset.
+2. **AC-49 MCP spec version is pinned to `2025-06-18`** for v8 ship.
+   Version constant + `initialize` response are the only change points
+   for a later revision bump.
+3. **AC-50 `install.sh` on Windows is supported via git-bash / WSL
+   only.** Native PowerShell installer is deferred (`winget` is the
+   right seam and lands with the deferred package-manager track).
+4. **AC-52 "no `PUT`" is a lint, not an architectural ban.** Allowlist
+   is empty at v8 ship; future exceptions are a one-line addition
+   with justification comment.
+
+### Build Order
+
+Slices are sized to ship as 1–3 commits each. Dependencies flow top to
+bottom; each slice's tests must pass before the next begins, and the
+full v1–v7 suite must remain green at every checkpoint.
+
+1. **Slice 1 — AC-44 OpenAPI foundation.** Add `utoipa` + `utoipa-axum`
+   to `Cargo.toml`. Create `src/api/openapi.rs` with `ApiDoc` +
+   `openapi_router()` + `openapi_json`/`openapi_yaml` handlers + the
+   `BearerAuthAddon` security modifier. Add `#[utoipa::path]` on every
+   handler in `src/api/{me,agents,credentials,events,messages,
+   webhooks,bootstrap}.rs` and `#[derive(ToSchema)]` on every DTO.
+   Mount `openapi_router()` on the unauth side in `src/api/mod.rs`.
+   Write `tests/openapi_spec_test.rs` (spec served, 3.1 parses, route
+   diff empty, Content-Type correct, rate-limit shared with `/health`).
+   **Unblocks AC-49 and AC-52a.**
+2. **Slice 2 — AC-46 CLI restructure + AC-48 contexts + AC-47 output
+   flag.** These three land together because they share the root
+   `Cli` struct surgery. Create `src/cli/nouns/` (mod.rs +
+   agent/credential/budget/event/context/auth/completion/mcp) by
+   moving the current command bodies, keeping thin shim variants in
+   `src/cli/commands/mod.rs` (`bootstrap_shim`, `message_shim`,
+   `events_shim`) that call `warn_deprecated` + delegate. Rewrite
+   `src/cli/config.rs` with v8 `ContextConfig`/`CliConfig` and
+   `src/cli/migrate.rs` auto-migration + atomic save. Add
+   `--context`/`--output` to the root `Cli`. Create `src/cli/output.rs`
+   (enum + `TableRow` trait + `render` + `default_for_tty`) and
+   per-noun `TableRow` impls. Create `src/cli/resolve.rs` with
+   `resolve_agent`/`resolve_credential`/`resolve_event` covering UUID,
+   exact-name, ambiguous, not-found. Write
+   `tests/cli_noun_verb_test.rs`, `tests/cli_context_test.rs`,
+   `tests/cli_output_flag_test.rs`. Keep `src/cli/output.rs` ≤ 250
+   lines; push overflow into noun modules.
+3. **Slice 3 — AC-45 idempotent login.** Implement `src/cli/nouns/
+   auth.rs::login` with the bootstrap-or-login decision tree (probe
+   `/api/me`, fall through to `/api/bootstrap` on 401 "not
+   bootstrapped", fall through to `/api/login` on 409 "already
+   bootstrapped"), persist token into active context. Wire
+   `bootstrap_shim` to delegate to `login` with one warning. Write
+   `tests/cli_login_idempotent_test.rs` (compose fresh + login × 2,
+   alias warning count, `--help` exclusion). **Depends on Slice 2
+   context storage.**
+4. **Slice 4 — AC-49 MCP server.** Create `src/mcp/mod.rs` (stdio event
+   loop, `run_stdio`), `src/mcp/protocol.rs` (JsonRpc types +
+   newline-delimited framing), `src/mcp/tools.rs` (`OpenApiToolRegistry`
+   reading `ApiDoc::openapi()`), `src/mcp/bridge.rs` (tool → HTTP via
+   `ApiClient`, error-code table). Wire `src/cli/nouns/mcp.rs::serve`.
+   Add `pub mod mcp` to `src/lib.rs`. Write `tests/mcp_smoke_test.rs`
+   (subprocess spawn, initialize, tools/list diff vs `ApiDoc`,
+   tools/call agent.create → server-side event lands). Keep
+   `src/mcp/mod.rs` ≤ 300 lines; beyond that split into `event_loop.rs`
+   + `dispatch.rs`. **Depends on Slice 1 (ApiDoc) and Slice 2 (active
+   context).**
+5. **Slice 5 — AC-50 installer + AC-51 completions.** Finalize
+   `install.sh` at repo root (platform detect, release resolve,
+   sha256 enforce, cosign verify with soft/hard fail modes, install
+   to `$PCY_PREFIX/bin`). Move the former `pcy demo` flow into
+   `scripts/demo.sh` and delete `pcy demo`. Implement
+   `src/cli/nouns/completion.rs` using `clap_complete`. Add the
+   `installer-e2e` feature to `Cargo.toml`. Write
+   `tests/installer_test.rs` (feature-gated) with `bash -n` +
+   shellcheck + fixture GitHub mirror + sha256 mismatch + cosign
+   required gate. Write `tests/cli_completion_test.rs` (four shells
+   × marker string). Update README + create
+   `docs/runbooks/cli-install.md` and `docs/runbooks/mcp-setup.md`.
+   **Independent of Slices 3–4; may overlap if capacity permits.**
+6. **Slice 6 — AC-52 lint guardrails.** Last because they audit
+   everything that came before. Write `tests/api_naming_test.rs`
+   (walks `ApiDoc::openapi()`) and `tests/cli_naming_test.rs` (walks
+   clap `Command` tree) with empty allowlists at v8 ship. Fix any
+   violations surfaced in Slices 1–5 (expected small: rename any
+   `{agentId}` → `{id}`, trim summaries > 72 chars, convert any
+   lingering `PUT` → `POST`/`PATCH`). Update the smoke script to
+   hit `/openapi.json`.
+
+**Post-Slice-6 gate**: `cargo test --all-targets --
+--test-threads=1` + `cargo clippy --all-targets -- -D warnings` +
+`cargo fmt --all -- --check` + `cargo deny check advisories` all
+pass; the full v1–v7 AC suite is still green; then REVIEW.
+
+### Complexity Exceptions
+
+Carried forward from `design.md` v8 addendum — four bounded
+exceptions, each with a hard ceiling and a predefined split plan.
+
+1. **`src/mcp/mod.rs` may exceed the 200-line soft target.** JSON-RPC
+   stdio event loops (framing + dispatch + error mapping + graceful
+   shutdown) are irreducible below that threshold. **Hard ceiling
+   300 lines**; beyond that split into `event_loop.rs` + `dispatch.rs`.
+2. **`src/cli/output.rs` hosts the enum + `render` + `TableRow` impls
+   for the common cases.** **Hard ceiling 250 lines**; beyond that
+   push per-resource `TableRow` impls into their noun modules.
+3. **Legacy-shim compatibility duplicates some test paths** (hidden
+   `bootstrap`/`message`/`events` commands, `--format`/`--yes` flag
+   aliases). Accepted for one release; removed in v1.2.0 along with
+   the duplicate tests.
+4. **`utoipa::path` annotations above every handler are verbose.**
+   Accepted — they are the source of truth for AC-44 (machine-readable
+   contract) and AC-52a (schema-layer lints).
+
+No other complexity exceptions beyond the v1–v7 exceptions already
+recorded. No new soft-ceiling extensions. No deferred file budgets.
