@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1](https://github.com/RCSnyder/open-pincery/compare/v1.0.0...v1.0.1) - 2026-04-21
+
+### Fixed
+
+- *(license)* dual-license under MIT OR Apache-2.0
+
+### Other
+
+- *(expand)* v6.1 pre-expand synthesis — external inputs + D1/D2
+- *(expand)* v6 pre-expand synthesis — canonical north star
+
 ## [1.0.0](https://github.com/RCSnyder/open-pincery/releases/tag/v1.0.0) - 2026-04-20
 
 ### Added
