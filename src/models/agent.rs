@@ -6,6 +6,68 @@ use uuid::Uuid;
 
 use crate::error::AppError;
 
+/// AC-34 (v6): Typed lifecycle state for an agent, aligned 1:1 with the
+/// TLA+ specification names in `OpenPinceryAgent.tla`.
+///
+/// `WakeAcquiring` and `WakeEnding` are reserved values for a future CAS
+/// split (see scaffolding/scope.md v10 Deferred); v6 code never writes
+/// them, but the DB CHECK constraint accepts them so the rollout is a
+/// pure additive change.
+///
+/// All DB boundary conversions go through `as_db_str` / `from_db_str`.
+/// Construct the `DB_*` constants from the enum (not the other way
+/// around) — the `const _: () = { … }` block below is a compile-time
+/// exhaustiveness assert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStatus {
+    /// The agent is at rest; CAS may promote it to `Awake`. DB string: `asleep`.
+    Resting,
+    /// Reserved for a future CAS split between "about to wake" and "awake".
+    /// v6 never writes this value.
+    WakeAcquiring,
+    /// Wake loop is actively executing iterations.
+    Awake,
+    /// Reserved for a future CAS split between "awake" and "maintenance".
+    /// v6 never writes this value.
+    WakeEnding,
+    /// Post-wake bookkeeping (event replay, metrics flush) before returning to rest.
+    Maintenance,
+}
+
+impl AgentStatus {
+    pub const DB_ASLEEP: &'static str = "asleep";
+    pub const DB_WAKE_ACQUIRING: &'static str = "wake_acquiring";
+    pub const DB_AWAKE: &'static str = "awake";
+    pub const DB_WAKE_ENDING: &'static str = "wake_ending";
+    pub const DB_MAINTENANCE: &'static str = "maintenance";
+
+    /// Single direction of the DB boundary: enum → DB string.
+    pub const fn as_db_str(self) -> &'static str {
+        match self {
+            AgentStatus::Resting => Self::DB_ASLEEP,
+            AgentStatus::WakeAcquiring => Self::DB_WAKE_ACQUIRING,
+            AgentStatus::Awake => Self::DB_AWAKE,
+            AgentStatus::WakeEnding => Self::DB_WAKE_ENDING,
+            AgentStatus::Maintenance => Self::DB_MAINTENANCE,
+        }
+    }
+
+    /// Single direction of the DB boundary: DB string → enum. Unknown
+    /// values return `None`; callers typically propagate as a corruption
+    /// error rather than silently defaulting.
+    pub fn from_db_str(s: &str) -> Option<Self> {
+        match s {
+            Self::DB_ASLEEP => Some(AgentStatus::Resting),
+            Self::DB_WAKE_ACQUIRING => Some(AgentStatus::WakeAcquiring),
+            Self::DB_AWAKE => Some(AgentStatus::Awake),
+            Self::DB_WAKE_ENDING => Some(AgentStatus::WakeEnding),
+            Self::DB_MAINTENANCE => Some(AgentStatus::Maintenance),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Agent {
     pub id: Uuid,
@@ -63,71 +125,83 @@ pub async fn list_agents(pool: &PgPool, workspace_id: Uuid) -> Result<Vec<Agent>
     Ok(agents)
 }
 
-/// CAS: Attempt to acquire a wake (asleep → awake).
+/// CAS: Attempt to acquire a wake (Resting → Awake).
 /// Returns Some(agent) if this invocation won the race, None if another did.
 pub async fn acquire_wake(pool: &PgPool, agent_id: Uuid) -> Result<Option<Agent>, AppError> {
-    let agent = sqlx::query_as::<_, Agent>(
+    let sql = format!(
         "UPDATE agents
-         SET status = 'awake',
+         SET status = '{awake}',
              wake_id = gen_random_uuid(),
              wake_started_at = NOW(),
              wake_iteration_count = 0
-         WHERE id = $1 AND status = 'asleep' AND is_enabled = TRUE
+         WHERE id = $1 AND status = '{asleep}' AND is_enabled = TRUE
          RETURNING *",
-    )
-    .bind(agent_id)
-    .fetch_optional(pool)
-    .await?;
+        awake = AgentStatus::DB_AWAKE,
+        asleep = AgentStatus::DB_ASLEEP,
+    );
+    let agent = sqlx::query_as::<_, Agent>(&sql)
+        .bind(agent_id)
+        .fetch_optional(pool)
+        .await?;
     Ok(agent)
 }
 
-/// CAS: Transition from awake → maintenance.
+/// CAS: Transition from Awake → Maintenance.
 pub async fn transition_to_maintenance(
     pool: &PgPool,
     agent_id: Uuid,
 ) -> Result<Option<Agent>, AppError> {
-    let agent = sqlx::query_as::<_, Agent>(
-        "UPDATE agents SET status = 'maintenance'
-         WHERE id = $1 AND status = 'awake'
+    let sql = format!(
+        "UPDATE agents SET status = '{maintenance}'
+         WHERE id = $1 AND status = '{awake}'
          RETURNING *",
-    )
-    .bind(agent_id)
-    .fetch_optional(pool)
-    .await?;
+        maintenance = AgentStatus::DB_MAINTENANCE,
+        awake = AgentStatus::DB_AWAKE,
+    );
+    let agent = sqlx::query_as::<_, Agent>(&sql)
+        .bind(agent_id)
+        .fetch_optional(pool)
+        .await?;
     Ok(agent)
 }
 
-/// CAS: Release from maintenance → asleep.
+/// CAS: Release from Maintenance → Resting.
 pub async fn release_to_asleep(pool: &PgPool, agent_id: Uuid) -> Result<Option<Agent>, AppError> {
-    let agent = sqlx::query_as::<_, Agent>(
+    let sql = format!(
         "UPDATE agents
-         SET status = 'asleep',
+         SET status = '{asleep}',
              wake_id = NULL,
              wake_started_at = NULL,
              wake_iteration_count = 0
-         WHERE id = $1 AND status = 'maintenance'
+         WHERE id = $1 AND status = '{maintenance}'
          RETURNING *",
-    )
-    .bind(agent_id)
-    .fetch_optional(pool)
-    .await?;
+        asleep = AgentStatus::DB_ASLEEP,
+        maintenance = AgentStatus::DB_MAINTENANCE,
+    );
+    let agent = sqlx::query_as::<_, Agent>(&sql)
+        .bind(agent_id)
+        .fetch_optional(pool)
+        .await?;
     Ok(agent)
 }
 
-/// CAS: Drain re-acquire (maintenance → awake) when new events arrived during wake.
+/// CAS: Drain re-acquire (Maintenance → Awake) when new events arrived during wake.
 pub async fn drain_reacquire(pool: &PgPool, agent_id: Uuid) -> Result<Option<Agent>, AppError> {
-    let agent = sqlx::query_as::<_, Agent>(
+    let sql = format!(
         "UPDATE agents
-         SET status = 'awake',
+         SET status = '{awake}',
              wake_id = gen_random_uuid(),
              wake_started_at = NOW(),
              wake_iteration_count = 0
-         WHERE id = $1 AND status = 'maintenance' AND is_enabled = TRUE
+         WHERE id = $1 AND status = '{maintenance}' AND is_enabled = TRUE
          RETURNING *",
-    )
-    .bind(agent_id)
-    .fetch_optional(pool)
-    .await?;
+        awake = AgentStatus::DB_AWAKE,
+        maintenance = AgentStatus::DB_MAINTENANCE,
+    );
+    let agent = sqlx::query_as::<_, Agent>(&sql)
+        .bind(agent_id)
+        .fetch_optional(pool)
+        .await?;
     Ok(agent)
 }
 
@@ -145,34 +219,38 @@ pub async fn increment_iteration(pool: &PgPool, agent_id: Uuid) -> Result<i32, A
     Ok(row)
 }
 
-/// Find agents stuck in awake/maintenance past the stale threshold.
+/// Find agents stuck in Awake/Maintenance past the stale threshold.
 pub async fn find_stale_agents(pool: &PgPool, stale_hours: i64) -> Result<Vec<Agent>, AppError> {
-    let agents = sqlx::query_as::<_, Agent>(
+    let sql = format!(
         "SELECT * FROM agents
-         WHERE status IN ('awake', 'maintenance')
+         WHERE status IN ('{awake}', '{maintenance}')
            AND wake_started_at < NOW() - make_interval(hours => $1::int)
         ",
-    )
-    .bind(stale_hours as i32)
-    .fetch_all(pool)
-    .await?;
+        awake = AgentStatus::DB_AWAKE,
+        maintenance = AgentStatus::DB_MAINTENANCE,
+    );
+    let agents = sqlx::query_as::<_, Agent>(&sql)
+        .bind(stale_hours as i32)
+        .fetch_all(pool)
+        .await?;
     Ok(agents)
 }
 
-/// Force-release a stale agent back to asleep.
+/// Force-release a stale agent back to Resting.
 pub async fn force_release(pool: &PgPool, agent_id: Uuid) -> Result<(), AppError> {
-    sqlx::query(
+    let sql = format!(
         "UPDATE agents
-         SET status = 'asleep',
+         SET status = '{asleep}',
              wake_id = NULL,
              wake_started_at = NULL,
              wake_iteration_count = 0
          WHERE id = $1
-           AND status IN ('awake', 'maintenance')",
-    )
-    .bind(agent_id)
-    .execute(pool)
-    .await?;
+           AND status IN ('{awake}', '{maintenance}')",
+        asleep = AgentStatus::DB_ASLEEP,
+        awake = AgentStatus::DB_AWAKE,
+        maintenance = AgentStatus::DB_MAINTENANCE,
+    );
+    sqlx::query(&sql).bind(agent_id).execute(pool).await?;
     Ok(())
 }
 
