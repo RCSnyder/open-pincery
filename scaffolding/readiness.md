@@ -78,8 +78,11 @@ Non-negotiable statements that must be true in the shipped v6 system:
 - **T-v6-16** `wake_loop::run_wake_loop` reads `current.permission_mode`
   on each loop iteration and passes `PermissionMode::from_db_str(&…)` plus
   `state.executor.clone()` into `tools::dispatch_tool`.
-- **T-v6-17** `deny.toml` `[advisories]` sets `vulnerability = "deny"`,
-  `yanked = "deny"`, and `ignore = []`. No `RUSTSEC-*` ignore remains.
+- **T-v6-17** `deny.toml` `[advisories]` sets `version = 2`,
+  `yanked = "deny"`, and `ignore = []`. Version 2 implicitly denies known
+  vulnerabilities (the legacy `vulnerability = "deny"` key was removed in
+  cargo-deny's v2 advisories schema), so these three settings together
+  establish the zero-advisory floor. No `RUSTSEC-*` ignore remains.
 - **T-v6-18** `cargo deny check advisories` exits 0 on v6 HEAD.
 - **T-v6-19** No v1–v5 AC regresses: CAS lifecycle, wake loop, maintenance,
   drain, event log, API surface, HMAC verification, rate limiting, budget

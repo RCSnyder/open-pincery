@@ -6,10 +6,13 @@ all-features = false
 no-default-features = false
 
 [advisories]
+# AC-37 (v6): zero-advisory floor. Version 2 of the advisories config
+# implicitly denies known vulnerabilities; we additionally refuse yanked
+# crates and keep the ignore list empty so any new RUSTSEC advisory fails
+# CI. Reinstating an ignore entry is a STOP-and-raise event, not a normal
+# maintenance step.
 version = 2
-yanked = "warn"
-# Allow listing specific advisories with justifications here as the project
-# ages. Empty list means "fail the build on any new advisory".
+yanked = "deny"
 ignore = []
 
 [bans]
