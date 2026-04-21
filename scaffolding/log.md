@@ -755,3 +755,18 @@
 - **Changes**: `DELIVERY.md`.
 - **Retries**: 0
 - **Next**: STOP — v6 lights-out SWE loop complete. Awaiting PR/merge decision and next-feature selection.
+
+## v7 EXPAND — 2026-04-20T10:00Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**:
+  - `scaffolding/scope.md` appended with `## v7 — Credential Vault & Reasoner-Secret Refusal`.
+  - Six new ACs (AC-38..AC-43), each with a concrete pass/fail test named and a measurable threshold (cipher length checks, name regex bounds, value size bounds, round-trip iteration count, entropy heuristic thresholds, event-count assertions).
+  - Deployment target `self_host_individual` (unchanged); Stack additions listed (`aes-gcm`, `rpassword`); Estimated Cost `$0`; Quality Tier skyscraper; Clarifications Needed (explicitly `None` with two documented resolved choices); Deferred (7 items with dependency rationale); Dependencies on Prior Versions (explicit non-regression statement against AC-3, AC-28, AC-29, AC-35, AC-36).
+  - Sourced requirements cited inline: `docs/input/north-star-2026-04.md` §Bet #3 and `docs/input/security-architecture.md` §Layer 2 (quoted). Scope distinguishes sourced requirements from assumptions (e.g. the entropy heuristic is declared as v7's deliberate choice, not a sourced spec).
+  - Smallest-Useful-Version property preserved via explicit v7 scope note: "vault storage + handshake surface only" — no proxy, no substitution; v8/v9 carry the cryptographic-isolation half.
+  - All post-expand gate conditions satisfied: scope.md exists ✓; ACs ≥ 1 ✓; every AC has a stable ID ✓; ≥1 quantitative threshold (multiple) ✓; Deployment Target present ✓; Stack present ✓; Estimated Cost present ✓; Quality Tier present ✓; Clarifications Needed + Deferred present ✓; Smallest Useful Version genuinely small (6 ACs, no proxy/net work) ✓; coherent experience (operator can store, list, revoke; agent can discover names; reasoner refuses leaks; dispatch handshake reserved) ✓; input docs reflected with sourced/assumption separation ✓.
+  - Preferences confirmed: Using Rust + PostgreSQL + axum → `self_host_individual` (per `preferences.md`). No conflict with user request.
+- **Changes**: `scaffolding/scope.md` (appended v7 section).
+- **Retries**: 0
+- **Next**: DESIGN.

@@ -411,3 +411,99 @@ North-star-driven roadmap in rough dependency order. Each version intentionally 
 ### v6 Dependencies on Prior Versions
 
 None broken. All v1–v5 ACs remain satisfied. AC-34 adds two unused enum values to the status CHECK constraint; no existing row is affected. AC-35 and AC-36 are strictly more restrictive than v5 behavior, but the default permission mode remains `yolo`, so unsandboxed v5 behavior is the default shape — operators opt into `supervised` or `locked` per agent.
+
+---
+
+## v7 — Credential Vault & Reasoner-Secret Refusal
+
+### Problem (v7)
+
+v6 closed the substrate's execution baseline (typed `AgentStatus`, capability gate, hardened `ProcessExecutor`, zero-advisory `deny.toml`), but the north star's most load-bearing security invariant is still unenforced:
+
+> _"Credentials themselves flow through a two-layer mechanism … the operator provisions secrets out-of-band through a dedicated credential vault (encrypted at rest, AES-256-GCM); the operator never pastes a secret into a chat surface … the reasoner is system-prompted to refuse any attempt to receive a secret through conversation and to redirect the operator to the vault."_
+>
+> — `docs/input/north-star-2026-04.md` §Bet #3; `docs/input/security-architecture.md` §Layer 2
+
+Concretely, the shipped v6 runtime has **no vault at all**:
+
+1. There is no `credentials` table, no encryption-at-rest path, and no place for an operator to store an external API key, OAuth token, or database password tied to a workspace.
+2. Agents have no `list_credentials` tool, so even the "names-only discoverability" half of Bet #3 is absent. The only way for an agent to use an external service today is for the operator to hand-paste the secret into a message or charter — exactly the anti-pattern the north star forbids.
+3. The system prompt (`migrations/20260418000009_create_prompt_templates.sql` default) contains no instruction to refuse pasted secrets. A well-meaning operator will leak a key on their first non-trivial task.
+4. Tool dispatch has no concept of a `PLACEHOLDER:<name>` envelope, so when v8 ships the real Zerobox executor and v9 ships the proxy, there is no existing API seam for the proxy to hook into — the substitution will look like an architectural afterthought instead of a pre-reserved extension point.
+
+v7 is **vault storage + handshake surface only** — no proxy, no network interception, no secret ever leaving the substrate process. The real cryptographic isolation (secret only exists inside the Zerobox proxy) is v9's responsibility. v7's job is:
+
+- Ship an encrypted vault an operator can trust with real credentials today.
+- Ship the `list_credentials` tool so agents can discover what they have.
+- Ship the `PLACEHOLDER:<name>` envelope so v8/v9 can drop in without an API change.
+- Ship the reasoner-refusal behavior so operators are mechanically redirected to the vault before they leak a secret.
+
+Each AC is a small, independently-shippable slice. No schema changes outside the new `credentials` table and one additive prompt-template version.
+
+### Changes from v6
+
+- New migration `20260420000002_create_credentials.sql` — `credentials(id uuid pk, workspace_id uuid fk, name text, ciphertext bytea, nonce bytea, aad bytea, created_by uuid fk users, created_at timestamptz, revoked_at timestamptz null, unique(workspace_id, name) where revoked_at is null)`.
+- New module `src/runtime/vault.rs` — AES-256-GCM sealed-box API over a workspace-scoped master key loaded from `OPEN_PINCERY_VAULT_KEY` (base64-encoded 32-byte random). Uses the `aes-gcm` crate (orthodox RustCrypto AEAD). Per-credential 96-bit nonce from `OsRng`. AAD binds ciphertext to `workspace_id || name`.
+- New operator-only API endpoints in `src/api/credentials.rs`: `POST /api/workspaces/:id/credentials` (create), `GET /api/workspaces/:id/credentials` (list, names only), `DELETE /api/workspaces/:id/credentials/:name` (revoke). All require `workspace_admin` or `local_admin`; bearer session token from v2 auth.
+- New CLI surface in `src/cli/commands/credential.rs`: `pcy credential add <name> [--value -]`, `pcy credential list`, `pcy credential revoke <name>`. `add` reads the secret from stdin or a TTY prompt — **never** from argv (prevents shell history / ps leakage).
+- New tool `list_credentials` in `src/runtime/tools.rs`. Registered in `src/runtime/capability.rs` as `ToolCapability::ReadLocal`. Returns `Vec<String>` of non-revoked credential names scoped to the agent's workspace. Never returns values.
+- New envelope type `CredentialRef(String)` in `src/runtime/vault.rs`. When `dispatch_tool` receives a shell invocation whose `env` map includes an entry like `{"AWS_ACCESS_KEY_ID": "PLACEHOLDER:aws_prod"}`, the runtime resolves `aws_prod` against the workspace vault, confirms it exists and is unrevoked, and passes the **unchanged placeholder string** to `ProcessExecutor` (v7 does not yet perform substitution — v9 will replace this step with real proxy-side injection). A missing/revoked credential aborts dispatch with a `credential_unresolved` event and returns `ToolResult::Error` to the LLM.
+- System prompt hardening: a new prompt-template row (`name = "default_agent"`, version bumped) adds a non-negotiable "Credential Handling" section instructing the reasoner to refuse any inbound message that appears to contain pasted secret material, emit a `message` tool call redirecting the operator to `pcy credential add`, and never echo credential values back in tool output or chat. v1 AC-3 prompt-assembly order is preserved.
+- No changes to CAS lifecycle, wake loop, maintenance pipeline, capability gate semantics (beyond adding `list_credentials` to the required-capability table), or v5 operator onramp.
+
+### v7 Acceptance Criteria
+
+- **AC-38** (Encrypted vault storage): Migration `20260420000002_create_credentials.sql` creates the `credentials` table as described above with `CHECK (length(ciphertext) >= 16)` and `CHECK (length(nonce) = 12)`. `src/runtime/vault.rs` exports `Vault::seal(workspace_id, name, plaintext) -> SealedCredential` and `Vault::open(workspace_id, name, sealed) -> Result<Vec<u8>, VaultError>`. Master key is loaded once at startup from `OPEN_PINCERY_VAULT_KEY` (base64, 32 bytes decoded); missing/malformed key fails the process with an actionable error before any HTTP listener binds. Nonce is freshly sampled from `OsRng` for every seal; AAD is `format!("{workspace_id}:{name}").as_bytes()`. Verified by `tests/vault_roundtrip_test.rs`: seal + open round-trips a 32-byte secret across 100 iterations with distinct nonces; tampering with `ciphertext`, `nonce`, `aad`, or the `(workspace_id, name)` pair on `open` returns `VaultError::Authentication`; a sealed secret is unreadable with a different master key (assert `VaultError::Authentication`, not panic).
+
+- **AC-39** (Operator-only vault API): `src/api/credentials.rs` exposes `POST /api/workspaces/:id/credentials` (body `{ "name": "...", "value": "..." }` — name matches regex `^[a-z0-9_]{1,64}$`; value length 1–8192 bytes), `GET /api/workspaces/:id/credentials` (returns `[{ "name": "...", "created_at": "...", "created_by": "..." }]` — **no `value` field, no ciphertext, no nonce**), and `DELETE /api/workspaces/:id/credentials/:name` (soft-revokes by setting `revoked_at`). All three require a session whose user holds `workspace_admin` on the target workspace or is a `local_admin`; any other role returns 403 and appends an `auth_forbidden` event. Writes append a `credential_added` or `credential_revoked` event to the workspace's audit stream including `created_by`/`revoked_by` and the credential name (never the value). Verified by `tests/vault_api_test.rs`: admin can create/list/revoke; non-admin workspace member gets 403 on all three; `GET` response JSON is scanned and asserted to contain zero occurrences of the secret value bytes and zero bytea-shaped fields; duplicate-name create on a non-revoked credential returns 409; `DELETE` then `POST` with the same name succeeds (re-add after revoke).
+
+- **AC-40** (Operator CLI ergonomics): `pcy credential add <name>` reads the secret value from stdin (pipe-safe) or from an interactive TTY prompt that **disables echo** (via `rpassword` or equivalent orthodox crate); never from argv. `pcy credential list` prints a two-column `NAME  CREATED_AT` table of non-revoked credentials for the current workspace. `pcy credential revoke <name>` prompts for confirmation unless `--yes` is passed and prints the revocation timestamp on success. All three commands authenticate using the v4 `pcy login`-stored session token and operate on the workspace selected by `pcy` config — no credential value ever appears in shell history, argv, environment variables, or CLI log output. Verified by `tests/cli_credential_test.rs`: (a) asserts `pcy credential add` rejects being given the value on argv with a clear error message; (b) exercises a stdin-piped add + list + revoke round-trip against a live test server and grep-asserts the raw secret bytes never appear in captured stdout/stderr of any command; (c) asserts the `rpassword` code path is reachable (integration-test via a PTY fixture or a mockable trait) and fails closed if a TTY is required but unavailable.
+
+- **AC-41** (`list_credentials` tool returns names only): A new tool `list_credentials` is registered in `src/runtime/tools.rs`. Its capability is `ToolCapability::ReadLocal` (per v6 AC-35 table) so `Locked`, `Supervised`, and `Yolo` agents all have access. Given no arguments, it queries credentials for the agent's workspace, filters `revoked_at IS NULL`, and returns a JSON array of `{ "name": "...", "created_at": "..." }` — **no `value`, no ciphertext, no nonce**. The tool records a `tool_call` event and the response as a `tool_result` event like every other tool. Verified by `tests/list_credentials_tool_test.rs`: a `Locked` agent whose workspace has 3 credentials (one revoked) receives a message that prompts the LLM (wiremock) to call `list_credentials`; the resulting `tool_result` event payload is asserted to contain exactly the two non-revoked names and zero occurrences of any known credential value bytes; a cross-workspace agent is asserted to see an empty list (workspace isolation).
+
+- **AC-42** (Reasoner refuses pasted secrets): A new prompt template row (`name = "default_agent"`, `version = N+1`, `is_active = true`) includes a "Credential Handling" section instructing the reasoner: (a) treat any inbound message containing a value longer than 24 characters and matching a sensitive-material heuristic (contiguous `[A-Za-z0-9_\-+/=]{24,}` with at least one digit and one non-alpha) as a potential pasted secret; (b) refuse to echo, store, summarize, or act on it; (c) emit a user-facing `message` redirecting to `pcy credential add <name>` and referencing `/api/workspaces/:id/credentials`; (d) never include credential values in `identity` or `work_list` maintenance output. The previous template row stays in the table (immutable per v1) but `is_active = false`. Verified by `tests/reasoner_secret_refusal_test.rs`: an agent is sent a message containing a fake high-entropy token; the LLM response (via wiremock fixture built from the assembled prompt) is asserted to contain the phrase `pcy credential add` and to not echo the token back; the v1 AC-3 prompt-assembly ordering test continues to pass against the new active template; the maintenance cycle fixture asserts the updated `identity` and `work_list` projections contain zero occurrences of the token.
+
+- **AC-43** (`PLACEHOLDER:<name>` dispatch handshake): When `dispatch_tool` executes a `shell` tool call whose `env` map contains any entry whose value starts with the literal prefix `PLACEHOLDER:`, the runtime (i) extracts the credential name suffix, (ii) looks up the `(workspace_id, name)` in `credentials` with `revoked_at IS NULL`, (iii) on hit, leaves the env value **unchanged** as `PLACEHOLDER:<name>` and proceeds to `ProcessExecutor::run` (real substitution is v9's responsibility), (iv) on miss or revoked, aborts dispatch before spawning, appends a `credential_unresolved` event `{ tool_name, credential_name, reason: "missing"|"revoked" }`, and returns `ToolResult::Error("credential not found: <name>")` to the LLM. Non-placeholder env values flow through unchanged. Verified by `tests/placeholder_envelope_test.rs`: (a) a `Yolo` agent whose workspace has `stripe_test` but not `stripe_prod` invokes shell with `env = { "STRIPE_KEY": "PLACEHOLDER:stripe_prod" }` and receives `ToolResult::Error`; the event log contains exactly one `credential_unresolved` event with `reason = "missing"` and zero processes spawned (via the counting `ToolExecutor` from v6); (b) the same agent with `PLACEHOLDER:stripe_test` proceeds to spawn and the child's environment contains the literal string `PLACEHOLDER:stripe_test` (proving v7 does not yet substitute — the seam is reserved for v9); (c) a revoked `stripe_test` yields `reason = "revoked"`.
+
+### v7 Stack Additions
+
+| Concern             | Addition                    | Notes                                                                                      |
+| ------------------- | --------------------------- | ------------------------------------------------------------------------------------------ |
+| AEAD                | `aes-gcm` (RustCrypto)      | Orthodox pure-Rust AEAD; audited; active maintenance                                       |
+| RNG                 | `rand` + `getrandom/OsRng`  | Already transitively present; made explicit for nonce generation                           |
+| TTY echo suppression| `rpassword`                 | Standard Rust crate for password prompts; MIT-licensed; no transitive security advisories as of the v6 `cargo deny` floor |
+
+No new runtime services. No network dependencies. Everything runs in the existing single binary against the existing PostgreSQL instance.
+
+### v7 Deployment Target
+
+Same as v1–v6: `self_host_individual`. One new required environment variable — `OPEN_PINCERY_VAULT_KEY` (base64 32 random bytes). Compose and `.env.example` gain a generator comment (`openssl rand -base64 32`). The v5 `.env.example` consistency test (AC-29) automatically covers the new variable via its allowlist-of-reads check.
+
+### v7 Estimated Cost
+
+$0. One new migration, one new crate dependency (`aes-gcm`, already transitively available on most Rust toolchains), one new CLI command group, one new API router. No new infra, no new services, no new ports.
+
+### v7 Quality Tier
+
+Still skyscraper. v7 begins honoring the north star's load-bearing security invariant; skipping it would make Bets #3, #9, #11a unverifiable.
+
+### v7 Clarifications Needed
+
+None with pass/fail impact. Two resolved-here choices worth calling out:
+
+- **Master key rotation** is intentionally out of scope for v7. Re-keying every sealed credential requires either online re-encryption or a key-version column; both are non-trivial and would dominate v7. A tracked Deferred item captures this.
+- **Per-credential ACLs (which agent in a workspace can see which name)** are deferred to the mission primitive (v10), whose `capability_scope` is the correct place to scope credential access below the workspace boundary.
+
+### v7 Deferred
+
+- **Real proxy-side secret substitution.** The Zerobox egress proxy replaces `PLACEHOLDER:<name>` with real values for pre-approved hosts. Requires v8 Zerobox executor and v9 proxy — tracked in v6's roadmap.
+- **Master-key rotation (`pcy vault rotate`).** Re-key every sealed row without downtime; adds `key_version` column. Land when the operator community asks; the crypto is orthodox so this is bounded work.
+- **Per-mission credential ACLs.** Currently a credential is visible to every agent in the workspace. v10 mission primitive's `capability_scope` narrows this to per-mission.
+- **Bitwarden / external-vault adapters.** Pull credential material on demand from an external password manager; never store locally. v11+.
+- **Credential usage audit view.** A `credential_audit` table or a materialized view over `events` that shows "which agent used which credential in which wake." Useful but not required for v7's invariant — v2 `tool_audit` already captures tool calls.
+- **Prompt-injection detector upgrade.** The regex-based heuristic in AC-42 is deliberately simple. A real classifier (north-star Bet #11b) is a research task beyond v7's scope.
+- **Vault-backed LLM API key.** Move `LLM_API_KEY` itself out of `docker-compose.yml` environment and into the vault. Natural pairing with v9's proxy work; noted but not sized yet.
+
+### v7 Dependencies on Prior Versions
+
+None broken. v1 AC-3 prompt assembly still passes against the new active template (v1 invariant preserved by one-active-per-name constraint). v5 AC-28 / AC-29 compose and `.env.example` tests automatically extend to `OPEN_PINCERY_VAULT_KEY`. v6 AC-35 capability gate is extended with one new entry (`list_credentials → ReadLocal`) — the table-driven test from AC-35 gains a row, otherwise untouched. v6 AC-36 `ProcessExecutor` is unchanged; v7 only adds a pre-spawn credential-resolution step inside `dispatch_tool` before `ProcessExecutor::run` is called. No existing DB row is touched by the new migration.
