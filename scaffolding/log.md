@@ -786,3 +786,64 @@
 - **Changes**: scaffolding/readiness.md (rewritten — v6 record preserved in git history at commit e7c9144).
 - **Retries**: 0
 - **Next**: BUILD.
+
+## v7 BUILD — 2026-04-20T11:00Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: Six vertical slices shipped, each with a failing-first test that turned green.
+  - Slice 1 `e5df233` — AC-38: `src/runtime/vault.rs` (AES-256-GCM + AAD `{workspace_id}:{name}` + 32-byte key validation + uniform auth-fail). `tests/vault_test.rs` 6/6 pass.
+  - Slice 2 `7a0b146` — AC-39: POST/GET/DELETE `/api/workspaces/:id/credentials`, `src/models/credential.rs`, credentials migration, workspace-admin role gate. `tests/credentials_api_test.rs` pass.
+  - Slice 3 `8fd7475` — AC-40: `pcy credential add|list|revoke` CLI, `src/api/me.rs`, `CliConfig.workspace_id` cache, rpassword-only secret prompt. `tests/cli_credential_test.rs` 3/3 pass.
+  - Slice 4 `b2c323c` — AC-41: `list_credentials` tool registered as `ToolCapability::ReadLocal`; `workspace_id: Uuid` added to `dispatch_tool`. `tests/list_credentials_tool_test.rs` 2/2; capability_gate_test 9/9.
+  - Slice 5 `34add0c` — AC-42: `migrations/20260420000003_prompt_template_credentials.sql` deactivates v1 and inserts v2 REFUSE template; 5 required substrings verified by `tests/prompt_v2_credential_test.rs` 3/3 pass.
+  - Slice 6 `7a89cbb` — AC-43: `Arc<Vault>` threaded main → listener → handle_wake → wake_loop → dispatch_tool; `ShellCommand.env` + `ShellArgs.env`; `PLACEHOLDER:<name>` resolved via `credential::find_active` + `vault.open`; `credential_unresolved` event on miss/revoke/auth-fail/non-utf8/lookup-error; closed-fail before spawn. `tests/placeholder_dispatch_test.rs` 4/4 pass.
+  - Clippy fix `d954333` — `#[allow(clippy::too_many_arguments)]` on dispatch_tool; `flatten()` in leak-scan loop.
+- **Gate conditions**: compiles ✓; every AC has a test ✓; tests pass ✓; no secrets in source ✓; no placeholder behaviour ✓; no AC silently reduced ✓; `cargo audit` clean; `Cargo.lock` present.
+- **Retries**: 0
+- **Next**: REVIEW.
+
+## v7 REVIEW — 2026-04-20T11:20Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: Self-review against readiness.md truths T-v7-1..T-v7-22 and the 14 scope-reduction risks.
+  - Correctness: AAD is `{workspace_id}:{name}` in both seal and open paths; auth failures collapse to a single variant; `find_active` returns None for revoked; PLACEHOLDER resolution closed-fail before exec; caller env applied AFTER allowlist so a resolved credential supplied by the agent at dispatch time wins (acceptable — the agent explicitly named the secret).
+  - Security: plaintext lives only in the `resolved` HashMap inside `dispatch_tool` and on `ShellCommand.env`; no log site prints a credential value; `credential_unresolved` payload is `{name,reason}` only; leak-canary test scans every event row for the agent.
+  - Architecture: `vault.rs` is the only module that touches master-key bytes or plaintext; `credential::Credential` is deliberately NOT `Serialize` (only `CredentialSummary` is); sandbox stays oblivious to vault.
+  - Traceability: each AC-38..AC-43 has a test file and a closed BUILD commit.
+  - No Critical or Required findings.
+- **Retries**: 0
+- **Next**: RECONCILE.
+
+## v7 RECONCILE — 2026-04-20T11:30Z
+
+- **Gate**: N/A (informational)
+- **Evidence**: Directory structure matches the design addendum (`src/runtime/vault.rs`, `src/models/credential.rs`, `src/api/credentials.rs`, `src/api/me.rs`, `src/cli/commands/credential.rs`, the v7 migrations). Interfaces match (`Vault::{from_base64,seal,open}`, `credential::{create,list_active,find_active,revoke,validate_name,validate_value_bytes}`, `ShellArgs.env`, `ShellCommand.env`, `dispatch_tool(.., vault: &Arc<Vault>)`, `PLACEHOLDER_PREFIX`). External integrations: still `None`. Stack additions (`aes-gcm`, `rpassword`, `walkdir` dev) present in `Cargo.toml`.
+- **Changes**: None required beyond log + DELIVERY updates.
+- **Retries**: 0
+- **Next**: VERIFY.
+
+## v7 VERIFY — 2026-04-20T11:35Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**:
+  - `cargo build --all-targets` — clean.
+  - `cargo fmt --check` — clean.
+  - `cargo clippy --all-targets -- -D warnings` — clean.
+  - Critical v7 suites: `placeholder_dispatch_test` 4/4, `prompt_v2_credential_test` 3/3, `wake_loop_test` 2/2, `capability_gate_test` 9/9, `list_credentials_tool_test` 2/2, `sandbox_test` 6/6, `budget_test` 1/1. All green.
+  - Windows host disk pressure (~1 GB free after cleaning `target/flycheck0`, `target/tmp`, `target/package`, `target/release`) prevented a single monolithic `cargo test` link step (LNK1180/LNK1318 = disk, not code); sharded per-binary with the same result.
+  - Every AC-38..AC-43 verified with a passing test + a closed BUILD commit. AC-43 additionally proven at runtime via `RecordingExecutor` — the decrypted value reaches `ShellCommand.env` and NEVER reaches any `events` row for the agent.
+- **Retries**: 0
+- **Next**: DEPLOY.
+
+## v7 DEPLOY — 2026-04-20T11:45Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**:
+  - [x] Deployed to `self_host_individual` — branch `v6-01_implementation` pushed to `origin` (v7 ships on this branch; rename/merge to main is operator decision).
+  - [x] Accessible — repo reachable; PR/merge is the mandatory human pause.
+  - [x] README.md unchanged (v7 operator steps are a DELIVERY addendum; Quick Start still works once `OPEN_PINCERY_VAULT_KEY` is set).
+  - [x] DELIVERY.md updated — title bumped to v7, new "v7 Changes" section (AC-38..AC-43 + Operator Impact), Known Limitations refreshed with vault-rotation + reasoner-cooperative caveats, footprint bumped to 19 migrations, stack additions (`aes-gcm`, `rpassword`, `walkdir`) noted.
+  - [x] Stateful: all v7 migrations are additive; v6 agent/event/prompt rows remain valid.
+- **Changes**: `DELIVERY.md`, `scaffolding/log.md`.
+- **Retries**: 0
+- **Next**: STOP — v7 lights-out SWE loop complete. Awaiting PR/merge decision and next-feature selection.
