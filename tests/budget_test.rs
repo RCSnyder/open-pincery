@@ -86,12 +86,16 @@ async fn test_budget_exceeded_blocks_wake_and_llm_call() {
 
     let executor: Arc<dyn open_pincery::runtime::sandbox::ToolExecutor> =
         Arc::new(open_pincery::runtime::sandbox::ProcessExecutor);
+    let vault = Arc::new(
+        open_pincery::runtime::vault::Vault::from_base64(common::TEST_VAULT_KEY_B64).unwrap(),
+    );
 
     let listener_task = tokio::spawn(open_pincery::background::listener::start_listener(
         pool.clone(),
         config,
         llm,
         executor,
+        vault,
         shutdown.clone(),
         alive.clone(),
     ));

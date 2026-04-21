@@ -10,6 +10,7 @@ use crate::config::Config;
 use crate::error::AppError;
 use crate::models::{agent, event};
 use crate::runtime::sandbox::ToolExecutor;
+use crate::runtime::vault::Vault;
 use crate::runtime::{drain, llm::LlmClient, maintenance, wake_loop};
 
 /// Spawn the LISTEN/NOTIFY handler that triggers wakes.
@@ -22,6 +23,7 @@ pub async fn start_listener(
     config: Arc<Config>,
     llm: Arc<LlmClient>,
     executor: Arc<dyn ToolExecutor>,
+    vault: Arc<Vault>,
     shutdown: CancellationToken,
     alive: Arc<AtomicBool>,
 ) {
@@ -77,9 +79,10 @@ pub async fn start_listener(
                         let config = config.clone();
                         let llm = llm.clone();
                         let executor = executor.clone();
+                        let vault = vault.clone();
 
                         tokio::spawn(async move {
-                            if let Err(e) = handle_wake(pool, config, llm, executor, agent_id).await {
+                            if let Err(e) = handle_wake(pool, config, llm, executor, vault, agent_id).await {
                                 error!(agent_id = %agent_id, error = %e, "Wake handler failed");
                             }
                         });
@@ -99,6 +102,7 @@ async fn handle_wake(
     config: Arc<Config>,
     llm: Arc<LlmClient>,
     executor: Arc<dyn ToolExecutor>,
+    vault: Arc<Vault>,
     agent_id: uuid::Uuid,
 ) -> Result<(), AppError> {
     // AC-23: Enforce hard budget caps before CAS wake acquisition.
@@ -153,7 +157,8 @@ async fn handle_wake(
 
     // Run wake loop
     let _reason =
-        wake_loop::run_wake_loop(&pool, &llm, &config, agent_id, wake_id, &executor).await?;
+        wake_loop::run_wake_loop(&pool, &llm, &config, agent_id, wake_id, &executor, &vault)
+            .await?;
 
     // Transition to maintenance
     agent::transition_to_maintenance(&pool, agent_id).await?;
@@ -171,9 +176,16 @@ async fn handle_wake(
         if let (Some(new_wake_id), Some(_new_wake_started)) =
             (new_agent.wake_id, new_agent.wake_started_at)
         {
-            let _reason =
-                wake_loop::run_wake_loop(&pool, &llm, &config, agent_id, new_wake_id, &executor)
-                    .await?;
+            let _reason = wake_loop::run_wake_loop(
+                &pool,
+                &llm,
+                &config,
+                agent_id,
+                new_wake_id,
+                &executor,
+                &vault,
+            )
+            .await?;
             agent::transition_to_maintenance(&pool, agent_id).await?;
             maintenance::run_maintenance(&pool, &llm, agent_id, new_wake_id).await?;
             // Final release — no further drain for simplicity in v1

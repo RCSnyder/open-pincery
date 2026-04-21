@@ -28,6 +28,7 @@ async fn env_is_scrubbed_to_allowlist() {
         .run(
             &ShellCommand {
                 command: "printenv | sort".into(),
+                ..Default::default()
             },
             &SandboxProfile::default(),
         )
@@ -60,6 +61,7 @@ async fn timeout_returns_timeout_not_hang() {
         .run(
             &ShellCommand {
                 command: "sleep 30".into(),
+                ..Default::default()
             },
             &profile,
         )
@@ -88,6 +90,7 @@ async fn sudo_is_rejected_pre_spawn() {
             &ShellCommand {
                 // If the reject check is bypassed, this would create the probe file.
                 command: format!("sudo touch {}", probe.display()),
+                ..Default::default()
             },
             &SandboxProfile::default(),
         )
@@ -111,6 +114,7 @@ async fn bare_sudo_is_rejected() {
         .run(
             &ShellCommand {
                 command: "sudo".into(),
+                ..Default::default()
             },
             &SandboxProfile::default(),
         )
@@ -135,6 +139,7 @@ async fn sudo_in_chained_command_is_rejected() {
         .run(
             &ShellCommand {
                 command: format!("echo ok && sudo touch {}", probe.display()),
+                ..Default::default()
             },
             &SandboxProfile::default(),
         )
@@ -158,6 +163,7 @@ async fn ok_command_reports_exit_and_stdout() {
         .run(
             &ShellCommand {
                 command: "echo hello-from-sandbox".into(),
+                ..Default::default()
             },
             &SandboxProfile::default(),
         )

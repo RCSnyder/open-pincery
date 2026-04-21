@@ -104,6 +104,7 @@ async fn ac41_list_credentials_returns_names_only_and_scoped_to_workspace() {
         },
     };
     let executor: Arc<dyn ToolExecutor> = Arc::new(ProcessExecutor);
+    let vault_arc = Arc::new(vault);
     let result = tools::dispatch_tool(
         &tc,
         PermissionMode::Locked, // ReadLocal must work even in Locked
@@ -112,6 +113,7 @@ async fn ac41_list_credentials_returns_names_only_and_scoped_to_workspace() {
         ws_a.id,
         Uuid::new_v4(), // wake_id — not actually used by this tool
         &executor,
+        &vault_arc,
     )
     .await;
 

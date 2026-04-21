@@ -9,6 +9,7 @@ use super::llm::{ChatMessage, LlmClient};
 use super::prompt;
 use super::sandbox::ToolExecutor;
 use super::tools::{self, ToolResult};
+use super::vault::Vault;
 use crate::config::Config;
 use crate::error::AppError;
 use crate::models::{agent, event, llm_call};
@@ -45,6 +46,7 @@ pub async fn run_wake_loop(
     agent_id: Uuid,
     wake_id: Uuid,
     executor: &Arc<dyn ToolExecutor>,
+    vault: &Arc<Vault>,
 ) -> Result<String, AppError> {
     info!(agent_id = %agent_id, wake_id = %wake_id, "Starting wake loop");
     metrics::counter!(m::WAKE_STARTED).increment(1);
@@ -189,6 +191,7 @@ pub async fn run_wake_loop(
                     current.workspace_id,
                     wake_id,
                     executor,
+                    vault,
                 )
                 .await;
 

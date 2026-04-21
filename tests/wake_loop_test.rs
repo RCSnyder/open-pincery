@@ -5,6 +5,7 @@ use open_pincery::models::{agent, event, user, workspace};
 use open_pincery::runtime::{
     llm::{LlmClient, Pricing},
     sandbox::{ProcessExecutor, ToolExecutor},
+    vault::Vault,
     wake_loop,
 };
 use rust_decimal::Decimal;
@@ -117,7 +118,8 @@ async fn test_wake_loop_sleep_termination() {
     );
 
     let executor: Arc<dyn ToolExecutor> = Arc::new(ProcessExecutor);
-    let reason = wake_loop::run_wake_loop(&pool, &llm, &config, a.id, wake_id, &executor)
+    let vault = Arc::new(Vault::from_base64(common::TEST_VAULT_KEY_B64).unwrap());
+    let reason = wake_loop::run_wake_loop(&pool, &llm, &config, a.id, wake_id, &executor, &vault)
         .await
         .unwrap();
     assert_eq!(reason, "sleep");
@@ -204,7 +206,8 @@ async fn test_wake_loop_iteration_cap() {
     );
 
     let executor: Arc<dyn ToolExecutor> = Arc::new(ProcessExecutor);
-    let reason = wake_loop::run_wake_loop(&pool, &llm, &config, a.id, wake_id, &executor)
+    let vault = Arc::new(Vault::from_base64(common::TEST_VAULT_KEY_B64).unwrap());
+    let reason = wake_loop::run_wake_loop(&pool, &llm, &config, a.id, wake_id, &executor, &vault)
         .await
         .unwrap();
     assert_eq!(reason, "iteration_cap");

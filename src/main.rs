@@ -105,6 +105,7 @@ async fn main() {
     let bg_config = config.clone();
     let bg_llm = llm.clone();
     let bg_executor = executor.clone();
+    let bg_vault = state.vault.clone();
     let bg_shutdown = shutdown.clone();
     let bg_alive = state.listener_alive.clone();
     let listener_handle = tokio::spawn(async move {
@@ -113,6 +114,7 @@ async fn main() {
             bg_config,
             bg_llm,
             bg_executor,
+            bg_vault,
             bg_shutdown,
             bg_alive,
         )

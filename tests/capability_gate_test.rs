@@ -23,6 +23,7 @@ use open_pincery::runtime::capability::{
 use open_pincery::runtime::llm::{FunctionCall, ToolCallRequest};
 use open_pincery::runtime::sandbox::{ProcessExecutor, ToolExecutor};
 use open_pincery::runtime::tools::{self, ToolResult};
+use open_pincery::runtime::vault::Vault;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -209,6 +210,7 @@ async fn locked_agent_shell_call_is_denied_and_audited() {
     };
 
     let executor: Arc<dyn ToolExecutor> = Arc::new(ProcessExecutor);
+    let vault = Arc::new(Vault::from_base64(common::TEST_VAULT_KEY_B64).unwrap());
     let result = tools::dispatch_tool(
         &tc,
         PermissionMode::Locked,
@@ -217,6 +219,7 @@ async fn locked_agent_shell_call_is_denied_and_audited() {
         agent_row.workspace_id,
         wake_id,
         &executor,
+        &vault,
     )
     .await;
 

@@ -17,13 +17,34 @@
 //! future `NamespacedExecutor` to be swapped in without touching callers.
 
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ShellCommand {
     pub command: String,
+    /// AC-43 (v7): additional environment variables to inject into the
+    /// child process. These are merged AFTER the sandbox allowlist, so
+    /// they can carry resolved credential plaintexts that must never
+    /// live in the parent's environment. Callers (see
+    /// [`crate::runtime::tools::dispatch_tool`]) are responsible for
+    /// resolving `PLACEHOLDER:<name>` tokens BEFORE reaching the
+    /// executor — the executor just forwards whatever strings it
+    /// receives.
+    pub env: HashMap<String, String>,
+}
+
+impl ShellCommand {
+    /// Convenience constructor for call sites that do not supply env
+    /// entries (most tests and non-credential tool paths).
+    pub fn new(command: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+            env: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +127,13 @@ impl ToolExecutor for ProcessExecutor {
             if let Ok(v) = std::env::var(key) {
                 command.env(key, v);
             }
+        }
+
+        // AC-43 (v7): caller-supplied env entries (typically resolved
+        // credential plaintexts). Applied AFTER the allowlist so a
+        // caller-supplied entry with the same name wins.
+        for (k, v) in &cmd.env {
+            command.env(k, v);
         }
 
         let child = match command.spawn() {
