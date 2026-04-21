@@ -30,14 +30,42 @@ env:
 
 jobs:
   build:
-    name: build-${{ matrix.target }}
-    runs-on: ubuntu-latest
+    name: build-${{ matrix.suffix }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
+          # Server + CLI for Linux servers (primary deploy target).
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
             suffix: linux-x86_64
+            binaries: open-pincery pcy
+            ext: ""
+          # CLI-only builds so remote clients can use pcy against a hosted
+          # server. The server is always deployed on Linux (docker compose),
+          # so open-pincery is not cross-compiled here.
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            suffix: linux-aarch64
+            binaries: pcy
+            ext: ""
+            cross: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            suffix: macos-x86_64
+            binaries: pcy
+            ext: ""
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            suffix: macos-aarch64
+            binaries: pcy
+            ext: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            suffix: windows-x86_64
+            binaries: pcy
+            ext: ".exe"
     steps:
       - uses: actions/checkout@v4
 
@@ -46,32 +74,51 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install aarch64 linux cross toolchain
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          cat >> .cargo/config.toml <<'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.target }}
+          key: release-${{ matrix.suffix }}
 
-      - name: Build release binaries (server + CLI)
+      - name: Build release binaries
+        shell: bash
         run: |
-          cargo build --release --target ${{ matrix.target }} --locked \
-            --bin open-pincery --bin pcy
+          set -euo pipefail
+          BINS=""
+          for B in ${{ matrix.binaries }}; do
+            BINS="$BINS --bin $B"
+          done
+          cargo build --release --target ${{ matrix.target }} --locked $BINS
 
       - name: Stage artifacts
         id: stage
+        shell: bash
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
           SUFFIX="${{ matrix.suffix }}"
+          EXT="${{ matrix.ext }}"
           mkdir -p dist
-          for SRC_BIN in open-pincery pcy; do
-            OUT_NAME="${SRC_BIN}-${TAG}-${SUFFIX}"
-            cp "target/${{ matrix.target }}/release/${SRC_BIN}" "dist/${OUT_NAME}"
-            (cd dist && sha256sum "${OUT_NAME}" > "${OUT_NAME}.sha256")
+          for SRC_BIN in ${{ matrix.binaries }}; do
+            OUT_NAME="${SRC_BIN}-${TAG}-${SUFFIX}${EXT}"
+            cp "target/${{ matrix.target }}/release/${SRC_BIN}${EXT}" "dist/${OUT_NAME}"
+            (cd dist && shasum -a 256 "${OUT_NAME}" > "${OUT_NAME}.sha256")
           done
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
       - name: Sign binaries (keyless)
+        shell: bash
         env:
           COSIGN_YES: "true"
         run: |
@@ -79,8 +126,9 @@ jobs:
           cd dist
           TAG="${GITHUB_REF_NAME}"
           SUFFIX="${{ matrix.suffix }}"
-          for SRC_BIN in open-pincery pcy; do
-            BIN="${SRC_BIN}-${TAG}-${SUFFIX}"
+          EXT="${{ matrix.ext }}"
+          for SRC_BIN in ${{ matrix.binaries }}; do
+            BIN="${SRC_BIN}-${TAG}-${SUFFIX}${EXT}"
             cosign sign-blob \
               --output-signature "${BIN}.sig" \
               --output-certificate "${BIN}.pem" \
@@ -92,14 +140,9 @@ jobs:
         with:
           name: binary-${{ matrix.suffix }}
           path: |
-            dist/open-pincery-${{ github.ref_name }}-${{ matrix.suffix }}
-            dist/open-pincery-${{ github.ref_name }}-${{ matrix.suffix }}.sha256
-            dist/open-pincery-${{ github.ref_name }}-${{ matrix.suffix }}.sig
-            dist/open-pincery-${{ github.ref_name }}-${{ matrix.suffix }}.pem
-            dist/pcy-${{ github.ref_name }}-${{ matrix.suffix }}
-            dist/pcy-${{ github.ref_name }}-${{ matrix.suffix }}.sha256
-            dist/pcy-${{ github.ref_name }}-${{ matrix.suffix }}.sig
-            dist/pcy-${{ github.ref_name }}-${{ matrix.suffix }}.pem
+            dist/*-${{ github.ref_name }}-${{ matrix.suffix }}*
+          if-no-files-found: error
+          retention-days: 7
           if-no-files-found: error
           retention-days: 7
 

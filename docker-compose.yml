@@ -54,9 +54,16 @@ services:
       STALE_WAKE_HOURS: ${STALE_WAKE_HOURS:-2}
       WAKE_SUMMARY_LIMIT: ${WAKE_SUMMARY_LIMIT:-20}
       EVENT_WINDOW_LIMIT: ${EVENT_WINDOW_LIMIT:-200}
+      # pcy CLI: persist session config inside the container volume so
+      # `./pcy` wrapper scripts retain the login token across restarts.
+      PCY_CONFIG_PATH: /app/.pcy/config.toml
+      OPEN_PINCERY_URL: http://127.0.0.1:8080
+    volumes:
+      - pcyconfig:/app/.pcy
     depends_on:
       db:
         condition: service_healthy
 
 volumes:
   pgdata:
+  pcyconfig:
