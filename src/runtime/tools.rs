@@ -1,8 +1,13 @@
 use serde::Deserialize;
 use serde_json::json;
-use tracing::info;
+use sqlx::PgPool;
+use tracing::{info, warn};
+use uuid::Uuid;
 
+use super::capability::{self, PermissionMode};
 use super::llm::{FunctionDef, ToolCallRequest, ToolDefinition};
+use crate::error::AppError;
+use crate::models::event;
 use crate::observability::metrics as m;
 
 pub enum ToolResult {
@@ -72,10 +77,41 @@ struct PlanArgs {
     content: String,
 }
 
-pub async fn dispatch_tool(tool_call: &ToolCallRequest) -> ToolResult {
+pub async fn dispatch_tool(
+    tool_call: &ToolCallRequest,
+    mode: PermissionMode,
+    pool: &PgPool,
+    agent_id: Uuid,
+    wake_id: Uuid,
+) -> ToolResult {
     let name = &tool_call.function.name;
     let args = &tool_call.function.arguments;
     metrics::counter!(m::TOOL_CALL, "tool" => name.clone()).increment(1);
+
+    // AC-35: capability gate. Runs BEFORE any side effect so a denied call
+    // never spawns a process or reaches the network. Unknown tools land on
+    // ToolCapability::Destructive (closed-by-default).
+    let required = capability::required_for(name);
+    if !capability::mode_allows(mode, required) {
+        warn!(
+            tool = %name,
+            required_capability = ?required,
+            permission_mode = ?mode,
+            "Tool call denied by permission mode"
+        );
+        let payload = json!({
+            "required_capability": required,
+            "permission_mode": mode,
+        })
+        .to_string();
+        // Best-effort audit trail. If the insert fails we still return
+        // Error so the wake loop does not accidentally proceed with the
+        // disallowed call.
+        if let Err(e) = append_denied_event(pool, agent_id, wake_id, name, &payload).await {
+            warn!(error = %e, "Failed to append tool_capability_denied event");
+        }
+        return ToolResult::Error("tool disallowed by permission mode".into());
+    }
 
     match name.as_str() {
         "shell" => {
@@ -100,6 +136,29 @@ pub async fn dispatch_tool(tool_call: &ToolCallRequest) -> ToolResult {
         }
         other => ToolResult::Error(format!("Unknown tool: {other}")),
     }
+}
+
+async fn append_denied_event(
+    pool: &PgPool,
+    agent_id: Uuid,
+    wake_id: Uuid,
+    tool_name: &str,
+    payload: &str,
+) -> Result<(), AppError> {
+    event::append_event(
+        pool,
+        agent_id,
+        "tool_capability_denied",
+        "runtime",
+        Some(wake_id),
+        Some(tool_name),
+        Some(payload),
+        None,
+        None,
+        None,
+    )
+    .await?;
+    Ok(())
 }
 
 async fn execute_shell(command: &str) -> ToolResult {

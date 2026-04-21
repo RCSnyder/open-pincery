@@ -1,3 +1,4 @@
+pub mod capability;
 pub mod drain;
 pub mod llm;
 pub mod maintenance;

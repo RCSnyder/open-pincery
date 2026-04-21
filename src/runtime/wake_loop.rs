@@ -3,6 +3,7 @@ use std::time::Instant;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use super::capability::PermissionMode;
 use super::llm::{ChatMessage, LlmClient};
 use super::prompt;
 use super::tools::{self, ToolResult};
@@ -172,8 +173,12 @@ pub async fn run_wake_loop(
                 )
                 .await?;
 
-                // Dispatch tool
-                let result = tools::dispatch_tool(tc).await;
+                // Dispatch tool (AC-35: per-iteration permission-mode gate
+                // runs inside dispatch_tool, using `current.permission_mode`
+                // as read this tick so an operator mid-wake lockdown takes
+                // effect on the next call).
+                let mode = PermissionMode::from_db_str(&current.permission_mode);
+                let result = tools::dispatch_tool(tc, mode, pool, agent_id, wake_id).await;
 
                 match result {
                     ToolResult::Sleep => {
