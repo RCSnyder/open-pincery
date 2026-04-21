@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod bootstrap;
 pub mod budget;
+pub mod completion;
 pub mod credential;
 pub mod demo;
 pub mod events;

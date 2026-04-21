@@ -95,6 +95,13 @@ enum Commands {
     /// workspace_id, url — as one JSON line. Exits 0 iff
     /// authenticated; any HTTP or auth failure surfaces non-zero.
     Whoami,
+    /// AC-51 (v8): emit a completion script for the named shell on
+    /// stdout. Pipe it into your shell's completion directory.
+    Completion {
+        /// Target shell.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -314,6 +321,10 @@ async fn run_inner() -> Result<ExitCode, AppError> {
             })?;
             let client = ApiClient::new(url, Some(token));
             commands::whoami::run(&client, &cfg).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Completion { shell } => {
+            commands::completion::run(shell)?;
             Ok(ExitCode::SUCCESS)
         }
     }
