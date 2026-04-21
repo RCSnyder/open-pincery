@@ -21,6 +21,7 @@ pub mod events;
 pub mod health;
 pub mod me;
 pub mod messages;
+pub mod openapi;
 pub mod webhooks;
 
 use crate::{
@@ -236,6 +237,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", axum::routing::get(health::health))
         .route("/ready", axum::routing::get(health::ready))
+        .merge(openapi::router())
         .merge(unauthed)
         .nest("/api", authed)
         .fallback_service(static_files)
