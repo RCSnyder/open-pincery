@@ -1811,3 +1811,466 @@ None with BUILD impact. Two tracked as v7 Deferred in `scope.md`:
 
 - Master-key rotation (re-key every sealed row) — bounded, land when operator community asks.
 - Per-mission credential ACLs — v10 `capability_scope`.
+
+
+---
+
+## v8 Design Addendum — Unified API Surface (Schema-Driven CLI, MCP, and Distribution)
+
+### Architecture Delta
+
+Five strictly-additive surface changes. One new compile-time spec aggregator (`utoipa`), one new unauthenticated route (`/openapi.json`), one new Rust module (`src/mcp/`), one restructured CLI tree (`src/cli/nouns/`) with context multiplexing, one installer + completion distribution layer. Zero runtime-semantic, schema, or handler-logic changes.
+
+```
+┌──────────────── Remote Operator / Agent ────────────────┐
+│                                                         │
+│  curl -fsSL .../install.sh | bash                       │
+│    └─ platform detect → sha256 → cosign → $PREFIX/bin   │
+│                                                         │
+│  pcy completion zsh >> ~/.zshrc.d/pcy                   │
+│  pcy context set prod --url https://pcy.example.com     │
+│  pcy login                                              │
+│    ├─ first run: POST /api/bootstrap (idempotent shim)  │
+│    └─ subsequent: POST /api/login                       │
+│                                                         │
+│  pcy <noun> <verb> [name|uuid] -o {table|json|yaml|...} │
+│                                                         │
+│  Claude Desktop / Cursor / Copilot Chat                 │
+│    └─ mcpServers: { "pincery": { command: "pcy",        │
+│                                  args: ["mcp","serve"]}}│
+│         └─ stdio JSON-RPC ── tools/list, tools/call     │
+└─────────────────┬───────────────────────────────────────┘
+                  │
+                  │ HTTP(S) + Bearer token
+                  ▼
+┌───────────── Open Pincery Server (axum) ────────────────┐
+│                                                         │
+│  Unauth router:  /health  /ready  /metrics              │
+│                  /openapi.json  /openapi.yaml  ← NEW    │
+│                  /api/bootstrap  /api/webhooks/*        │
+│                                                         │
+│  Auth router (Bearer): /api/me /api/agents/*            │
+│                        /api/credentials/*  (v7)         │
+│                        /api/events/*  /api/messages/*   │
+│                                                         │
+│  Every handler carries `#[utoipa::path]` + its DTOs     │
+│  carry `#[derive(ToSchema)]`. Aggregator in             │
+│  `src/api/openapi.rs` emits the 3.1 document at         │
+│  startup; served as JSON + YAML bytes at the two        │
+│  new routes.                                            │
+└─────────────────────────────────────────────────────────┘
+
+CLI tree (clap):                        MCP stdio flow:
+
+  pcy                                    initialize
+  ├── login                                → { serverInfo, capabilities }
+  ├── whoami                             tools/list
+  ├── agent                                → [ { name: "agent.list", … },
+  │   ├── list                               { name: "agent.create", … }, … ]
+  │   ├── get <name|uuid>                tools/call name="agent.create"
+  │   ├── create                           → proxy to POST /api/workspaces/$ws/agents
+  │   ├── update <name|uuid>               → HTTP result → MCP content[]
+  │   ├── delete <name|uuid>  [--force]
+  │   └── send <name|uuid> <text>        src/mcp/ modules:
+  ├── credential                           protocol.rs — JSON-RPC framing
+  │   ├── list                             tools.rs   — OpenAPI→tool derivation
+  │   ├── add <name>  [--stdin]            bridge.rs  — tool call → HTTP
+  │   └── revoke <name>  [--force]         mod.rs     — stdio event loop
+  ├── budget
+  │   └── set  / get                     src/cli/nouns/ modules:
+  ├── event                                agent.rs credential.rs budget.rs
+  │   ├── list <agent|uuid>                event.rs  context.rs     auth.rs
+  │   └── tail <agent|uuid>                output.rs  — OutputFormat render
+  ├── context                              resolve.rs — name-or-UUID lookup
+  │   ├── list  / current                  migrate.rs — v4 flat → v8 contexts
+  │   ├── use <name>                       mcp.rs     — `pcy mcp serve`
+  │   ├── set <name> --url …
+  │   └── delete <name>
+  ├── completion {bash|zsh|fish|powershell}
+  ├── mcp serve
+  ├── bootstrap   (hidden alias → login, warns once)
+  ├── message     (hidden alias → agent send, warns once)
+  ├── events      (hidden alias → event list, warns once)
+  └── demo        REMOVED (→ scripts/demo.sh)
+```
+
+### Directory Structure (v8 deltas only)
+
+```
+src/
+  api/
+    openapi.rs         — NEW: `ApiDoc` utoipa::OpenApi aggregator;
+                         openapi_json / openapi_yaml handlers; unauth_router()
+                         merge helper
+    mod.rs             — MODIFIED: mount openapi routes on the unauth side;
+                         router() unchanged for authenticated surface
+    agents.rs          — MODIFIED: `#[utoipa::path]` on every handler;
+                         `ToSchema` on CreateAgentRequest / AgentResponse / …
+    credentials.rs     — MODIFIED: same annotation pass over v7 endpoints
+    me.rs              — MODIFIED: same
+    events.rs          — MODIFIED: same
+    messages.rs        — MODIFIED: same
+    webhooks.rs        — MODIFIED: same (these *are* part of the contract)
+    bootstrap.rs       — MODIFIED: same + utoipa note that `/api/bootstrap`
+                         is idempotent-or-conflict (for AC-45's shim semantics)
+  mcp/
+    mod.rs             — NEW: `run_stdio(ctx: &CliConfig) -> Result<(), _>`
+                         event loop; reads framed JSON-RPC from stdin,
+                         writes responses to stdout; debug logs to stderr
+    protocol.rs        — NEW: Request / Response / Error types matching MCP
+                         2025-06-18; content-length framing; serde round-trip
+    tools.rs           — NEW: OpenApiToolRegistry — parses `/openapi.json`
+                         (or the local `ApiDoc::openapi()`) and derives
+                         `(name, description, inputSchema)` per operation
+    bridge.rs          — NEW: `invoke(tool_name, args) -> McpToolResult`
+                         maps tool name → HTTP method + path template,
+                         substitutes path params from args, sends via
+                         ApiClient, maps response/error to MCP content
+  cli/
+    mod.rs             — MODIFIED: root `Cli` struct gains `--context` +
+                         `--output`; `Commands` reduced to the v8 noun
+                         variants; legacy variants kept behind
+                         `#[command(hide = true)]` pointing at shim fns
+    config.rs          — MODIFIED: ContextConfig { url, token, workspace_id,
+                         user_id }; CliConfig { current_context: String,
+                         contexts: BTreeMap<String, ContextConfig> };
+                         load() auto-migrates v4 flat schema (see migrate.rs);
+                         save() writes atomically (tempfile + rename)
+    commands/
+      mod.rs           — MODIFIED: re-exports from nouns/; legacy shims
+                         (bootstrap_shim, message_shim, events_shim) that
+                         emit warn_deprecated() + delegate
+      <legacy files>   — KEPT as thin delegates for one release; to be
+                         deleted in the tag after v8 lands
+    nouns/
+      mod.rs           — NEW: pub mods + `warn_deprecated(old, new)` helper
+                         gated by OPEN_PINCERY_NO_DEPRECATION_WARNINGS
+      agent.rs         — NEW: list/get/create/update/delete/send verbs
+      credential.rs    — NEW: list/add/revoke verbs (wraps v7 CLI)
+      budget.rs        — NEW: get/set verbs
+      event.rs         — NEW: list/tail verbs
+      context.rs       — NEW: list/current/use/set/delete verbs
+      auth.rs          — NEW: login / whoami / logout verbs
+      completion.rs    — NEW: clap_complete generator dispatch
+      mcp.rs           — NEW: `serve` verb → crate::mcp::run_stdio
+    output.rs          — NEW: OutputFormat enum {Table, Json, Yaml,
+                         JsonPath(String), Name}; `render<T: Serialize +
+                         TableRow>(value, format, stdout_is_tty)`
+    resolve.rs         — NEW: `resolve_agent(client, ctx, needle) ->
+                         Result<Uuid, ResolutionError>` (Exact-UUID |
+                         Exact-Name | Ambiguous[Vec<(Uuid,String)>] |
+                         NotFound); same shape for credentials/events
+    migrate.rs         — NEW: v4 flat config → v8 contexts migration;
+                         backs up to config.toml.pre-v8 before rewrite
+  lib.rs               — MODIFIED: pub mod mcp; re-export minimal surface
+
+install.sh             — NEW (at repo root): platform/arch detect,
+                         GitHub release asset fetch, sha256 enforce,
+                         cosign verify (soft-fail unless --require-cosign),
+                         install to $PCY_PREFIX/bin. Drafted during v7
+                         exploration; v8 finalizes + tests.
+
+scripts/
+  demo.sh              — NEW: the former `pcy demo` flow re-homed here
+
+docs/
+  api.md               — MODIFIED: prose trimmed; replaced by links to
+                         `/openapi.json` + a "How to drive the API" section
+                         covering curl, pcy, and MCP
+  runbooks/
+    cli-install.md     — NEW: install.sh instructions + completion install
+    mcp-setup.md       — NEW: example Claude Desktop / Cursor configs
+
+tests/
+  openapi_spec_test.rs         — AC-44: spec served, 3.1 valid,
+                                 path coverage vs router() enumeration,
+                                 every route annotated
+  cli_login_idempotent_test.rs — AC-45: fresh & re-run login both succeed;
+                                 bootstrap alias warns once
+  cli_noun_verb_test.rs        — AC-46: legacy/new parity table;
+                                 ambiguous-name disambiguation exit 2
+  cli_output_flag_test.rs      — AC-47: json/yaml/jsonpath/name + TTY
+                                 default + NO_COLOR + --force/--yes
+  cli_context_test.rs          — AC-48: migration + switching +
+                                 env/flag overrides + whoami
+  mcp_smoke_test.rs            — AC-49: initialize + tools/list diff +
+                                 tools/call round-trip + event loop
+  installer_test.rs            — AC-50: shellcheck + fixture-served
+                                 install + sha256 mismatch + cosign gate
+                                 (behind #[cfg(feature = "installer-e2e")])
+  cli_completion_test.rs       — AC-51: four shells emit non-empty
+                                 completion containing shell-specific marker
+  api_naming_test.rs           — AC-52a: OpenAPI walker — plural paths,
+                                 {id} param, summaries, PUT ban, etc.
+  cli_naming_test.rs           — AC-52b: clap walker — about strings,
+                                 --output parity, forbidden flag names
+
+Cargo.toml              — MODIFIED: +utoipa, +utoipa-axum, +clap_complete
+                                     (dev) +openapiv3, +jsonpath-rust-or-eq
+                                     features: installer-e2e = []
+```
+
+### Interfaces
+
+**OpenAPI aggregator** (`src/api/openapi.rs`):
+
+```rust
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        api::me::get_me,
+        api::agents::list_agents,
+        api::agents::create_agent,
+        api::agents::get_agent,
+        api::agents::update_agent,
+        api::agents::delete_agent,
+        api::agents::send_message,
+        api::credentials::list_credentials,
+        api::credentials::create_credential,
+        api::credentials::revoke_credential,
+        api::events::list_events,
+        api::bootstrap::bootstrap,
+        // … every route currently in api::router()
+    ),
+    components(schemas(
+        models::Agent, models::AgentStatus, models::Credential,
+        api::agents::CreateAgentRequest, api::agents::AgentResponse,
+        api::me::MeResponse, /* … */
+    )),
+    security(("bearerAuth" = [])),
+    info(title = "Open Pincery API", version = env!("CARGO_PKG_VERSION")),
+    modifiers(&BearerAuthAddon),
+)]
+pub struct ApiDoc;
+
+pub fn openapi_router() -> axum::Router<AppState> {
+    Router::new()
+        .route("/openapi.json", get(openapi_json))
+        .route("/openapi.yaml", get(openapi_yaml))
+}
+```
+
+Handler annotations follow this pattern — shown for `list_agents`:
+
+```rust
+#[utoipa::path(
+    get,
+    path = "/api/workspaces/{workspace_id}/agents",
+    params(("workspace_id" = Uuid, Path,)),
+    responses(
+        (status = 200, description = "Agents in workspace",
+         body = Vec<AgentResponse>),
+        (status = 401, description = "Missing or invalid token"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "agent",
+)]
+pub async fn list_agents(/* … unchanged signature … */) { /* … */ }
+```
+
+**MCP protocol types** (`src/mcp/protocol.rs`):
+
+```rust
+#[derive(Serialize, Deserialize)]
+pub struct JsonRpcRequest {
+    pub jsonrpc: String,       // "2.0"
+    pub id: Option<Value>,
+    pub method: String,        // "initialize" | "tools/list" | "tools/call"
+    pub params: Option<Value>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct JsonRpcResponse {
+    pub jsonrpc: String,
+    pub id: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<JsonRpcError>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Tool {
+    pub name: String,           // "agent.create"
+    pub description: String,    // from OpenAPI operation summary
+    pub input_schema: Value,    // OpenAPI requestBody/parameters → JSON Schema
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct CallToolResult {
+    pub content: Vec<Content>,  // Content::Text { text: "..." } for JSON bodies
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_error: Option<bool>,
+}
+```
+
+Framing: one JSON object per line (newline-delimited JSON-RPC), matching the MCP stdio transport spec. No Content-Length headers (newline-delimited is the supported stdio framing in the 2025-06-18 revision).
+
+**Context config** (`src/cli/config.rs` — v8 schema):
+
+```toml
+current-context = "default"
+
+[contexts.default]
+url          = "http://127.0.0.1:8080"
+token        = "sess_..."
+workspace_id = "018f..."
+user_id      = "018f..."
+
+[contexts.prod]
+url          = "https://pcy.example.com"
+token        = "sess_..."
+workspace_id = "018f..."
+user_id      = "018f..."
+```
+
+Precedence for resolving the active context: `--context <name>` flag > `OPEN_PINCERY_CONTEXT` env > `current-context` in file.
+
+**Output format** (`src/cli/output.rs`):
+
+```rust
+#[derive(Clone, Debug)]
+pub enum OutputFormat {
+    Table,
+    Json,
+    Yaml,
+    JsonPath(String),
+    Name,
+}
+
+pub fn default_for_tty(stdout_is_tty: bool) -> OutputFormat {
+    if stdout_is_tty { OutputFormat::Table } else { OutputFormat::Json }
+}
+
+pub trait TableRow {
+    fn headers() -> &'static [&'static str];
+    fn row(&self) -> Vec<String>;
+}
+
+pub fn render<T: Serialize + TableRow>(
+    values: &[T],
+    fmt: &OutputFormat,
+    stdout_is_tty: bool,
+) -> Result<(), OutputError> { /* … */ }
+```
+
+**Name-or-UUID resolver** (`src/cli/resolve.rs`):
+
+```rust
+pub enum Resolution<T> {
+    ById(Uuid),
+    ByName { id: Uuid, name: String },
+    Ambiguous(Vec<(Uuid, String)>),
+    NotFound,
+}
+
+pub async fn resolve_agent(
+    client: &ApiClient,
+    workspace_id: Uuid,
+    needle: &str,
+) -> Result<Uuid, AppError>;
+```
+
+If `needle` parses as a UUID, a single GET confirms it exists; otherwise a LIST is filtered by `name == needle`. Ambiguous matches exit 2 with a two-column table on stderr.
+
+### Data Model
+
+No schema changes. v8 is surface-only.
+
+### External Integrations
+
+**MCP client integrations** are operator-configured, not server-side. Example Claude Desktop config:
+
+```json
+{
+  "mcpServers": {
+    "pincery-prod": {
+      "command": "pcy",
+      "args": ["mcp", "serve"],
+      "env": { "OPEN_PINCERY_CONTEXT": "prod" }
+    }
+  }
+}
+```
+
+`pcy mcp serve` inherits the operator's contexts from `~/.config/open-pincery/config.toml`; no additional auth configuration inside the MCP client. Failure modes (server unreachable, token expired, rate-limited) surface as MCP errors with a stable error-code map: `-32001` unreachable, `-32002` unauthorized, `-32003` rate-limited, `-32004` not-found, `-32000` server-side generic.
+
+**GitHub Releases** (install-path only): `install.sh` fetches from `api.github.com/repos/<owner>/<repo>/releases/latest` with a 10s timeout and a graceful retry-once on transient failures. No cached token is sent; unauthenticated GitHub API rate limit is adequate for one-shot installs.
+
+No new server-side outbound integrations.
+
+### Test Strategy (one row per v8 AC)
+
+| AC     | Test file                       | Kind         | Notes                                                                                                                    |
+| ------ | ------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| AC-44  | openapi_spec_test.rs            | integration  | Spins up `api::router()` in-process; fetches `/openapi.json`; `openapiv3::OpenAPI` parse; diff vs route enumeration.     |
+| AC-45  | cli_login_idempotent_test.rs    | e2e (compose)| Fresh compose reset + `pcy login` × 2; `pcy bootstrap` alias single warning; `--help` excludes `bootstrap`.              |
+| AC-46  | cli_noun_verb_test.rs           | e2e (compose)| Parameterized (legacy, new) pairs; stdout byte-identical; ambiguous name → exit 2 + table on stderr.                     |
+| AC-47  | cli_output_flag_test.rs         | e2e (compose)| json parses; name line-per-item; jsonpath selector; TTY detection via `PTY` fixture; `NO_COLOR`; `--force` vs `--yes`.   |
+| AC-48  | cli_context_test.rs             | unit + e2e   | Unit: migrate.rs over fixture files. E2e: two contexts, switching, env/flag override, whoami 200/1 against wrong token. |
+| AC-49  | mcp_smoke_test.rs               | integration  | Spawn `pcy mcp serve` subprocess; full JSON-RPC round-trip; tools/list diff vs router; agent.create loop → event lands. |
+| AC-50  | installer_test.rs               | script       | `bash -n` + shellcheck warning-level; local fixture GitHub mirror; sha256 mismatch; cosign-required gate. Feature-gated. |
+| AC-51  | cli_completion_test.rs          | unit         | Four shells; non-empty + shell-specific marker string.                                                                   |
+| AC-52a | api_naming_test.rs              | integration  | Walks `ApiDoc::openapi()`; asserts plural paths / `{id}` / summaries / no PUT / no `format` field.                       |
+| AC-52b | cli_naming_test.rs              | unit         | Walks clap `Command` tree; asserts about strings, `-o` parity, no `--format`/`--yes` outside deprecated.                 |
+
+Every test carries `// AC-NN` comment trailing the test function; the v3 grep guardrail already ensures this.
+
+### Observability
+
+No new metrics or log lines on the server side. The `/openapi.json` handler reuses the `/health` structured log line (method + path + status + latency).
+
+Client-side: `pcy` gains a `--verbose` flag that turns on `RUST_LOG=pcy=debug`-equivalent tracing to stderr; off by default. `pcy mcp serve` always logs its JSON-RPC framing errors to stderr (stdout is reserved for protocol traffic). Deprecation warnings write exactly one stderr line per invocation with the `warning:` prefix.
+
+### Complexity Exceptions
+
+1. `src/mcp/mod.rs` may exceed the 200-line soft target. JSON-RPC stdio event loops are genuinely irreducible below that threshold (framing + dispatch + error mapping + graceful shutdown). 300-line ceiling is the hard stop; if it grows beyond that we split into `event_loop.rs` + `dispatch.rs`.
+2. `src/cli/output.rs` will carry both the enum + the `render` function + per-resource `TableRow` impls. 250-line ceiling; beyond that we push `TableRow` impls into the noun modules.
+3. The legacy-shim compatibility surface (hidden `bootstrap`, `message`, `events`, `--yes`, `--format`) adds test paths that duplicate the new paths. Accepted for one release; v1.2.0 removes them and prunes the duplicate tests.
+4. `utoipa::path` annotations above every handler are verbose. Accepted — they are the source of truth for AC-44 and AC-52a.
+
+### Key Scenario Trace — Remote Operator Drives Production Pincery via MCP
+
+1. Operator on macOS M-series runs `curl -fsSL https://raw.githubusercontent.com/.../install.sh | bash` → `install.sh` detects `darwin-arm64`, pulls latest release manifest, downloads `pcy-vX.Y.Z-macos-aarch64`, verifies sha256, verifies cosign signature against the repo's public key, installs to `~/.local/bin/pcy`, prints PATH hint if needed.
+2. `pcy completion zsh > ~/.zfunc/_pcy` → completions live alongside the operator's other CLIs.
+3. `pcy context set prod --url https://pcy.example.com` → creates `~/.config/open-pincery/config.toml` with `current-context = "prod"` and a `[contexts.prod]` table.
+4. `pcy login` → with `OPEN_PINCERY_BOOTSTRAP_TOKEN` set: GETs `/api/me` first, gets 401 "not bootstrapped", retries via `POST /api/bootstrap`, persists session token in `contexts.prod.token`. Without the bootstrap env but with a pre-baked password, POSTs `/api/login`. Exit 0.
+5. `pcy whoami -o table` → GETs `/api/me`; prints a two-row table with context, server, user, workspace.
+6. Operator opens Claude Desktop, adds the `mcpServers.pincery-prod` entry shown above. Claude Desktop spawns `pcy mcp serve` as a stdio subprocess and sends `initialize`.
+7. `pcy mcp serve` loads `prod` context, opens an `ApiClient` with the stored token, responds to `initialize` with `{ serverInfo: { name: "open-pincery", version: "X.Y.Z" }, capabilities: { tools: {} } }`.
+8. Claude sends `tools/list`. The MCP server reads the local `ApiDoc::openapi()` registry (same crate, no network call needed) and emits one tool per operation: `agent.list`, `agent.create`, `agent.send_message`, `credential.list`, …
+9. Claude (or the human guiding it) calls `tools/call { name: "agent.create", arguments: { name: "investigator", persona_prompt: "…", credential_policy: "Locked" } }`.
+10. `bridge.rs` maps `agent.create` → `POST /api/workspaces/{workspace_id}/agents`, substitutes `workspace_id` from the context, sends the JSON body, receives 201 with the new agent record.
+11. Response is wrapped in an MCP `CallToolResult { content: [Text(json_body)] }` and written back to stdout.
+12. On the server, the usual v1–v7 machinery runs — `agent_created` event lands in `events`, maintenance is unchanged, the agent begins its wake loop. No new server path was exercised.
+13. Hours later the operator reconnects, `pcy event list investigator -o json --context prod | jq` streams recent events into a local Jupyter notebook. The same data was reachable via `tools/call { name: "event.list", … }` from Claude; the two paths share one OpenAPI-derived contract.
+
+The chain is closed: one `ApiDoc` feeds `/openapi.json`, the MCP tool registry, the lint test, and the conformance tests. Every downstream surface — human CLI, MCP-driven agent, curl, future SDKs — reads from the same spec.
+
+### Scope Adjustments (from EXPAND)
+
+1. **AC-47 `--output jsonpath` uses a kubectl-compatible subset, not full JSONPath.** `jsonpath-rust` covers `.foo.bar`, `.items[*].name`, `.items[0]`, filters `[?(@.active==true)]`. Operators who need full JQ can pipe `-o json | jq`. Test fixtures only assert the subset.
+2. **AC-49 MCP spec version is pinned to `2025-06-18` for v8 ship.** Later revisions land in subsequent minor tags; the hand-written protocol module is structured so the version constant + the `initialize` response are the only change points.
+3. **AC-50 `install.sh` on Windows is supported via git-bash / WSL only.** Native PowerShell installer is deferred — `winget` is the right Windows distribution seam and lands with the AC-deferred package-manager track.
+4. **AC-52 "no `PUT` in the API" is enforced as a lint, not an architectural ban.** If a future endpoint genuinely needs idempotent upsert, the allowlist is a one-line addition with a justification comment — same pattern as the capability-gate table.
+
+These adjustments sharpen the ACs without reducing the invariants (machine-readable contract, idempotent login, noun-verb tree, universal output flag, named contexts, MCP parity with API, signed-binary installer, four-shell completions, schema-layer lints).
+
+### Open Questions
+
+None with BUILD impact. Three tracked as v8 Deferred in `scope.md`:
+
+- Generated SDKs (Python/TypeScript) from `/openapi.json` — AC-44 unlocks this cleanly; release pipeline is the gating work.
+- Terraform provider — same story.
+- Long-running MCP daemon for remote (cross-host) agents — pairs with v11 signals + per-agent auth.
+
+### v8 Dependencies on Prior Versions
+
+None broken.
+
+- v2 auth middleware & rate-limit buckets: reused unchanged; `/openapi.{json,yaml}` join the `/health` bucket.
+- v3 CI guardrails (AC-16 grep tests, AC-17 CI green): extended with AC-52a/b tests; no existing test touched.
+- v4 HTTP API contract (AC-27): strictly preserved. Every documented endpoint gains `#[utoipa::path]` but no shape or status code changes.
+- v5 `.env.example` / smoke script (AC-29/AC-30): smoke updated to invoke `pcy login` + assert `/openapi.json` 200; no new env vars.
+- v6 capability gate (AC-35): server-side — unchanged. MCP tool calls traverse the same authenticated HTTP path as the CLI; capability decisions still happen in `tools::dispatch_tool`.
+- v7 vault + CLI (AC-38..AC-43): credentials endpoints gain annotations; `pcy credential` commands live unchanged under the noun tree (verbs semantic-identical to v7).

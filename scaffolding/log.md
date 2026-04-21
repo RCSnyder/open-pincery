@@ -1,5 +1,13 @@
 # Open Pincery — Experiment Log
 
+## DESIGN v8 — 2026-04-21T15:00Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: design.md appended with v8 addendum (~463 lines, 1813 → 2276). All gate conditions verified: (a) design.md exists with v8 section; (b) Directory Structure section lists every new/modified file across `src/api/openapi.rs`, `src/mcp/{mod,protocol,tools,bridge}.rs`, `src/cli/nouns/*`, `src/cli/{output,resolve,migrate}.rs`, 10 new test files, `install.sh`, `scripts/demo.sh`, runbooks; (c) Interfaces section provides concrete data shapes — `ApiDoc` utoipa aggregator, `JsonRpcRequest/Response/Tool/CallToolResult` MCP protocol types, `ContextConfig` TOML schema, `OutputFormat` enum + `TableRow` trait, `Resolution<T>` resolver; (d) every external integration (MCP client configs, GitHub Releases for install.sh) has error handling + test strategy declared; (e) Test Strategy table has one row per v8 AC with file, kind, notes — all 10 rows (AC-44..AC-52 with AC-52a/b); (f) Observability section covers server log reuse, client `--verbose`, MCP stderr discipline, deprecation warning format; (g) Complexity Exceptions section explicit — 4 exceptions with hard ceilings; (h) no open questions with BUILD impact (3 deferred items documented); (i) design review scenario traced end-to-end (remote Mac operator → install.sh → context setup → login → Claude Desktop MCP → agent.create tool call → event lands server-side). Architecture Delta covers 5 additive surface changes with zero runtime-semantic/schema/handler-logic changes. v1–v7 dependencies preserved and enumerated.
+- **Changes**: appended v8 design addendum to `scaffolding/design.md`
+- **Retries**: 0
+- **Next**: ANALYZE (v8) — produce `readiness.md` v8 addendum with AC coverage table, truths, scope-reduction risks, build order
+
 ## EXPAND v8 — 2026-04-21T14:00Z
 
 - **Gate**: PASS (attempt 1)
