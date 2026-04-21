@@ -332,3 +332,83 @@ None. All six ACs have unambiguous pass/fail criteria. OpenRouter remains the de
 - **TLA+ enum-name alignment** (runtime raw status strings → spec variant names) — v6 RECONCILE work, carried forward from v4
 - **Real signup/login flow, multi-tenant RBAC enforcement, per-workspace rate limits, account suspension** — previously tagged v5 in v4 Deferred; reassigned to v6 because v5 is operator-onramp only
 - **CLI auth subcommands beyond `bootstrap`/`login`** — reassigned to v6 with the auth flow above
+
+---
+
+## v6 — Capability Foundations & Security Baseline
+
+### Problem (v6)
+
+v5 shipped a usable operator onramp, but `docs/input/north-star-2026-04.md` landed as the canonical direction for the project and reveals that the current runtime does not yet honor three of the north star's load-bearing security invariants:
+
+1. **Agent-authored code runs on the substrate host.** `src/runtime/tools.rs::dispatch_tool` shells out directly via `tokio::process::Command::new("sh")` with the full host environment and no filesystem, network, or syscall confinement. North star Bet #11a requires every tool execution to run inside a capability-scoped, disposable sandbox (Zerobox on Linux, Bubblewrap+Seccomp; Seatbelt on macOS) and `docs/input/security-architecture.md` §Layer 1 makes this mandatory. Current state is a direct violation of the Professional Bar criterion "rollback-capable or confirmation-gated" and of the invariant "agent-authored code runs in a Zerobox sandbox, not on the substrate host."
+
+2. **Tools have no declared capability class.** There is no `ReadLocal`/`WriteLocal`/`ExecuteLocal`/`Network`/`Destructive` classification, and the `agents.permission_mode` column (present in schema since v1) is never consulted. `yolo`, `supervised`, and `locked` modes are indistinguishable at runtime. This blocks north-star Bet #3 ("capability-scoped credentials beat ambient authority") from being enforceable at all.
+
+3. **Runtime status is raw strings, not a typed enum.** `src/models/agent.rs` still writes literal `'awake'`/`'asleep'`/`'maintenance'` in nine SQL sites (grep-verified). The TLA+ spec names `Resting`, `WakeAcquiring`, `Awake`, `WakeEnding`, `Maintenance` have never been reflected in the Rust type system, despite `preferences.md` "Enum states match the spec exactly." Carried forward as debt since v4. Every future spec transition rename silently succeeds in code until it doesn't.
+
+Secondary gap surfaced during v4/v5: the project has a medium-severity ignored advisory (`RUSTSEC-2023-0071`) carried on an explicit ignore list. The transitive path was already eliminated in v4 (sqlx features narrowed to Postgres only) but `deny.toml` still allows any vulnerability to pass — the gate is "no high/critical," not "no advisories." For a skyscraper-tier platform whose explicit purpose is executing code on behalf of agents, vulnerability floor is now zero.
+
+v6 is **security-foundation only** — no new runtime features, no API changes, no schema changes. Each AC is a small, independently-shippable slice designed to land as 1–2 commits each. The larger north-star work (mission primitive, credential vault + proxy, real Zerobox binding, signals primitive, reasoner routing by governance class, skill tree, pgvector/CozoDB memory, MCP outward, SaaS) is sequenced in Deferred below.
+
+**Re-sequencing notice.** v5's Deferred list tagged several operator-UX items (team-topology docs, upgrade runbook, first-run wizard, OCI publishing, real signup/login, multi-tenant RBAC, CLI auth subcommands) as "v6." The arrival of the north star makes the sovereign-substrate security trajectory the higher-leverage investment: tool confinement and capability enforcement unblock every downstream mission-primitive and vault work, whereas operator-UX polish compounds only after the substrate is safe to run. Those items are re-sequenced to v7–v9 below.
+
+### Changes from v5
+
+- New module `src/runtime/sandbox.rs` defining a `ToolExecutor` trait and a default `ProcessExecutor` implementation; `dispatch_tool` routes every shell invocation through the trait (no direct `Command::new` anywhere in `src/runtime/`).
+- Default `ProcessExecutor` profile tightens shell execution: temp-directory cwd per invocation, minimal env (`PATH` only — no `HOME`, no `SSH_AUTH_SOCK`, no `*_TOKEN`/`*_KEY`/`*_SECRET`), 30-second wall-clock timeout, stdin closed. Not a kernel sandbox; a real defense-in-depth baseline that Zerobox (v8) will supplant at the same trait seam.
+- New module `src/runtime/capability.rs` defining `ToolCapability` and `PermissionMode` enums + a static `required_capability(tool_name) -> ToolCapability` table. Pre-dispatch gate in `dispatch_tool` rejects forbidden calls and appends a `tool_capability_denied` event.
+- New Rust enum `AgentStatus` (`Resting`/`WakeAcquiring`/`Awake`/`WakeEnding`/`Maintenance`) in `src/models/agent.rs`. DB storage continues to use lowercase strings; a single boundary conversion (`AgentStatus::from_db_str` / `AgentStatus::as_db_str`) is the only place raw strings appear. All nine existing string-literal SQL sites keep the lowercase constants but source them from the enum's `as_db_str()` via `const` bindings — a future spec rename breaks compilation.
+- `deny.toml` vulnerability policy switched from "deny high/critical" to "deny any" with the ignore list emptied; CI `cargo deny check` now fails on any advisory regardless of severity.
+- No schema changes. No API shape changes. No new dependencies beyond internal refactor.
+
+### v6 Acceptance Criteria
+
+- **AC-34** (Typed `AgentStatus` aligned with TLA+): `src/models/agent.rs` exports a `pub enum AgentStatus { Resting, WakeAcquiring, Awake, WakeEnding, Maintenance }` with `#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]`. Helpers `AgentStatus::as_db_str(self) -> &'static str` and `AgentStatus::from_db_str(&str) -> Result<AgentStatus, InvalidStatus>` are the single conversion boundary. Variant-to-string mapping: `Resting → "asleep"`, `WakeAcquiring → "wake_acquiring"`, `Awake → "awake"`, `WakeEnding → "wake_ending"`, `Maintenance → "maintenance"` (two new DB values added to the CHECK constraint via migration `20260420000001_agent_status_states.sql`). Every SQL site that currently writes a literal `'asleep'`/`'awake'`/`'maintenance'` sources the string from a `const` bound to `AgentStatus::*.as_db_str()`. Verified by: (1) new unit test `tests/agent_status_test.rs` round-tripping every variant through `from_db_str`/`as_db_str`; (2) a `tests/no_raw_status_literals.rs` build-time test that greps `src/` for the regex `status\s*=\s*'(asleep|awake|maintenance|wake_acquiring|wake_ending)'` and asserts every match occurs inside a `const` declaration in `src/models/agent.rs`; (3) `cargo test --all-targets -- --test-threads=1` continues to pass.
+
+- **AC-35** (Tool capability classification + permission-mode gate): `src/runtime/capability.rs` defines `pub enum ToolCapability { ReadLocal, WriteLocal, ExecuteLocal, Network, Destructive }` and `pub enum PermissionMode { Yolo, Supervised, Locked }`. A static `required_capability(&str) -> ToolCapability` maps `shell → ExecuteLocal`, `plan → ReadLocal`, `sleep → ReadLocal`. A static `mode_allows(PermissionMode, ToolCapability) -> bool` implements the gate: `Yolo` permits all; `Supervised` denies `Destructive`; `Locked` permits only `ReadLocal`. `dispatch_tool` calls the gate before executing; on deny it appends an event `{ event_type: "tool_capability_denied", source: "runtime", tool_name, required_capability, permission_mode }` and returns `ToolResult::Error("tool disallowed by permission mode")` to the LLM without invoking the executor. Verified by: (1) table-driven unit test covering all 15 `(mode × capability)` combinations against the gate; (2) integration test `tests/capability_gate_test.rs` that creates a `Locked` agent, sends a message the LLM answers with a `shell` tool call (wiremock), asserts the event log contains one `tool_capability_denied` and zero `tool_result` events for that wake, and asserts no process was spawned (via a counting `ToolExecutor`).
+
+- **AC-36** (Shell executor behind a `ToolExecutor` trait with a hardened default profile): `src/runtime/sandbox.rs` defines `#[async_trait] pub trait ToolExecutor: Send + Sync { async fn run(&self, cmd: &ShellCommand, profile: &SandboxProfile) -> ExecResult; }` and ships a `ProcessExecutor` impl. `SandboxProfile` declares `{ cwd: PathBuf (tempdir per call), env_allowlist: Vec<String> (default: ["PATH"]), deny_net: bool (default true — advisory for v6, enforced in v8), timeout: Duration (default 30s) }`. `ProcessExecutor::run` creates a fresh tempdir, builds `tokio::process::Command` with `.env_clear()`, re-adds only the allowlisted vars from the host env, sets cwd, closes stdin, wraps in `tokio::time::timeout`, kills the child on timeout and returns `ExecResult::Timeout`. Rejects any command containing the substring `sudo ` or starting with `sudo`. `dispatch_tool` in `src/runtime/tools.rs` holds a `Arc<dyn ToolExecutor>` (injected at `AppState` construction) and routes every shell call through it — zero direct `Command::new` remains under `src/runtime/`. Verified by: (1) unit test asserting `ProcessExecutor` strips `HOME`/`SSH_AUTH_SOCK`/`MY_SECRET` from the child env (test sets them before `run`, asserts the child can't see them via `printenv`); (2) unit test asserting a `sleep 60` command against a 1-second timeout returns `ExecResult::Timeout` and the child process is no longer alive; (3) unit test asserting `sudo ls` is rejected before spawning; (4) a `tests/no_raw_command_new.rs` build-time test greps `src/runtime/` for `Command::new\(` and asserts the only match is the single call site inside `ProcessExecutor::run`.
+
+- **AC-37** (Zero-advisory vulnerability gate): `deny.toml` `[advisories]` section sets `vulnerability = "deny"`, `unmaintained = "warn"`, `yanked = "deny"`, and `ignore = []` (empty). No `RUSTSEC-*` ignores remain. CI `cargo deny check advisories` must pass with zero findings on a clean checkout. Verified by: (1) `cargo deny check advisories` exits 0 locally on the v6 commit; (2) `.github/workflows/ci.yml` job runs `cargo deny check` (already wired in v3 AC-16) and green-lights the v6 PR; (3) `tests/deny_config_test.rs` parses `deny.toml` via the `toml` crate and asserts `advisories.vulnerability == "deny"` and `advisories.ignore == []`.
+
+### v6 Deployment Target
+
+Same as v1–v5: `self_host_individual`. No deployment surface changes. An operator running v5 will see no behavior change for unsandboxed command paths that were already inside the documented threat model — but every `locked` agent now actually behaves differently from a `yolo` agent, and every shell invocation now runs in a tempdir with a stripped environment.
+
+### v6 Estimated Cost
+
+$0. All changes are internal refactors plus one migration adding two values to an existing CHECK constraint. No new runtime dependencies; no new infrastructure.
+
+### v6 Quality Tier
+
+Still skyscraper. v6 closes invariant-level gaps that skyscraper tier implies but v1–v5 carried as debt.
+
+### v6 Clarifications Needed
+
+None. Every AC has a concrete pass/fail test. The two new DB status values (`wake_acquiring`, `wake_ending`) are not yet written by any transition — they are reserved so that a future TLA+-faithful refactor of the CAS pipeline does not require a second migration. The `deny_net` flag on `SandboxProfile` is advisory in v6 and enforced by the Zerobox executor in v8.
+
+### v6 Deferred (explicit roadmap)
+
+North-star-driven roadmap in rough dependency order. Each version intentionally sized to 3–6 ACs so BUILD commits stay small.
+
+- **v7 — Credential vault + reasoner-secret refusal.** AES-256-GCM encrypted `credentials` table keyed by `(workspace_id, name)`; operator-only CRUD via `pcy credential {add,list,revoke}`; `list_credentials` returns names only. System prompt hardened to refuse pasted secrets and redirect to the vault. Tool-dispatch path receives a `PLACEHOLDER:<credential_name>` envelope instead of raw values. No proxy injection yet — just the vault storage and the placeholder handshake. (north-star Bet #3 first half; security-architecture Layer 2)
+- **v8 — Zerobox executor implementation.** Second `ToolExecutor` impl behind `--features zerobox`; `SANDBOX_BACKEND=zerobox` env selector; Bubblewrap+Seccomp on Linux, Seatbelt on macOS, stub error on Windows. `deny_net` enforced. Per-tool profile loaded from `src/runtime/tool_profiles.rs`. (security-architecture Layer 1)
+- **v9 — Proxy credential injection.** HTTP egress from Zerobox sandboxes routed through a proxy that substitutes `PLACEHOLDER:<name>` with real vault values for pre-approved hosts. Closes the "agent never touches real secret" invariant. (north-star Bet #3 second half)
+- **v10 — Mission primitive.** New `missions` table (`id`, `agent_id`, `accountable_user_id`, `charter`, `capability_scope JSONB`, `budget_usd`, `budget_wall_clock_seconds`, `acceptance_contract JSONB`, `status`, `started_at`, `completed_at`). `POST /api/agents/:id/missions`; wake loop consumes the active mission's capability scope as an additional gate on top of `permission_mode`. (north-star Bet #4)
+- **v11 — Signals primitive.** Generic agent↔human signal records with direction, free-form tag, payload, response expectation. `pcy signals` inbox command; UI signals panel. Escalation is convention built on signals, not a substrate enum. (north-star Bet #5a)
+- **v12 — Reasoner routing by governance class.** `ReasonerRole` + `GovernanceClass` enums; catalog-level `(role, class) → (provider, model)` map; mission acceptance contract declares minimum governance class; runtime refuses to pick a reasoner below that class. (north-star Bet #10)
+- **v13 — pgvector L1/L4 memory.** `pgvector` extension added; projections and wake summaries embedded; memory controller API abstracts layer traversal. (north-star Bet #2 v7-ish target, re-sequenced after mission primitive lands)
+- **v14 — Pincer skill tree (L3 memory).** Auto-crystallized execution paths tied to capability dependencies; per-pincer-scope skill library. (north-star Bet #6a)
+- **v15 — MCP outward.** Expose `src/runtime/tools.rs` over MCP server protocol; agent-grantable MCP tool discovery. (north-star Bet #9, Boundary #1)
+- **v16 — Greywall host sandbox + first tagged release.** `greywall -- ./open-pincery serve` as the documented launch path; `v1.0.0` cosign-verified release. (security-architecture Layer 4 + v3 AC-20 exercise)
+- **v17+ — SaaS productization.** Real signup/login, multi-tenant RBAC enforcement, per-workspace rate limits, account suspension, billing, abuse prevention, ToS/Privacy. (north-star Non-Goal #4 until the substrate is proven; deferred from v5)
+- **Operator-UX polish (re-sequenced from v5 Deferred).** Bootstrap token rotation/expiry, `self_host_team` topology, upgrade runbook, backup encryption, local-admin lockout recovery + MFA, UI first-run wizard, machine-readable `AGENTS.md`, published OCI images — folded into whichever above slice naturally carries them. Not its own version; each item lands when its dependency lands.
+- **TLA+ transition refactor (use new status values).** The two reserved status values `wake_acquiring` / `wake_ending` added by AC-34 get populated when the CAS pipeline is split to match the TLA+ transition graph exactly. Tracked, unscheduled — likely pairs with v10 mission primitive since missions induce a natural refactor of the wake pipeline.
+- **OpenClaw integration.** Complement per north-star Boundaries; shape TBD once OpenClaw publishes a stable surface.
+- **CozoDB embedded graph substrate.** Target north-star Bet #2 "v10-ish" — added when a Tier 1 mission's acceptance contract requires a query Postgres recursive CTEs cannot answer cleanly.
+
+### v6 Dependencies on Prior Versions
+
+None broken. All v1–v5 ACs remain satisfied. AC-34 adds two unused enum values to the status CHECK constraint; no existing row is affected. AC-35 and AC-36 are strictly more restrictive than v5 behavior, but the default permission mode remains `yolo`, so unsandboxed v5 behavior is the default shape — operators opt into `supervised` or `locked` per agent.
+
