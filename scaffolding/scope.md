@@ -411,4 +411,3 @@ North-star-driven roadmap in rough dependency order. Each version intentionally 
 ### v6 Dependencies on Prior Versions
 
 None broken. All v1–v5 ACs remain satisfied. AC-34 adds two unused enum values to the status CHECK constraint; no existing row is affected. AC-35 and AC-36 are strictly more restrictive than v5 behavior, but the default permission mode remains `yolo`, so unsandboxed v5 behavior is the default shape — operators opt into `supervised` or `locked` per agent.
-

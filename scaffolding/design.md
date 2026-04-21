@@ -1291,11 +1291,11 @@ pub fn mode_allows(mode: PermissionMode, cap: ToolCapability) -> bool {
 
 Gate table (15 cells; every row covered by unit test):
 
-| mode \ cap  | ReadLocal | WriteLocal | ExecuteLocal | Network | Destructive |
-| ----------- | :-------: | :--------: | :----------: | :-----: | :---------: |
-| Yolo        |     ✓     |     ✓      |      ✓       |    ✓    |      ✓      |
-| Supervised  |     ✓     |     ✓      |      ✓       |    ✓    |      ✗      |
-| Locked      |     ✓     |     ✗      |      ✗       |    ✗    |      ✗      |
+| mode \ cap | ReadLocal | WriteLocal | ExecuteLocal | Network | Destructive |
+| ---------- | :-------: | :--------: | :----------: | :-----: | :---------: |
+| Yolo       |     ✓     |     ✓      |      ✓       |    ✓    |      ✓      |
+| Supervised |     ✓     |     ✓      |      ✓       |    ✓    |      ✗      |
+| Locked     |     ✓     |     ✗      |      ✗       |    ✗    |      ✗      |
 
 Denied dispatch appends event `{event_type:"tool_capability_denied", source:"runtime", tool_name, content JSON {required_capability, permission_mode}}` and returns `ToolResult::Error("tool disallowed by permission mode")` without invoking the executor.
 
@@ -1329,6 +1329,7 @@ impl Default for ProcessExecutor { /* zero-field */ }
 ```
 
 `ProcessExecutor::run` behavior:
+
 1. Tokenise `cmd.command` on shell word-boundaries (whitespace, `;`, `&`, `|`, `(`, `)`, backtick, `$(`, quotes) and reject if any token equals `sudo` → `ExecResult::Rejected("sudo is not permitted")` (no process spawned). Catches prefix, bare, and chained forms (`echo ok && sudo …`); does NOT attempt to catch absolute-path escalation (`/usr/bin/sudo`) — that is defense-in-depth territory owned by env_clear + tempdir + timeout.
 2. Create a fresh tempdir via `tempfile::tempdir()`; on failure → `ExecResult::Err`.
 3. Build `tokio::process::Command::new("sh")`, `.arg("-c").arg(&cmd.command)`, `.current_dir(tempdir_path)`, `.env_clear()`, then re-add only the allowlisted vars from the host environment (`for k in &profile.env_allowlist { if let Ok(v) = std::env::var(k) { cmd.env(k, v); } }`), `.stdin(Stdio::null())`.
@@ -1394,15 +1395,15 @@ None added. `ProcessExecutor` is a local-only executor; the only external call r
 
 ### Test Strategy
 
-| AC    | Test file                         | Kind           | Notes                                                                                                                                       |
-| ----- | --------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| AC-34 | `tests/agent_status_test.rs`      | Unit           | Round-trip all 5 variants through `from_db_str` / `as_db_str`; `from_db_str("bogus")` → Err                                                 |
-| AC-34 | `tests/no_raw_status_literals.rs` | Static / grep  | Reads `src/**/*.rs` at test time, regex over `status\s*(=|IN)\s*['\(]`; allowlists the constant-definition block in `src/models/agent.rs`    |
-| AC-35 | `tests/capability_gate_test.rs`   | Unit + integ   | Table-driven: 15 `(mode, cap)` rows against `mode_allows`; integration creates a `Locked` agent, wakes via wiremock-served `shell` tool call, asserts one `tool_capability_denied` event + zero `tool_result` + a `CountingExecutor::spawns() == 0` |
-| AC-36 | `tests/sandbox_test.rs`           | Unit           | (a) set `HOME=/tmp/fake`, `MY_SECRET=leak`; run `printenv` via `ProcessExecutor` with allowlist `["PATH"]`; assert neither name appears in stdout. (b) `sleep 60` with `timeout = 1s` → `ExecResult::Timeout`. (c) `sudo`-prefixed, (d) bare `sudo`, (e) chained `echo ok && sudo …` — all `ExecResult::Rejected` without spawn (probe file absent). (f) Ok path reports stdout + exit code. Six tests total. |
-| AC-36 | `tests/no_raw_command_new.rs`     | Static / grep  | Regex `Command::new\(` across `src/runtime/**` — exactly one match, inside `sandbox.rs`                                                     |
-| AC-37 | `tests/deny_config_test.rs`       | Unit           | Parse `deny.toml`; assert `[advisories].vulnerability == "deny"` and `ignore == []`                                                         |
-| AC-37 | CI `cargo deny check advisories`  | CI gate        | Already wired by v3 AC-16; must exit 0 on v6 HEAD                                                                                           |
+| AC    | Test file                         | Kind          | Notes                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ----- | --------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| AC-34 | `tests/agent_status_test.rs`      | Unit          | Round-trip all 5 variants through `from_db_str` / `as_db_str`; `from_db_str("bogus")` → Err                                                                                                                                                                                                                                                                                                                   |
+| AC-34 | `tests/no_raw_status_literals.rs` | Static / grep | Reads `src/**/*.rs` at test time, regex over `status\s\*(=                                                                                                                                                                                                                                                                                                                                                    | IN)\s\*['\(]`; allowlists the constant-definition block in `src/models/agent.rs` |
+| AC-35 | `tests/capability_gate_test.rs`   | Unit + integ  | Table-driven: 15 `(mode, cap)` rows against `mode_allows`; integration creates a `Locked` agent, wakes via wiremock-served `shell` tool call, asserts one `tool_capability_denied` event + zero `tool_result` + a `CountingExecutor::spawns() == 0`                                                                                                                                                           |
+| AC-36 | `tests/sandbox_test.rs`           | Unit          | (a) set `HOME=/tmp/fake`, `MY_SECRET=leak`; run `printenv` via `ProcessExecutor` with allowlist `["PATH"]`; assert neither name appears in stdout. (b) `sleep 60` with `timeout = 1s` → `ExecResult::Timeout`. (c) `sudo`-prefixed, (d) bare `sudo`, (e) chained `echo ok && sudo …` — all `ExecResult::Rejected` without spawn (probe file absent). (f) Ok path reports stdout + exit code. Six tests total. |
+| AC-36 | `tests/no_raw_command_new.rs`     | Static / grep | Regex `Command::new\(` across `src/runtime/**` — exactly one match, inside `sandbox.rs`                                                                                                                                                                                                                                                                                                                       |
+| AC-37 | `tests/deny_config_test.rs`       | Unit          | Parse `deny.toml`; assert `[advisories].vulnerability == "deny"` and `ignore == []`                                                                                                                                                                                                                                                                                                                           |
+| AC-37 | CI `cargo deny check advisories`  | CI gate       | Already wired by v3 AC-16; must exit 0 on v6 HEAD                                                                                                                                                                                                                                                                                                                                                             |
 
 ### Observability
 
@@ -1411,6 +1412,7 @@ No new metrics. The existing `open_pincery_tool_call_total{tool}` counter is unc
 ### Complexity Exceptions
 
 None. Every new file stays under 200 lines:
+
 - `src/runtime/capability.rs` ≈ 70 lines (two enums + two const tables).
 - `src/runtime/sandbox.rs` ≈ 130 lines (trait, types, `ProcessExecutor` with 5-step run).
 - Migration ≈ 20 lines.

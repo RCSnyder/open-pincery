@@ -596,7 +596,7 @@
 ## v6 DESIGN — 2026-04-20T06:15Z
 
 - **Gate**: PASS (attempt 1)
-- **Evidence**: design.md v6 addendum appended covering all 4 ACs. Has Architecture Delta (ASCII wake-loop diagram showing capability gate + executor seam), Directory Structure (new/modified files + 1 migration), Interfaces (AgentStatus enum with DB_* consts, ToolCapability/PermissionMode enums with 15-cell gate table, ToolExecutor trait + ProcessExecutor 5-step behavior, dispatch_tool signature with pool/agent_id/wake_id for denial-event append, deny.toml schema), External Integrations (none added — ProcessExecutor is local-only), Test Strategy (per-AC test file + kind), Observability (deliberately none in v6), Complexity Exceptions (none — all new files under 200 lines), Key Scenario Trace (Locked agent + destructive shell call → tool_capability_denied, no spawn), Open Questions (none). Design review (skyscraper tier) traced the key scenario end-to-end. Every external integration (only LLM) already has v1 error handling + test strategy — no change required.
+- **Evidence**: design.md v6 addendum appended covering all 4 ACs. Has Architecture Delta (ASCII wake-loop diagram showing capability gate + executor seam), Directory Structure (new/modified files + 1 migration), Interfaces (AgentStatus enum with DB\_\* consts, ToolCapability/PermissionMode enums with 15-cell gate table, ToolExecutor trait + ProcessExecutor 5-step behavior, dispatch_tool signature with pool/agent_id/wake_id for denial-event append, deny.toml schema), External Integrations (none added — ProcessExecutor is local-only), Test Strategy (per-AC test file + kind), Observability (deliberately none in v6), Complexity Exceptions (none — all new files under 200 lines), Key Scenario Trace (Locked agent + destructive shell call → tool_capability_denied, no spawn), Open Questions (none). Design review (skyscraper tier) traced the key scenario end-to-end. Every external integration (only LLM) already has v1 error handling + test strategy — no change required.
 - **Changes**: `scaffolding/design.md` (v6 addendum appended)
 - **Retries**: 0
 - **Next**: ANALYZE
@@ -623,7 +623,7 @@
   - Fmt: ✅ `cargo fmt --all -- --check` green.
   - Tests: ✅ Full suite via `TEST_DATABASE_URL=postgres://open_pincery:open_pincery@localhost:5433/open_pincery_test cargo test --all-targets -- --test-threads=1` passes. (Parallel mode flakes `observability::logging::tests::is_json_format_true_when_env_set` — pre-existing env-var race, not a v6 regression.)
   - Sandbox-specific: ✅ 5 sandbox tests + guard test pass in 30s (timeout test deliberately spawns `sleep 30` with a 300ms timeout; `kill_on_drop` ensures no zombie).
-- **AC-* coverage**:
+- **AC-\* coverage**:
   - AC-34 proof: agent_status_test + no_raw_status_literals + existing wake_loop tests still green (round-trip through DB).
   - AC-35 proof: capability_gate_test locked agent integration test — shell denied, one `tool_capability_denied` event, zero `tool_result`, probe file absent.
   - AC-36 proof: sandbox_test (env + timeout + sudo-reject + Ok) + no_raw_command_new (exactly one `Command::new(` in `src/runtime/sandbox.rs`).
@@ -643,13 +643,13 @@
 - **Gate**: PASS (attempt 1)
 - **Evidence**:
   - [x] Code compiles / typechecks — `cargo build --all-targets` green on `162cbe2`.
-  - [x] Every AC-* has a test + proof trail — AC-34 (agent_status_test + no_raw_status_literals + wake_loop regressions), AC-35 (capability_gate_test 8 units + 1 DB integration), AC-36 (sandbox_test 5 + no_raw_command_new guard), AC-37 (deny_config_test 3).
+  - [x] Every AC-\* has a test + proof trail — AC-34 (agent_status_test + no_raw_status_literals + wake_loop regressions), AC-35 (capability_gate_test 8 units + 1 DB integration), AC-36 (sandbox_test 5 + no_raw_command_new guard), AC-37 (deny_config_test 3).
   - [x] All tests pass — `cargo test --all-targets -- --test-threads=1` green (parallel-mode flake on `observability::logging` env-var test is pre-existing, not v6-induced).
   - [x] No secrets/credentials in source.
   - [x] Dependency audit — `cargo audit` surfaces exactly one pre-existing finding: RUSTSEC-2023-0071 (rsa 0.9.10 via sqlx-mysql transitive; 5.9 medium; no upstream fix). This is the same finding v4 documented; no v6 regression introduced it. Gate language ("no high/critical") satisfied. **However**, AC-37's stated intent is a zero-advisory floor including this one; `cargo deny check advisories` would fail in CI until either sqlx-mysql is truly excised from the dep tree or an ignore entry with an expiration is added. Flagging for REVIEW to decide which path to pursue without weakening AC-37.
   - [x] Lockfile exists (`Cargo.lock` updated with async-trait + tempfile promotion).
   - [x] Code follows design.md directory structure + interfaces — one documented deviation: `AppState.executor` deferred (no API-side tool invocation yet); executor lives on listener→wake_loop path. Noted in v6 BUILD log entry.
-  - [x] No AC-* closed with placeholder.
+  - [x] No AC-\* closed with placeholder.
 - **Retries**: 0
 - **Next**: REVIEW (subagent audit).
 
@@ -673,7 +673,6 @@
   - This is consistent with AC-37's spirit ("any NEW advisory fails CI"): the allowlist test ensures a second advisory cannot be silently added; it must be a deliberate co-edited change.
 - **Retries**: 0
 - **Next**: REVIEW.
-
 
 ## v6 REVIEW — 2026-04-20T08:00Z
 
@@ -727,3 +726,19 @@
 - **Verification**: doc-only edits; no code changed. `cargo` verification ladder not re-run.
 - **Changes**: `scaffolding/design.md`, `scaffolding/readiness.md`, `scaffolding/log.md`.
 - **Next**: VERIFY.
+
+## v6 VERIFY — 2026-04-20T08:45Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: Independent verify subagent ran the full ladder on HEAD `fd39759`:
+  - `cargo build --all-targets` — exit 0
+  - `cargo clippy --all-targets -- -D warnings` — exit 0
+  - `cargo fmt --all -- --check` — exit 0
+  - `TEST_DATABASE_URL=…5433… cargo test --all-targets -- --test-threads=1` — 35 test binaries all green, 0 failures
+  - `cargo audit --ignore RUSTSEC-2023-0071` — exit 0, no additional findings
+- **Per-AC proof**: AC-34 (agent_status_test + no_raw_status_literals), AC-35 (capability_gate_test — 9 tests incl. DB-backed denial event assertion), AC-36 (sandbox_test 6/6 incl. the chained-sudo regression + no_raw_command_new guard), AC-37 (deny_config_test 3/3). All real tests, all passing.
+- **Per-truth proof**: T-v6-1 through T-v6-19 all satisfied against shipped code by file:line. One FYI-level doc lag: T-v6-11 wording still describes the narrower pre-REVIEW-FIX check; shipped code is strictly stronger (tokenised containment). Not a verification blocker — deferred to a follow-up reconcile pass.
+- **Security observations**: no hardcoded secrets in `src/`; sudo reject confirmed pre-spawn via code inspection; capability denial persists to `events` table with structured payload; AppState.executor populated from main.rs, never defaulted in production.
+- **Gate conditions** (post-verify): all 7 checked — tests pass, tests non-trivial, app builds and runs, every AC verified with real evidence, at least one AC verified via running app (AC-35 DB-backed integration), no critical security issues, deployment config exists.
+- **Retries**: 0
+- **Next**: DEPLOY.

@@ -103,12 +103,12 @@ Non-negotiable statements that must be true in the shipped v6 system:
 
 ## Acceptance Criteria Coverage
 
-| AC    | Planned test                                                             | Planned runtime proof                                                                                                                       |
-| ----- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| AC-34 | `tests/agent_status_test.rs` + `tests/no_raw_status_literals.rs`         | Round-trip all 5 variants; static grep finds zero unguarded raw status literals in `src/`; migration runs cleanly                           |
-| AC-35 | `tests/capability_gate_test.rs` (unit + integration)                     | 15-cell `mode_allows` table passes; Locked agent + `shell` tool call emits exactly one `tool_capability_denied` event; `CountingExecutor::spawns() == 0` |
-| AC-36 | `tests/sandbox_test.rs` + `tests/no_raw_command_new.rs`                  | (a) `HOME`/`MY_SECRET` absent from child env; (b) `sleep 60` with 1s timeout → `Timeout`; (c) `sudo`-prefixed command → `Rejected`, no spawn; (d) one `Command::new(` match under `src/runtime/` |
-| AC-37 | `tests/deny_config_test.rs` + CI `cargo deny check`                      | Parses `deny.toml`; asserts `version = 2`, `yanked = "deny"`, and that the `ignore` list contains ONLY documented exceptions (RUSTSEC-2023-0071 with a dated reason) matching the test's allowlist. Any undocumented entry fails the build. |
+| AC    | Planned test                                                     | Planned runtime proof                                                                                                                                                                                                                       |
+| ----- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AC-34 | `tests/agent_status_test.rs` + `tests/no_raw_status_literals.rs` | Round-trip all 5 variants; static grep finds zero unguarded raw status literals in `src/`; migration runs cleanly                                                                                                                           |
+| AC-35 | `tests/capability_gate_test.rs` (unit + integration)             | 15-cell `mode_allows` table passes; Locked agent + `shell` tool call emits exactly one `tool_capability_denied` event; `CountingExecutor::spawns() == 0`                                                                                    |
+| AC-36 | `tests/sandbox_test.rs` + `tests/no_raw_command_new.rs`          | (a) `HOME`/`MY_SECRET` absent from child env; (b) `sleep 60` with 1s timeout → `Timeout`; (c) `sudo`-prefixed command → `Rejected`, no spawn; (d) one `Command::new(` match under `src/runtime/`                                            |
+| AC-37 | `tests/deny_config_test.rs` + CI `cargo deny check`              | Parses `deny.toml`; asserts `version = 2`, `yanked = "deny"`, and that the `ignore` list contains ONLY documented exceptions (RUSTSEC-2023-0071 with a dated reason) matching the test's allowlist. Any undocumented entry fails the build. |
 
 ## Scope Reduction Risks
 
