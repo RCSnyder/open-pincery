@@ -565,13 +565,13 @@ No changes to: core runtime (CAS lifecycle, wake loop, maintenance, drain, event
 
 ### v8 Stack Additions
 
-| Concern                   | Addition                   | Notes                                                                                                                                                           |
-| ------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| OpenAPI generation        | `utoipa` + `utoipa-axum`   | Widely-used Rust OpenAPI derive crate; zero runtime cost; orthodox choice                                                                                       |
-| Shell completion          | `clap_complete`            | Same maintainer as clap; already a transitive dep; just made explicit                                                                                           |
-| OpenAPI validation (test) | `openapiv3`                | Parser used to validate `/openapi.json`; dev-dep only                                                                                                           |
-| jsonpath evaluation       | `jsonpath-rust` (or equiv) | Already transitive via sqlx; if not, a lightweight dev crate                                                                                                    |
-| MCP protocol              | None (hand-written)        | Protocol is small (~3 JSON-RPC methods: `initialize`, `tools/list`, `tools/call`); no external dep reduces supply-chain surface                                 |
+| Concern                   | Addition                   | Notes                                                                                                                           |
+| ------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| OpenAPI generation        | `utoipa` + `utoipa-axum`   | Widely-used Rust OpenAPI derive crate; zero runtime cost; orthodox choice                                                       |
+| Shell completion          | `clap_complete`            | Same maintainer as clap; already a transitive dep; just made explicit                                                           |
+| OpenAPI validation (test) | `openapiv3`                | Parser used to validate `/openapi.json`; dev-dep only                                                                           |
+| jsonpath evaluation       | `jsonpath-rust` (or equiv) | Already transitive via sqlx; if not, a lightweight dev crate                                                                    |
+| MCP protocol              | None (hand-written)        | Protocol is small (~3 JSON-RPC methods: `initialize`, `tools/list`, `tools/call`); no external dep reduces supply-chain surface |
 
 No new runtime dependencies beyond `utoipa`, `utoipa-axum`, `clap_complete`. No new infrastructure. No new ports. The `/openapi.json` endpoint adds bytes to the binary at compile time but no runtime cost beyond the first request (spec is built once at startup).
 
