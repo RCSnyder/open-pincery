@@ -609,3 +609,32 @@
 - **Retries**: 0
 - **Next**: BUILD Slice 1 (AC-37 deny.toml)
 
+## v6 BUILD — 2026-04-20T07:00Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: All 4 v6 slices implemented and committed as independent commits on `v6-01_implementation`. Each slice compiles + tests + clippy + fmt clean before commit.
+  - **Slice 1 — AC-37 deny.toml** (`f872f53`): `[advisories]` now `version = 2`, `yanked = "deny"`, `ignore = []`. The `vulnerability` key was dropped (cargo-deny v2 implicitly denies vulnerabilities — omitting it IS the "always deny" contract). `tests/deny_config_test.rs` pins the schema (3 tests). T-v6-17 in readiness.md corrected to match the v2 schema.
+  - **Slice 2 — AC-34 AgentStatus** (`9167dc5`): `pub enum AgentStatus { Resting, WakeAcquiring, Awake, WakeEnding, Maintenance }` at top of `src/models/agent.rs` with `DB_*` consts + `as_db_str` (const fn) + `from_db_str`. All 11 raw SQL status literals across 6 CAS functions (`acquire_wake`, `transition_to_maintenance`, `release_to_asleep`, `drain_reacquire`, `find_stale_agents`, `force_release`) rewritten via `format!` with `AgentStatus::DB_*`. Migration `20260420000001_agent_status_states.sql` widens the CHECK to include `wake_acquiring` + `wake_ending`. `tests/agent_status_test.rs` covers round-trip + TLA-name pin + unknown→None + as_db_str const-ness. `tests/no_raw_status_literals.rs` is a recursive-src-scan guard against literal relapse.
+  - **Slice 3 — AC-35 capability gate** (`e72454b`): `src/runtime/capability.rs` new module with `ToolCapability` (5 variants), `PermissionMode` (3 variants, `from_db_str` fail-closed to Locked), `required_for` (closed-by-default: unknown → Destructive), and `mode_allows` const covering all 15 cells. `dispatch_tool` extended to `(tool_call, mode, pool, agent_id, wake_id)`. Gate runs BEFORE any side effect; denial emits `tool_capability_denied` event (source="runtime", tool_name, tool_input=JSON `{required_capability, permission_mode}`) and returns `ToolResult::Error("tool disallowed by permission mode")`. `wake_loop.rs` reads `current.permission_mode` each iteration (live policy). `tests/capability_gate_test.rs`: 8 unit tests + 1 DB-backed integration test proving a Locked agent's shell call is denied, audited, and never spawns.
+  - **Slice 4 — AC-36 ToolExecutor + ProcessExecutor** (this commit): `src/runtime/sandbox.rs` new module with `ToolExecutor` trait (`async-trait 0.1` added to deps; required for dyn-dispatched async fn), `ShellCommand`, `SandboxProfile` (default: `env_allowlist = ["PATH"]`, `deny_net = true`, `timeout = 30s`, `cwd = None`), `ExecResult { Ok { stdout, stderr, exit_code } | Timeout | Rejected | Err }`, and `ProcessExecutor` — the ONLY child-process spawn site in `src/runtime/`. `ProcessExecutor::run` does: (1) reject `sudo`-prefixed commands BEFORE spawn; (2) create a fresh tempdir per call if `cwd` is None; (3) `Command::new("sh").env_clear()` then copy only allowlisted vars; (4) `kill_on_drop(true)` so a dropped Child is reaped; (5) `tokio::time::timeout` around `wait_with_output`. `dispatch_tool`, `run_wake_loop`, `handle_wake`, `start_listener` all take `Arc<dyn ToolExecutor>` (or a borrow). `main.rs` constructs `Arc::new(ProcessExecutor)` once and passes it through the listener spawn. `execute_shell` in `tools.rs` is now a thin map from `ExecResult` to `ToolResult`. **AppState deviation from readiness.md**: `AppState.executor` was not added because no API route currently invokes tools — the executor is threaded via the listener→wake_loop path, which is the only live invocation site. Adding it to AppState is deferred to the first iteration that introduces an API-driven tool call. `tests/sandbox_test.rs`: 5 tests (env scrub, timeout fires fast, sudo rejected pre-spawn + no probe file, bare `sudo` rejected, Ok reports stdout+exit). `tests/no_raw_command_new.rs`: guard — exactly one `Command::new(` occurrence under `src/runtime/`, inside `sandbox.rs`.
+- **Verification ladder**:
+  - Compiles: ✅ `cargo build --all-targets` green.
+  - Clippy: ✅ `cargo clippy --all-targets -- -D warnings` green.
+  - Fmt: ✅ `cargo fmt --all -- --check` green.
+  - Tests: ✅ Full suite via `TEST_DATABASE_URL=postgres://open_pincery:open_pincery@localhost:5433/open_pincery_test cargo test --all-targets -- --test-threads=1` passes. (Parallel mode flakes `observability::logging::tests::is_json_format_true_when_env_set` — pre-existing env-var race, not a v6 regression.)
+  - Sandbox-specific: ✅ 5 sandbox tests + guard test pass in 30s (timeout test deliberately spawns `sleep 30` with a 300ms timeout; `kill_on_drop` ensures no zombie).
+- **AC-* coverage**:
+  - AC-34 proof: agent_status_test + no_raw_status_literals + existing wake_loop tests still green (round-trip through DB).
+  - AC-35 proof: capability_gate_test locked agent integration test — shell denied, one `tool_capability_denied` event, zero `tool_result`, probe file absent.
+  - AC-36 proof: sandbox_test (env + timeout + sudo-reject + Ok) + no_raw_command_new (exactly one `Command::new(` in `src/runtime/sandbox.rs`).
+  - AC-37 proof: deny_config_test pins `version = 2`, `yanked = "deny"`, `ignore = []`.
+- **Changes**:
+  - `deny.toml` (Slice 1)
+  - `src/models/agent.rs`, `migrations/20260420000001_agent_status_states.sql` (Slice 2)
+  - `src/runtime/mod.rs`, `src/runtime/capability.rs`, `src/runtime/tools.rs`, `src/runtime/wake_loop.rs` (Slice 3)
+  - `Cargo.toml` (adds `async-trait = "0.1"`, promotes `tempfile` to runtime dep), `src/runtime/sandbox.rs`, `src/runtime/tools.rs`, `src/runtime/wake_loop.rs`, `src/background/listener.rs`, `src/main.rs` (Slice 4)
+  - `tests/deny_config_test.rs`, `tests/agent_status_test.rs`, `tests/no_raw_status_literals.rs`, `tests/capability_gate_test.rs`, `tests/sandbox_test.rs`, `tests/no_raw_command_new.rs` (new)
+  - `tests/budget_test.rs`, `tests/wake_loop_test.rs` updated for new `start_listener` / `run_wake_loop` signatures (add executor arg).
+- **Retries**: 0
+- **Next**: REVIEW (subagent audit of v6 BUILD slices).
+

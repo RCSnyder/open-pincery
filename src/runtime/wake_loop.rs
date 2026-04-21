@@ -1,4 +1,5 @@
 use sqlx::PgPool;
+use std::sync::Arc;
 use std::time::Instant;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -6,6 +7,7 @@ use uuid::Uuid;
 use super::capability::PermissionMode;
 use super::llm::{ChatMessage, LlmClient};
 use super::prompt;
+use super::sandbox::ToolExecutor;
 use super::tools::{self, ToolResult};
 use crate::config::Config;
 use crate::error::AppError;
@@ -42,6 +44,7 @@ pub async fn run_wake_loop(
     config: &Config,
     agent_id: Uuid,
     wake_id: Uuid,
+    executor: &Arc<dyn ToolExecutor>,
 ) -> Result<String, AppError> {
     info!(agent_id = %agent_id, wake_id = %wake_id, "Starting wake loop");
     metrics::counter!(m::WAKE_STARTED).increment(1);
@@ -178,7 +181,8 @@ pub async fn run_wake_loop(
                 // as read this tick so an operator mid-wake lockdown takes
                 // effect on the next call).
                 let mode = PermissionMode::from_db_str(&current.permission_mode);
-                let result = tools::dispatch_tool(tc, mode, pool, agent_id, wake_id).await;
+                let result =
+                    tools::dispatch_tool(tc, mode, pool, agent_id, wake_id, executor).await;
 
                 match result {
                     ToolResult::Sleep => {

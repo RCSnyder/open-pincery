@@ -56,6 +56,12 @@ async fn main() {
     let config = Arc::new(config);
     let shutdown = CancellationToken::new();
 
+    // AC-36: single ProcessExecutor instance shared by all wake loops.
+    // This is the ONLY place the runtime's child-process executor is
+    // constructed; everything else receives `Arc<dyn ToolExecutor>`.
+    let executor: Arc<dyn runtime::sandbox::ToolExecutor> =
+        Arc::new(runtime::sandbox::ProcessExecutor);
+
     // Build API (holds the per-task alive flags used by /ready).
     let state = api::AppState::new(pool.clone(), (*config).clone());
 
@@ -97,11 +103,19 @@ async fn main() {
     let bg_pool = pool.clone();
     let bg_config = config.clone();
     let bg_llm = llm.clone();
+    let bg_executor = executor.clone();
     let bg_shutdown = shutdown.clone();
     let bg_alive = state.listener_alive.clone();
     let listener_handle = tokio::spawn(async move {
-        background::listener::start_listener(bg_pool, bg_config, bg_llm, bg_shutdown, bg_alive)
-            .await;
+        background::listener::start_listener(
+            bg_pool,
+            bg_config,
+            bg_llm,
+            bg_executor,
+            bg_shutdown,
+            bg_alive,
+        )
+        .await;
     });
 
     let stale_pool = pool.clone();

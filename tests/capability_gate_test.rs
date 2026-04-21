@@ -21,7 +21,9 @@ use open_pincery::runtime::capability::{
     mode_allows, required_for, PermissionMode, ToolCapability,
 };
 use open_pincery::runtime::llm::{FunctionCall, ToolCallRequest};
+use open_pincery::runtime::sandbox::{ProcessExecutor, ToolExecutor};
 use open_pincery::runtime::tools::{self, ToolResult};
+use std::sync::Arc;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------
@@ -204,8 +206,16 @@ async fn locked_agent_shell_call_is_denied_and_audited() {
         },
     };
 
-    let result =
-        tools::dispatch_tool(&tc, PermissionMode::Locked, &pool, agent_row.id, wake_id).await;
+    let executor: Arc<dyn ToolExecutor> = Arc::new(ProcessExecutor);
+    let result = tools::dispatch_tool(
+        &tc,
+        PermissionMode::Locked,
+        &pool,
+        agent_row.id,
+        wake_id,
+        &executor,
+    )
+    .await;
 
     match result {
         ToolResult::Error(msg) => {

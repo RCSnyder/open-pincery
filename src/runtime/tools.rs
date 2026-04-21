@@ -1,11 +1,13 @@
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::PgPool;
+use std::sync::Arc;
 use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::capability::{self, PermissionMode};
 use super::llm::{FunctionDef, ToolCallRequest, ToolDefinition};
+use super::sandbox::{ExecResult, SandboxProfile, ShellCommand, ToolExecutor};
 use crate::error::AppError;
 use crate::models::event;
 use crate::observability::metrics as m;
@@ -83,6 +85,7 @@ pub async fn dispatch_tool(
     pool: &PgPool,
     agent_id: Uuid,
     wake_id: Uuid,
+    executor: &Arc<dyn ToolExecutor>,
 ) -> ToolResult {
     let name = &tool_call.function.name;
     let args = &tool_call.function.arguments;
@@ -120,7 +123,7 @@ pub async fn dispatch_tool(
                 Err(e) => return ToolResult::Error(format!("Invalid shell args: {e}")),
             };
             info!(command = %parsed.command, "Executing shell tool");
-            execute_shell(&parsed.command).await
+            execute_shell(executor, &parsed.command).await
         }
         "plan" => {
             let parsed: PlanArgs = match serde_json::from_str(args) {
@@ -161,22 +164,26 @@ async fn append_denied_event(
     Ok(())
 }
 
-async fn execute_shell(command: &str) -> ToolResult {
-    use tokio::process::Command;
+async fn execute_shell(executor: &Arc<dyn ToolExecutor>, command: &str) -> ToolResult {
+    let result = executor
+        .run(
+            &ShellCommand {
+                command: command.to_string(),
+            },
+            &SandboxProfile::default(),
+        )
+        .await;
 
-    let output = Command::new("sh").arg("-c").arg(command).output().await;
-
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
+    match result {
+        ExecResult::Ok {
+            stdout,
+            stderr,
+            exit_code,
+        } => {
             let combined = format!(
                 "exit_code: {}\nstdout:\n{}\nstderr:\n{}",
-                out.status.code().unwrap_or(-1),
-                stdout,
-                stderr
+                exit_code, stdout, stderr
             );
-            // Truncate to prevent massive outputs
             let truncated = if combined.len() > 50000 {
                 let mut boundary = 50000;
                 while boundary > 0 && !combined.is_char_boundary(boundary) {
@@ -188,6 +195,10 @@ async fn execute_shell(command: &str) -> ToolResult {
             };
             ToolResult::Output(truncated)
         }
-        Err(e) => ToolResult::Error(format!("Shell execution failed: {e}")),
+        ExecResult::Timeout => ToolResult::Error("Shell execution timed out".into()),
+        ExecResult::Rejected(reason) => {
+            ToolResult::Error(format!("Shell execution rejected: {reason}"))
+        }
+        ExecResult::Err(e) => ToolResult::Error(format!("Shell execution failed: {e}")),
     }
 }

@@ -4,10 +4,12 @@ use open_pincery::config::Config;
 use open_pincery::models::{agent, event, user, workspace};
 use open_pincery::runtime::{
     llm::{LlmClient, Pricing},
+    sandbox::{ProcessExecutor, ToolExecutor},
     wake_loop,
 };
 use rust_decimal::Decimal;
 use std::str::FromStr;
+use std::sync::Arc;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -113,7 +115,8 @@ async fn test_wake_loop_sleep_termination() {
         Pricing::default(),
     );
 
-    let reason = wake_loop::run_wake_loop(&pool, &llm, &config, a.id, wake_id)
+    let executor: Arc<dyn ToolExecutor> = Arc::new(ProcessExecutor);
+    let reason = wake_loop::run_wake_loop(&pool, &llm, &config, a.id, wake_id, &executor)
         .await
         .unwrap();
     assert_eq!(reason, "sleep");
@@ -199,7 +202,8 @@ async fn test_wake_loop_iteration_cap() {
         "test-model".into(),
     );
 
-    let reason = wake_loop::run_wake_loop(&pool, &llm, &config, a.id, wake_id)
+    let executor: Arc<dyn ToolExecutor> = Arc::new(ProcessExecutor);
+    let reason = wake_loop::run_wake_loop(&pool, &llm, &config, a.id, wake_id, &executor)
         .await
         .unwrap();
     assert_eq!(reason, "iteration_cap");

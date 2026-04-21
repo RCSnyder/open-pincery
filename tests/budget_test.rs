@@ -83,10 +83,14 @@ async fn test_budget_exceeded_blocks_wake_and_llm_call() {
     let shutdown = CancellationToken::new();
     let alive = Arc::new(AtomicBool::new(false));
 
+    let executor: Arc<dyn open_pincery::runtime::sandbox::ToolExecutor> =
+        Arc::new(open_pincery::runtime::sandbox::ProcessExecutor);
+
     let listener_task = tokio::spawn(open_pincery::background::listener::start_listener(
         pool.clone(),
         config,
         llm,
+        executor,
         shutdown.clone(),
         alive.clone(),
     ));
