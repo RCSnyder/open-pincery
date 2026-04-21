@@ -467,11 +467,11 @@ Each AC is a small, independently-shippable slice. No schema changes outside the
 
 ### v7 Stack Additions
 
-| Concern             | Addition                    | Notes                                                                                      |
-| ------------------- | --------------------------- | ------------------------------------------------------------------------------------------ |
-| AEAD                | `aes-gcm` (RustCrypto)      | Orthodox pure-Rust AEAD; audited; active maintenance                                       |
-| RNG                 | `rand` + `getrandom/OsRng`  | Already transitively present; made explicit for nonce generation                           |
-| TTY echo suppression| `rpassword`                 | Standard Rust crate for password prompts; MIT-licensed; no transitive security advisories as of the v6 `cargo deny` floor |
+| Concern              | Addition                   | Notes                                                                                                                     |
+| -------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| AEAD                 | `aes-gcm` (RustCrypto)     | Orthodox pure-Rust AEAD; audited; active maintenance                                                                      |
+| RNG                  | `rand` + `getrandom/OsRng` | Already transitively present; made explicit for nonce generation                                                          |
+| TTY echo suppression | `rpassword`                | Standard Rust crate for password prompts; MIT-licensed; no transitive security advisories as of the v6 `cargo deny` floor |
 
 No new runtime services. No network dependencies. Everything runs in the existing single binary against the existing PostgreSQL instance.
 

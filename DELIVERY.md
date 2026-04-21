@@ -1,4 +1,4 @@
-# DELIVERY.md — Open Pincery v6
+# DELIVERY.md — Open Pincery v7
 
 ## What Was Built
 
@@ -83,10 +83,29 @@ A multi-agent platform runtime implementing the Open Pincery architecture: event
 - **No behaviour change for existing agents**: v6 is additive. v5 agents continue to wake, call tools, and complete cycles. The security baseline kicks in only when `permission_mode` is tightened.
 - **Audit trail**: every gate denial is persisted as a `tool_capability_denied` event alongside `tool_result` / `tool_error`, so denials are queryable via the existing event API.
 
+## v7 Changes (from v6) — Credential Vault & Reasoner-Secret Refusal
+
+- AC-38: AES-256-GCM credential vault (`src/runtime/vault.rs`). Master key loaded from `OPEN_PINCERY_VAULT_KEY` (base64-encoded 32 bytes); startup fails fast if missing, wrong length, or invalid base64. `Vault::seal(workspace_id, name, plaintext) → SealedCredential {nonce, ciphertext}` binds the credential to its `{workspace_id}:{name}` AAD; `Vault::open(workspace_id, name, sealed)` collapses all failure modes (wrong key, wrong workspace, wrong name, tampered ciphertext, wrong nonce length) to a single `VaultError::Authentication` variant — no oracle. Random 96-bit nonce per seal via `OsRng`. `credential::Credential` is deliberately NOT `Serialize`; only `CredentialSummary` (id, name, created_at, revoked_at) ever leaves the process.
+- AC-39: REST credential API under `/api/workspaces/:id/credentials`. POST accepts `{name, value}` (name `^[A-Z][A-Z0-9_]{0,63}$`, value ≤ 32 KiB), seals it, and returns the summary only (never the value). GET lists active (non-revoked) summaries. DELETE `/api/workspaces/:id/credentials/:name` marks revoked. All three routes are workspace-admin gated via `scoped_workspace`. Unique partial index (`name`) WHERE `revoked_at IS NULL` enforces one-active-per-name at the DB layer.
+- AC-40: `pcy credential add|list|revoke` CLI. `add` uses `rpassword` so the secret is never echoed, never in argv, never in shell history; auto-resolves `workspace_id` via `GET /api/me` (cached in `CliConfig.workspace_id` after first use). `list` prints name + created_at + age in a table. `revoke` takes `--name`, confirms, and calls DELETE.
+- AC-41: `list_credentials` reasoner tool registered with `ToolCapability::ReadLocal`. Returns `{credentials:[{name, created_at}, ...]}` — names only, never values. The gate in AC-35 still applies; a Locked agent cannot list. `workspace_id: Uuid` is now a required param on `dispatch_tool` so every tool call is workspace-scoped.
+- AC-42: Hardened wake system prompt v2. Migration `20260420000003_prompt_template_credentials.sql` deactivates v1 and inserts v2 with five mandatory substrings (REFUSE contract, "never reveal", "never echo", the `PLACEHOLDER:<name>` syntax, and the `list_credentials` tool reference). `tests/prompt_v2_credential_test.rs` pins all five substrings so a silent prompt rewrite fails the build.
+- AC-43: PLACEHOLDER dispatch handshake. `ShellArgs.env: HashMap<String,String>` lets the reasoner pass `PLACEHOLDER:<name>` values; `dispatch_tool` resolves them pre-spawn via `credential::find_active` + `vault.open` into a private `HashMap`, which becomes `ShellCommand.env` and is injected AFTER the `PATH`-only allowlist. On any failure (missing, revoked, invalid nonce, authentication, non-UTF-8, lookup error) the call fails closed — no executor spawn — and a `credential_unresolved` event is written with payload `{name, reason}` only. Plaintext never appears in any event, log line, or tool output (leak-canary test scans every event row for the agent after a successful resolve).
+
+### v7 Operator Impact
+
+- **New required env var**: `OPEN_PINCERY_VAULT_KEY` — 32 random bytes, base64-encoded. Generate once with `openssl rand -base64 32`; store alongside `OPEN_PINCERY_BOOTSTRAP_TOKEN`; losing it means losing access to every stored credential. Rotation requires re-sealing — deferred to v8.
+- **New CLI verbs**: `pcy credential add|list|revoke`. The `add` path prompts for the value via rpassword and never touches argv/history.
+- **New tool available to agents**: `list_credentials` (names only). The reasoner is prompted to use `PLACEHOLDER:<name>` in `env` on any shell call instead of ever pasting a secret value.
+- **Zero runtime substitution outside dispatch**: There is no network-level redaction or proxy. If an agent names a credential and also echoes the raw value in its own text, the harness cannot prevent that — the v2 prompt makes this refusal contract explicit. Cryptographic isolation of secrets from the reasoner (Zerobox-style) is the v8/v9 step.
+- **Additive migrations**: Three new migration files; no v6 row is mutated.
+
 ## Known Limitations
 
 - **Host-level sandbox only**: v6 ships env-clear + tempdir + 30s timeout + sudo-token rejection via `ProcessExecutor`. This is defense-in-depth, not isolation — a process running as the `pcy` user can still read any file that user can read. True container-level isolation (Zerobox) is on the roadmap.
 - **Sudo reject is token-based, not path-based**: commands containing a `sudo` token are rejected pre-spawn; commands invoking `/usr/bin/sudo` by absolute path are not caught by the tokeniser and rely on `env_clear` + tempdir + no-tty for defense. Documented in `src/runtime/sandbox.rs`.
+- **Credential substitution is reasoner-cooperative**: v7 protects against _accidental_ leakage through event/log/argv paths and against unauthorised dispatch spawns, but a malicious or confused reasoner that types a PLACEHOLDER value into plaintext content will still produce plaintext. Cryptographic isolation (v8/v9) is the structural fix.
+- **Vault master-key rotation not yet implemented**: `OPEN_PINCERY_VAULT_KEY` is single-valued; re-sealing on rotation is a v8 item.
 - **No inter-agent messaging**: Single-agent operation only
 - **Single workspace enforcement**: Multi-tenancy schema exists; `scoped_agent` enforces workspace isolation on agent-level handlers, but cross-workspace administration is not yet exposed via API
 - **Webhook secrets**: Still surfaced exactly once — on creation or after `POST /api/agents/:id/rotate-webhook-secret`. Operators must capture the response immediately.
@@ -98,6 +117,7 @@ A multi-agent platform runtime implementing the Open Pincery architecture: event
 ## Footprint
 
 - **Runtime**: Single Rust binary (~15MB release), or Docker image
-- **Database**: PostgreSQL 16 (17 migration files)
+- **Database**: PostgreSQL 16 (19 migration files)
 - **External**: One OpenAI-compatible LLM API
+- **Stack additions in v7**: `aes-gcm`, `rpassword`, `walkdir` (dev-only)
 - **Cost**: PostgreSQL hosting + LLM API usage. No other infrastructure costs.
