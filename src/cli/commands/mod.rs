@@ -7,3 +7,4 @@ pub mod events;
 pub mod login;
 pub mod message;
 pub mod status;
+pub mod whoami;

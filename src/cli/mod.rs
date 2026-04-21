@@ -91,6 +91,10 @@ enum Commands {
         #[command(subcommand)]
         command: nouns::context::ContextCommands,
     },
+    /// AC-48 (v8): print current identity — context, user_id,
+    /// workspace_id, url — as one JSON line. Exits 0 iff
+    /// authenticated; any HTTP or auth failure surfaces non-zero.
+    Whoami,
 }
 
 #[derive(Subcommand, Debug)]
@@ -295,6 +299,14 @@ async fn run_inner() -> Result<ExitCode, AppError> {
             if !stdout.is_empty() {
                 println!("{stdout}");
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Whoami => {
+            let token = token.clone().ok_or_else(|| {
+                AppError::Unauthorized("missing token; run pcy login first".into())
+            })?;
+            let client = ApiClient::new(url, Some(token));
+            commands::whoami::run(&client, &cfg).await?;
             Ok(ExitCode::SUCCESS)
         }
     }
