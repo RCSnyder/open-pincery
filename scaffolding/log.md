@@ -1,5 +1,18 @@
 # Open Pincery — Experiment Log
 
+## BUILD v8 Slice 2d-i — 2026-04-21T21:00Z
+
+- **Gate**: partial (4 of ~5 sub-slices complete; full Slice 2 gate still deferred until 2d-ii+2e land)
+- **Evidence**: Slice 2d-i ships the first noun in the v8 noun-verb tree — `context` — as commit `2a99236`.
+  - `src/cli/nouns/mod.rs` (NEW): umbrella module + `warn_deprecated(old, new)` helper that writes exactly one `warning: '<old>' is deprecated; use '<new>'` line to stderr, shared by future shim delegates (bootstrap/message/events) landing in 2d-ii.
+  - `src/cli/nouns/context.rs` (NEW, ~380 lines incl tests): `ContextCommands` enum with five verbs (`List`, `Current`, `Use`, `Set`, `Delete`) plus a `run(cmd, &Path, &OutputFormat)` dispatcher. Each verb is a pure on-disk operation against `config::load_from_path` / `save_to_path` so it's hermetic under parallel tests. `ContextRow { name, url, workspace_id, active }` implements `TableRow + Serialize + Deserialize` so `output::render` covers all five output formats uniformly. `Use` + `Set` + `Delete` strip the legacy top-level `url/token/workspace_id` mirror before save so `sync_active_from_legacy()` doesn't re-stamp stale hydrated values from a previous active context. `Set` auto-promotes to active on fresh install only (never when an active context exists). `Delete` refuses the active context — otherwise `current-context` would point at a missing entry.
+  - `src/cli/mod.rs`: added `pub mod nouns` and a `Commands::Context { command: nouns::context::ContextCommands }` variant with a dispatch arm that resolves `config::config_path()`, picks the TTY-aware default via `output::default_for_tty(None)`, and calls `nouns::context::run`. The `default_for_tty(None)` placeholder stays until slice 2e wires `--output` to the root `Cli`.
+  - `tests/cli_noun_verb_test.rs` (NEW, 5 integration tests): `context_list_renders_all_contexts_with_active_marker` (table shows `*` on exactly one row; JSON parses as two-item array; name emits one-per-line), `context_use_switches_active_and_updates_legacy_mirror` (legacy `cfg.url` reflects the newly-active context after reload — guards against leaking old credentials into HTTP calls), `context_set_creates_and_updates_correctly` (auto-promote on fresh install, no promotion on existing active), `context_delete_refuses_active_and_removes_inactive`, `context_current_matches_active_or_empty` (kubectl-compatible empty-string + exit 0 when no active context).
+  - 13 new unit tests (12 context verbs + 1 warn_deprecated) + 5 integration tests pass. `cargo check --all-targets` clean. `cargo fmt --all --check` clean.
+- **Changes**: `src/cli/mod.rs` (Context variant + dispatch), `src/cli/nouns/mod.rs` (NEW), `src/cli/nouns/context.rs` (NEW), `tests/cli_noun_verb_test.rs` (NEW)
+- **Retries**: 1 (missing `Deserialize` derive on `ContextRow` broke the integration test's `serde_json::from_str::<Vec<ContextRow>>`; fixed in-slice by adding `Deserialize` to the derive list, re-verified green)
+- **Next**: BUILD Slice 2d-ii — `src/cli/nouns/{credential, agent, budget, event}.rs` + shim delegates in `src/cli/commands/mod.rs` that forward legacy top-level commands (`pcy bootstrap`, `pcy message`, `pcy events`) to the new verbs via `warn_deprecated` + parameterized byte-identical-stdout tests appended to `tests/cli_noun_verb_test.rs`. Then Slice 2e — root `Cli` gains `--context`, `--output`, `--no-color` + `resolve_url`/`resolve_token` pick up the active context via `cli.context.or_else(env).or_else(config.current_context)` + `tests/cli_output_flag_test.rs` + full Slice 2 gate PASS.
+
 ## BUILD v8 Slice 2c — 2026-04-21T20:15Z
 
 - **Gate**: partial (3 of ~5 sub-slices complete; full Slice 2 gate still deferred until 2d+2e land)
