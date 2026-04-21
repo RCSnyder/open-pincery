@@ -1,4 +1,4 @@
-# DELIVERY.md — Open Pincery v5
+# DELIVERY.md — Open Pincery v6
 
 ## What Was Built
 
@@ -70,18 +70,34 @@ A multi-agent platform runtime implementing the Open Pincery architecture: event
 - AC-32: Secure-by-default compose — host ports bound to `127.0.0.1`, `.env.example` defaults `OPEN_PINCERY_HOST=0.0.0.0` so the app is reachable inside the Docker network (loopback restricted by port mapping on host side).
 - AC-33: Caddy TLS overlay (`docker-compose.caddy.yml` + `Caddyfile.example`) for HTTPS exposure. `docker compose -f docker-compose.yml -f docker-compose.caddy.yml up -d` adds Caddy fronting the app on ports 80/443.
 
+## v6 Changes (from v5) — Security Baseline
+
+- AC-34: `AgentStatus` enum (`Resting`, `WakeAcquiring`, `Awake`, `WakeEnding`, `Maintenance`) in `src/models/agent.rs` with compile-time-aligned TLA+ state names. All SQL CAS status literals route through `AgentStatus::DB_*` consts + `as_db_str` / `from_db_str`; a static guard test (`tests/no_raw_status_literals.rs`) prevents relapse. Migration `20260420000001_agent_status_states.sql` additively widens the `agents.status` CHECK constraint.
+- AC-35: Tool capability gate. `src/runtime/capability.rs` defines `ToolCapability` (5 variants) and `PermissionMode` (`Yolo`, `Supervised`, `Locked`, fail-closed on unknown). `dispatch_tool` consults `mode_allows` **before** any executor side effect; denials emit a `tool_capability_denied` event (source=`runtime`, payload `{required_capability, permission_mode}`) and never spawn a child. 9 tests including a DB-backed integration test proving a Locked agent's shell call is denied, audited, and the probe file is never created.
+- AC-36: Hardened `ProcessExecutor` behind a `ToolExecutor` trait (`src/runtime/sandbox.rs`). Every shell invocation now runs under: (1) pre-spawn rejection of any command containing a `sudo` token (tokenised on shell word-boundaries — catches `echo ok && sudo …`, `(sudo -i)`, etc.); (2) fresh per-call tempdir as cwd; (3) `Command::new("sh").env_clear()` with a `PATH`-only allowlist re-added; (4) `kill_on_drop(true)`; (5) 30s wall-clock timeout via `tokio::time::timeout`. Exactly one `Command::new(` exists under `src/runtime/` — enforced by `tests/no_raw_command_new.rs`. 6 sandbox tests (env scrub, timeout-does-not-hang, three sudo-reject variants incl. chained, Ok path).
+- AC-37: Zero-advisory-or-allowlisted-exception floor. `deny.toml` `[advisories]` uses cargo-deny v2 (implicit vulnerability deny) with `yanked = "deny"`. The `ignore` list contains exactly one dated, documented entry — `RUSTSEC-2023-0071` (transitive `rsa` via unused `sqlx-mysql`, no upstream fix, not reachable in our runtime). `tests/deny_config_test.rs` pins `ALLOWED_ADVISORIES = ["RUSTSEC-2023-0071"]` and requires a non-empty `reason` on every entry, so adding a new exception requires a deliberate co-edit of both `deny.toml` and the test.
+
+### v6 Operator Impact
+
+- **New permission mode field**: agents carry `permission_mode` (default `yolo` for v5 compatibility). Set to `locked` to fully disable tool execution; `supervised` is reserved for future approval flows (currently behaves like `locked` for destructive tools).
+- **No behaviour change for existing agents**: v6 is additive. v5 agents continue to wake, call tools, and complete cycles. The security baseline kicks in only when `permission_mode` is tightened.
+- **Audit trail**: every gate denial is persisted as a `tool_capability_denied` event alongside `tool_result` / `tool_error`, so denials are queryable via the existing event API.
+
 ## Known Limitations
 
-- **No sandboxing**: Shell tool runs with host privileges (future: Zerobox container isolation)
+- **Host-level sandbox only**: v6 ships env-clear + tempdir + 30s timeout + sudo-token rejection via `ProcessExecutor`. This is defense-in-depth, not isolation — a process running as the `pcy` user can still read any file that user can read. True container-level isolation (Zerobox) is on the roadmap.
+- **Sudo reject is token-based, not path-based**: commands containing a `sudo` token are rejected pre-spawn; commands invoking `/usr/bin/sudo` by absolute path are not caught by the tokeniser and rely on `env_clear` + tempdir + no-tty for defense. Documented in `src/runtime/sandbox.rs`.
 - **No inter-agent messaging**: Single-agent operation only
 - **Single workspace enforcement**: Multi-tenancy schema exists; `scoped_agent` enforces workspace isolation on agent-level handlers, but cross-workspace administration is not yet exposed via API
 - **Webhook secrets**: Still surfaced exactly once — on creation or after `POST /api/agents/:id/rotate-webhook-secret`. Operators must capture the response immediately.
 - **Rate limiting is in-process**: Not shared across multiple server instances
 - **Metrics recorder is process-global**: Only one Prometheus recorder per process; unit tests that install a recorder must run single-threaded.
 - **Release workflow not yet exercised**: `cosign verify-blob` against a real tagged artifact will happen on first `v*` tag push.
-- **RUSTSEC-2023-0071** (medium, CVSS 5.9): `rsa 0.9.10` pulled in transitively via unused `sqlx-mysql`. Not exploitable in this codebase (MySQL driver is never loaded). No upstream fix yet; acceptable per build gate (no high/critical).
+- **RUSTSEC-2023-0071** (medium, CVSS 5.9): `rsa 0.9.10` pulled in transitively via unused `sqlx-mysql`. Not reachable at runtime (MySQL driver is never loaded); documented allowlist entry in `deny.toml` keyed by `tests/deny_config_test.rs`. Revisit on upstream `rsa` fix, sqlx 0.9 stable, or migration off `sqlx::FromRow` derive.
+
+## Footprint
 
 - **Runtime**: Single Rust binary (~15MB release), or Docker image
-- **Database**: PostgreSQL 16 (16 migration files)
+- **Database**: PostgreSQL 16 (17 migration files)
 - **External**: One OpenAI-compatible LLM API
 - **Cost**: PostgreSQL hosting + LLM API usage. No other infrastructure costs.

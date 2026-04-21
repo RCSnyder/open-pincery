@@ -742,3 +742,16 @@
 - **Gate conditions** (post-verify): all 7 checked — tests pass, tests non-trivial, app builds and runs, every AC verified with real evidence, at least one AC verified via running app (AC-35 DB-backed integration), no critical security issues, deployment config exists.
 - **Retries**: 0
 - **Next**: DEPLOY.
+
+## v6 DEPLOY — 2026-04-20T09:00Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**:
+  - [x] Deployed to specified target — self-host individual. Branch `v6-01_implementation` pushed to `origin` at HEAD `e227ae3` (tracked as `origin/v6-01_implementation`, PR URL emitted by push).
+  - [x] Accessible — repo reachable; merge to `main` is the operator's decision (mandatory human pause per harness rules).
+  - [x] README.md exists with setup + run instructions (unchanged by v6; v5 Quick Start still applies).
+  - [x] DELIVERY.md updated to v6 header + v6 Changes section (AC-34..AC-37 + Operator Impact) + refreshed Known Limitations (replaced stale "No sandboxing" bullet with host-level-sandbox and sudo-reject scope notes) + footprint bumped to 17 migrations.
+  - [x] If stateful: data persistence verified — Postgres migrations are additive (`20260420000001_agent_status_states.sql` widens CHECK, no row mutation); v5 agent rows remain valid.
+- **Changes**: `DELIVERY.md`.
+- **Retries**: 0
+- **Next**: STOP — v6 lights-out SWE loop complete. Awaiting PR/merge decision and next-feature selection.
