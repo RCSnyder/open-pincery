@@ -1,5 +1,13 @@
 # Open Pincery — Experiment Log
 
+## EXPAND v8 — 2026-04-21T14:00Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: scope.md appended with v8 "Unified API Surface" section. 9 acceptance criteria (AC-44 through AC-52) covering OpenAPI 3.1 spec endpoint, idempotent `pcy login`, noun-verb CLI tree with name-or-UUID resolution, universal `--output` flag with TTY-aware defaults, named contexts with auto-migration, MCP stdio server exposing every API operation, `install.sh` with cosign verification, shell completions for 4 shells, schema-layer consistency guardrails. Tier: House. Cost: $0. Deploy target unchanged. All v1–v7 ACs preserved; v8 is surface-only (no schema, no runtime semantics changes). Deprecation window: one release with stderr warnings; legacy aliases preserved. Cloudflare `cf` post cited as the schema-first model informing this scope.
+- **Changes**: appended v8 section to `scaffolding/scope.md`
+- **Retries**: 0
+- **Next**: DESIGN (v8)
+
 ## EXPAND — 2026-04-18T00:00Z
 
 - **Gate**: PASS (attempt 1)

@@ -16,5 +16,9 @@ __pycache__/
 .DS_Store
 *.log
 
+# Local smoke-test session state (never commit — contains session tokens)
+.op-login.json
+.op-me.json
+
 # sqlx offline query data
 .sqlx/
