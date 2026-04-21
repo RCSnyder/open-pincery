@@ -1,5 +1,15 @@
 # Open Pincery — Experiment Log
 
+## BUILD v8 Slice 1 — 2026-04-21T18:00Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: AC-44 complete. `/openapi.json` serves a 3.1.0 document covering every `/api/*` route. Verification ladder: `cargo check --lib` clean; `cargo check --tests` clean; `cargo test --test openapi_spec_test` 7/7 pass (`openapi_json_is_served`, `openapi_declares_3_1_0`, `openapi_has_info_title_and_version`, `openapi_declares_bearer_auth`, `openapi_includes_me_endpoint`, `openapi_covers_every_public_route`, `every_api_route_handler_is_utoipa_annotated`). Full handler coverage: bootstrap+login (auth tag), me (me tag), agents CRUD+rotate (agents tag), credentials create/list/revoke (credentials tag), events get (events tag), messages send (messages tag), webhooks receive (webhooks tag). Two machine-checkable invariants guard regression — expected-paths diff + grep-lint against `src/api/*.rs`. Delivered as two commits:
+  - **Slice 1a** (`f65c808`): utoipa 5.4.0 dep + `src/api/openapi.rs` (107 lines: `ApiDoc`, `BearerAuthAddon` Modify impl, `spec_value()` 3.1.0 normalisation, JSON + YAML handlers, router merged on outermost router). `/api/me` annotated. 5 smoke tests.
+  - **Slice 1b** (`7f24367`): every remaining public handler annotated with `#[utoipa::path]`; every wire DTO derives `utoipa::ToSchema` (including shared `models::credential::CredentialSummary` and `models::event::Event`). ApiDoc `paths(...)` and `components(schemas(...))` extended. Coverage diff test + grep-lint added. 10 files changed, +413/-74.
+- **Changes**: `Cargo.toml`, `Cargo.lock`, `src/api/{mod,openapi,me,bootstrap,agents,credentials,events,messages,webhooks}.rs`, `src/models/{credential,event}.rs`, `tests/openapi_spec_test.rs`
+- **Retries**: 0
+- **Next**: BUILD Slice 2 — AC-46 (noun-verb CLI tree) + AC-47 (name-or-UUID resolver) + AC-48 (universal `--output` flag with TTY-aware defaults) bundled per readiness.md; shares root `Cli` surgery.
+
 ## ANALYZE v8 — 2026-04-21T16:00Z
 
 - **Gate**: PASS (attempt 1)
