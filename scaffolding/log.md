@@ -600,3 +600,12 @@
 - **Changes**: `scaffolding/design.md` (v6 addendum appended)
 - **Retries**: 0
 - **Next**: ANALYZE
+
+## v6 ANALYZE — 2026-04-20T06:30Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: readiness.md rewritten v6-scoped (supersedes v5). Verdict READY. 19 truths T-v6-1..T-v6-19 covering AgentStatus enum shape + single DB boundary conversion, migration widens CHECK without row mutation, capability/mode enums with 15-cell mode_allows table, unknown-tool→Destructive default, tool_capability_denied event shape, ToolExecutor trait + ProcessExecutor behavior (env_clear + PATH-only, 30s timeout + kill, sudo reject before spawn, tempdir cwd), exactly-one `Command::new(` under src/runtime/, AppState.executor as `Arc<dyn ToolExecutor>`, deny.toml vulnerability=deny + yanked=deny + ignore=[], zero v1–v5 regression. Key Links chain each AC to scope/design/source/tests/runtime proof. AC coverage table has a named test file and a concrete runtime proof per AC. 12 scope-reduction risks enumerated (enum-without-literal-refactor, no-op gate, env_clear weakening, soft-signal timeout, ignore-list relapse, yanked=warn left in place, etc.). Build Order is 4 independent slices: Slice 1 AC-37 deny.toml (most isolated), Slice 2 AC-34 enum+migration+literal-refactor (type-system-only), Slice 3 AC-35 capability gate (legacy executor retained), Slice 4 AC-36 ToolExecutor trait + ProcessExecutor (final executor swap). Complexity Exceptions: none. Clarifications: none.
+- **Changes**: `scaffolding/readiness.md` (rewritten, v6-scoped)
+- **Retries**: 0
+- **Next**: BUILD Slice 1 (AC-37 deny.toml)
+
