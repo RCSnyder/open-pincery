@@ -2,7 +2,9 @@
 
 **Open Pincery is an open-source multi-agent platform for durable, event-driven AI agents.** Each agent is a continuous entity with a stable identity, append-only event log, and wake/sleep lifecycle. Agents wake on messages, webhooks, or timers, work until done, and rest. Configure them by conversation. Orchestrate fleets via async messaging.
 
-> **Status:** v4 runtime implemented. Full v1–v3 feature set (CAS lifecycle, event log, LLM-powered wake/sleep, maintenance projections, HTTP API, PostgreSQL persistence, graceful shutdown, Docker Compose, rate limiting, HMAC webhook ingress, agent management, structured JSON logging, Prometheus metrics, `/health` + `/ready` split, CI, signed releases, operator runbooks) plus v4 self-host hardening: non-root container user (AC-22, UID 10001), runtime budget cap enforcement with pre-CAS refusal and in-transaction cost accounting (AC-23, configurable via `LLM_PRICE_*_PER_MTOK` env vars), authenticated webhook-secret rotation endpoint (AC-24), a `pcy` CLI binary with `bootstrap`/`login`/`agent`/`message`/`events`/`budget`/`status` subcommands (AC-25), a vanilla-JS ES-module control plane UI served from `/` (AC-26), and a published v4 API stability contract (AC-27).
+> **Status:** v5 shipped (v1.0.0 on crates.io, 2026-04-20). Full v1–v3 feature set (CAS lifecycle, event log, LLM-powered wake/sleep, maintenance projections, HTTP API, PostgreSQL persistence, graceful shutdown, Docker Compose, rate limiting, HMAC webhook ingress, agent management, structured JSON logging, Prometheus metrics, `/health` + `/ready` split, CI, signed releases, operator runbooks); v4 self-host hardening (non-root container UID 10001, runtime budget caps, webhook-secret rotation, `pcy` CLI, vanilla-JS control plane, published API stability contract); v5 operator onramp (one-command demo, Caddy/TLS overlay, `/api/login`, bootstrap hardening).
+>
+> **Next:** v6 is a documentation iteration — no code ships. It synthesizes the project's strategic direction into [`docs/input/north-star-2026-04.md`](docs/input/north-star-2026-04.md), which becomes the ground floor for v7 onward: memory substrate (pgvector), codebase steward as the first Tier 1 mission, reasoner abstraction across provider / model / data-governance class, and the groundwork for a sovereign substrate that can run a one-person company. See the north star for the full direction and the twelve Durable Bets.
 
 ## Why Another Agent Platform?
 
@@ -164,7 +166,18 @@ The platform's design practices are informed by emerging research in agentic sof
 
 ## License
 
-[MIT](LICENSE)
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+
+at your option.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall
+be dual licensed as above, without any additional terms or conditions.
 
 ---
 
