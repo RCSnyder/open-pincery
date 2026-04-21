@@ -281,7 +281,14 @@ async fn run_inner() -> Result<ExitCode, AppError> {
                 CredentialCommands::Add { name, stdin } => {
                     commands::credential::add(&client, name, stdin).await?
                 }
-                CredentialCommands::List => commands::credential::list(&client).await?,
+                CredentialCommands::List => {
+                    // AC-47: format defaults to TTY-aware (`table` on a
+                    // terminal, `json` when piped). Agentic callers
+                    // always get JSON by default; humans on a shell
+                    // see a readable table.
+                    let fmt = output::default_for_tty(cli.output.clone());
+                    commands::credential::list(&client, &fmt).await?
+                }
                 CredentialCommands::Revoke { name, yes } => {
                     commands::credential::revoke(&client, name, yes).await?
                 }

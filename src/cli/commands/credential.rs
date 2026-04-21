@@ -9,14 +9,41 @@
 //! * Responses from the server are always `CredentialSummary` shapes
 //!   (name + created_at + created_by). Ciphertext, nonces, and raw
 //!   values never touch the CLI.
-//! * `list` prints a terse table; `revoke` requires confirmation
-//!   unless `--yes` is passed.
+//! * `list` renders through [`crate::cli::output`] so `--output`
+//!   (json/yaml/name/jsonpath/table) Just Works; `revoke` requires
+//!   confirmation unless `--yes` is passed.
 
 use std::io::{self, Read};
 
+use serde::{Deserialize, Serialize};
+
 use crate::api_client::ApiClient;
 use crate::cli::config::{load, save};
+use crate::cli::output::{self, OutputFormat, TableRow};
 use crate::error::AppError;
+
+/// Typed row for `pcy credential list` rendering. Kept local to this
+/// file because no other command needs the same shape — the server's
+/// `CredentialSummary` is intentionally narrow.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialRow {
+    pub name: String,
+    pub created_at: String,
+    pub created_by: String,
+}
+
+impl TableRow for CredentialRow {
+    fn headers() -> &'static [&'static str] {
+        &["NAME", "CREATED_AT", "CREATED_BY"]
+    }
+    fn row(&self) -> Vec<String> {
+        vec![
+            self.name.clone(),
+            self.created_at.clone(),
+            self.created_by.clone(),
+        ]
+    }
+}
 
 /// Resolve the workspace_id the credential commands should target.
 ///
@@ -75,21 +102,22 @@ pub async fn add(client: &ApiClient, name: String, use_stdin: bool) -> Result<()
     Ok(())
 }
 
-pub async fn list(client: &ApiClient) -> Result<(), AppError> {
+pub async fn list(client: &ApiClient, fmt: &OutputFormat) -> Result<(), AppError> {
     let ws_id = resolve_workspace_id(client).await?;
     let resp = client.list_credentials(&ws_id).await?;
     let arr = resp.as_array().cloned().unwrap_or_default();
-    if arr.is_empty() {
-        println!("(no active credentials)");
-        return Ok(());
-    }
-    println!("NAME\tCREATED_AT\tCREATED_BY");
-    for row in arr {
-        let n = row["name"].as_str().unwrap_or("");
-        let c = row["created_at"].as_str().unwrap_or("");
-        let b = row["created_by"].as_str().unwrap_or("");
-        println!("{n}\t{c}\t{b}");
-    }
+    let rows: Vec<CredentialRow> = arr
+        .into_iter()
+        .map(|row| CredentialRow {
+            name: row["name"].as_str().unwrap_or("").to_string(),
+            created_at: row["created_at"].as_str().unwrap_or("").to_string(),
+            created_by: row["created_by"].as_str().unwrap_or("").to_string(),
+        })
+        .collect();
+    let rendered = output::render(&rows, fmt)?;
+    // `render` already appends a trailing newline for non-empty
+    // output; write via `print!` so we don't double-newline JSON.
+    print!("{rendered}");
     Ok(())
 }
 
@@ -105,6 +133,6 @@ pub async fn revoke(client: &ApiClient, name: String, yes: bool) -> Result<(), A
         ));
     }
     client.revoke_credential(&ws_id, &name).await?;
-    println!("revoked: {name}");
+    println!("{}", serde_json::json!({ "revoked": name }));
     Ok(())
 }
