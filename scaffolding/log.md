@@ -1,5 +1,16 @@
 # Open Pincery — Experiment Log
 
+## BUILD v8 Slice 2e-a — 2026-04-21T21:45Z
+
+- **Gate**: partial (Slice 2e split into 2e-a root flags + 2e-b `--context` threading; full Slice 2 gate still deferred until 2d-ii + 2e-b land)
+- **Evidence**: Slice 2e-a wires the global `--output` and `--no-color` flags onto the root `Cli` so every noun receives the operator's format choice uniformly. Shipped as commit `5b12f43`.
+  - `src/cli/mod.rs`: `Cli` gains `output: Option<OutputFormat>` (clap `global = true`, `value_parser = parse_output_format`) and `no_color: bool` (clap `global = true`, long `--no-color`). The `parse_output_format` adapter bridges `OutputFormat::from_str`'s `AppError` to clap's `Result<_, String>` contract. `run_inner` sets `NO_COLOR=1` in the process environment when `cli.no_color` is true (plain `std::env::set_var` — Rust 2021 edition, unsafe form is 2024-only). The `Commands::Context` dispatch arm now threads `cli.output.clone()` through `output::default_for_tty(...)` instead of the 2d-i placeholder `None`, so `pcy context list --output json` now renders JSON and `pcy context list` (no flag) still picks Table on TTY / Json on pipe.
+  - `tests/cli_output_flag_test.rs` (NEW, 6 subprocess tests): spawns the real binary via `CARGO_BIN_EXE_pcy` with `PCY_CONFIG_PATH` pointing at a tempfile config containing two contexts (`default`, `prod`). Exercises `--output json` at both root and leaf flag positions (`global = true` contract), `--output yaml`, `--output name` (asserts no tab or `*` marker leaks into name-only mode), `--output jsonpath=$[*].name` (kubectl-style one-match-per-line output), the pipe default (no flag → Json under `PCY_NO_TTY=1`), and an unknown-format clap parse error (exit code 2, empty stdout). `NO_COLOR=1` is injected in every test so accidental Table fallback would still produce clean ASCII.
+  - All 6 integration tests pass; `cargo check --all-targets` clean; `cargo fmt --all --check` clean.
+- **Changes**: `src/cli/mod.rs` (root flags + `parse_output_format` + NO_COLOR env injection + Context dispatch wiring), `tests/cli_output_flag_test.rs` (NEW)
+- **Retries**: 1 (initial test assumed `jsonpath` output was a JSON array; actual contract per `render_jsonpath` is one unquoted string per line for string matches — fixed by asserting line-by-line membership)
+- **Next**: BUILD Slice 2d-ii — credential/agent/budget/event nouns under `src/cli/nouns/` + shim delegates in `src/cli/commands/mod.rs` that forward legacy top-level commands via `warn_deprecated` + parameterized byte-identical-stdout tests. Then Slice 2e-b — thread `--context` global flag through `resolve_url`/`resolve_token` with precedence `cli.context > env > config.current_context`. Then full Slice 2 gate PASS.
+
 ## BUILD v8 Slice 2d-i — 2026-04-21T21:00Z
 
 - **Gate**: partial (4 of ~5 sub-slices complete; full Slice 2 gate still deferred until 2d-ii+2e land)
