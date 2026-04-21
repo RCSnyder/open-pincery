@@ -129,7 +129,33 @@ impl ToolExecutor for ProcessExecutor {
     }
 }
 
+/// Rejects any command that *contains* a `sudo` token — not just commands
+/// that *start* with it. This closes the obvious evasions:
+///
+/// - `echo x && sudo rm -rf /`
+/// - `( sudo -i )`
+/// - `x=1; sudo whoami`
+/// - `"$( sudo id )"`
+/// - leading-tab or mixed-whitespace variants.
+///
+/// We tokenise on shell word-boundary characters (whitespace, `;`, `&`,
+/// `|`, `(`, `)`, backtick, `$(`) and reject if any resulting token is
+/// exactly `sudo`. This is a blunt instrument — `sudoku` is fine,
+/// `./sudo` is fine (not our binary), but anything a shell would parse
+/// as the `sudo` command is caught.
+///
+/// Absolute-path evasion (`/usr/bin/sudo`) is NOT caught here — the
+/// other layers of the sandbox (env_clear + tempdir cwd + 30s timeout +
+/// no tty) are the real defense-in-depth. This check exists to catch
+/// the casual case and to surface a clear `Rejected` result so the
+/// audit log shows intent rather than a timeout.
 fn is_rejected_pattern(command: &str) -> bool {
-    let trimmed = command.trim_start();
-    trimmed.starts_with("sudo ") || trimmed == "sudo"
+    const WORD_BOUNDARIES: &[char] = &[
+        ' ', '\t', '\n', '\r', ';', '&', '|', '(', ')', '`', '"', '\'',
+    ];
+    // `$(` is a two-char boundary; normalise by replacing with a space.
+    let normalised = command.replace("$(", " ");
+    normalised
+        .split(|c: char| WORD_BOUNDARIES.contains(&c))
+        .any(|tok| tok == "sudo")
 }

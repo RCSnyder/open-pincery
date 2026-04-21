@@ -40,6 +40,10 @@ pub struct AppState {
     /// to be `true`.
     pub listener_alive: Arc<AtomicBool>,
     pub stale_alive: Arc<AtomicBool>,
+    /// AC-36 / T-v6-15: shared sandboxed tool executor. Held here so
+    /// HTTP handlers and the wake loop use the same instance, and so
+    /// tests can inject a mock executor without rebuilding app wiring.
+    pub executor: Arc<dyn crate::runtime::sandbox::ToolExecutor>,
 }
 
 #[derive(Clone)]
@@ -131,7 +135,27 @@ pub async fn auth_rate_limit(
 }
 
 impl AppState {
+    /// Default constructor — uses the real `ProcessExecutor`. Kept
+    /// 2-arg so existing tests and callers don't need to know about
+    /// the executor. Production code that wants to share the same
+    /// executor instance with the wake loop should use
+    /// [`AppState::new_with_executor`] instead.
     pub fn new(pool: PgPool, config: crate::config::Config) -> Self {
+        Self::new_with_executor(
+            pool,
+            config,
+            Arc::new(crate::runtime::sandbox::ProcessExecutor),
+        )
+    }
+
+    /// AC-36 / T-v6-15: construct with a caller-supplied executor so
+    /// `AppState` and the wake loop can share one instance (and tests
+    /// can inject a mock).
+    pub fn new_with_executor(
+        pool: PgPool,
+        config: crate::config::Config,
+        executor: Arc<dyn crate::runtime::sandbox::ToolExecutor>,
+    ) -> Self {
         let unauth_limiter = Arc::new(RateLimiter::keyed(Quota::per_minute(
             NonZeroU32::new(10).unwrap(),
         )));
@@ -145,6 +169,7 @@ impl AppState {
             auth_limiter,
             listener_alive: Arc::new(AtomicBool::new(false)),
             stale_alive: Arc::new(AtomicBool::new(false)),
+            executor,
         }
     }
 }

@@ -674,3 +674,31 @@
 - **Retries**: 0
 - **Next**: REVIEW.
 
+
+## v6 REVIEW — 2026-04-20T08:00Z
+
+- **Gate**: FAIL (attempt 1)
+- **Evidence**: Independent review subagent audited all 4 BUILD slices + RUSTSEC fix. Verdict: FAIL with 2 Required findings:
+  - **R1 (AC-36 sudo scope)**: scope.md says the sandbox must reject commands "containing the substring `sudo ` or starting with `sudo`". Shipped `is_rejected_pattern` used a `starts_with` prefix check, so chained forms like `echo ok && sudo …` would spawn sh and run the RHS unimpeded.
+  - **R2 (T-v6-15)**: readiness.md claims `AppState` holds `pub executor: Arc<dyn ToolExecutor>`. Shipped `AppState` had no such field (executor lived only on the listener→wake_loop path). Truth was drifted from shipped code.
+  - Review also surfaced Consider-level findings (broaden escalation set to doas/pkexec/su; tempdir RAII brittleness; `Command::new` guard scope; denial-event `tool_input` overload; `kill_on_drop` vs explicit `start_kill`; swallowed `append_denied_event` errors) — all deferred to a future hardening slice.
+  - FYI findings acknowledged: RUSTSEC decision sound; `AgentStatus::from_db_str` legitimately read-unused at v6 (v10 CAS work).
+- **Changes**: none (review is read-only).
+- **Retries**: 0
+- **Next**: REVIEW-FIX.
+
+## v6 REVIEW-FIX — 2026-04-20T08:15Z
+
+- **Trigger**: Close R1 and R2 before RECONCILE.
+- **Changes**:
+  - `src/runtime/sandbox.rs`: rewrote `is_rejected_pattern` to tokenise the command on shell word-boundaries (whitespace, `;`, `&`, `|`, `(`, `)`, backtick, `$(`, quotes) and reject if any token equals `sudo`. Documented what this DOES and does NOT catch (absolute-path `/usr/bin/sudo` is explicitly not the job of this check; defense-in-depth is env_clear + tempdir + timeout).
+  - `tests/sandbox_test.rs`: added `sudo_in_chained_command_is_rejected` — runs a chained `echo ok && sudo touch <probe>` and asserts `Rejected` AND probe file absent.
+  - `src/api/mod.rs`: added `pub executor: Arc<dyn ToolExecutor>` field on `AppState`. Introduced `AppState::new_with_executor(pool, config, executor)` for production; kept 2-arg `AppState::new(pool, config)` as a convenience that defaults to `Arc::new(ProcessExecutor)` so existing tests continue to compile unchanged.
+  - `src/main.rs`: switched to `AppState::new_with_executor(pool.clone(), (*config).clone(), executor.clone())` so AppState and the wake loop share the same `Arc<dyn ToolExecutor>` instance. T-v6-15 now satisfied.
+- **Verification**:
+  - `cargo build --all-targets`: green.
+  - `cargo clippy --all-targets -- -D warnings`: green.
+  - `cargo fmt --all -- --check`: green.
+  - `cargo test --all-targets -- --test-threads=1`: green. Sandbox suite is now 6/6 including the new chained-sudo regression.
+- **Retries**: 0
+- **Next**: RECONCILE (after commit).

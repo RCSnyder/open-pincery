@@ -121,6 +121,36 @@ async fn bare_sudo_is_rejected() {
     );
 }
 
+/// Regression for AC-36 scope wording: the scope says the sudo check
+/// must trip on commands *containing* `sudo`, not just commands that
+/// start with it. Before the fix, `echo ok && sudo touch <probe>` would
+/// spawn a shell and run the RHS unimpeded.
+#[tokio::test]
+async fn sudo_in_chained_command_is_rejected() {
+    let probe = std::env::temp_dir().join("pincery_sudo_probe_chained");
+    let _ = std::fs::remove_file(&probe);
+
+    let exec = ProcessExecutor;
+    let result = exec
+        .run(
+            &ShellCommand {
+                command: format!("echo ok && sudo touch {}", probe.display()),
+            },
+            &SandboxProfile::default(),
+        )
+        .await;
+
+    assert!(
+        matches!(result, ExecResult::Rejected(_)),
+        "chained `&& sudo …` must be rejected; got {result:?}"
+    );
+    assert!(
+        !probe.exists(),
+        "rejection must happen BEFORE spawn — probe file exists: {}",
+        probe.display()
+    );
+}
+
 #[tokio::test]
 async fn ok_command_reports_exit_and_stdout() {
     let exec = ProcessExecutor;

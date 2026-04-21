@@ -63,7 +63,8 @@ async fn main() {
         Arc::new(runtime::sandbox::ProcessExecutor);
 
     // Build API (holds the per-task alive flags used by /ready).
-    let state = api::AppState::new(pool.clone(), (*config).clone());
+    // Share the single executor instance with the wake loop via AppState.
+    let state = api::AppState::new_with_executor(pool.clone(), (*config).clone(), executor.clone());
 
     // AC-18: optional Prometheus metrics server.
     // If METRICS_ADDR is set (e.g. "127.0.0.1:9090"), install a recorder and
