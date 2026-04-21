@@ -1157,4 +1157,262 @@ None. Every file stays under 300 lines. Compose file remains a single YAML; the 
 
 ### Open Questions
 
-None. OpenRouter stays the default LLM base URL; OpenAI ships as a commented alternative in `.env.example`. Port binding default is `127.0.0.1:8080:8080`; operators who want remote exposure explicitly override `OPEN_PINCERY_HOST=0.0.0.0` and change the compose ports line (documented in Troubleshooting).
+None. OpenRouter stays the default LLM base URL; OpenAI ships as a commented alternative in `.env.example`. Port binding default is `127.0.0.1:8080:8080`; operators who want remote exposure explicitly override `OPEN_PINCERY_HOST=0.0.0.0` and can add back-end network filtering of their choosing.
+
+---
+
+## v6 Design Addendum — Capability Foundations & Security Baseline
+
+### Architecture Delta
+
+Four strictly-additive changes. No schema refactor, no API changes, no new crates of note, no new background tasks.
+
+```
+┌──────────────────── Wake Loop ────────────────────┐
+│  llm → tool_calls                                 │
+│    │                                              │
+│    ▼                                              │
+│  tools::dispatch_tool(tc, permission_mode, exec)  │  ◄── v6: two new params
+│    │                                              │
+│    ├── capability::required_for(name)             │  ◄── v6 AC-35
+│    ├── capability::mode_allows(mode, cap) → bool  │
+│    │      └── false → append tool_capability_denied event, return Error
+│    │                                              │
+│    └── exec.run(&ShellCommand, &SandboxProfile)   │  ◄── v6 AC-36
+│         │   (Arc<dyn ToolExecutor> in AppState)   │
+│         └── ProcessExecutor: tempdir cwd,         │
+│             PATH-only env, 30s timeout, no sudo   │
+└───────────────────────────────────────────────────┘
+
+AgentStatus enum (v6 AC-34) lives in src/models/agent.rs and
+is the sole as_db_str() source for every SQL status literal in that file.
+
+deny.toml (v6 AC-37): vulnerability = "deny", ignore = [].
+```
+
+### Directory Structure (v6 deltas only)
+
+```
+src/
+  models/
+    agent.rs           — MODIFIED: AgentStatus enum + as_db_str/from_db_str + const DB_* bindings
+  runtime/
+    tools.rs           — MODIFIED: dispatch_tool(tc, mode, Arc<dyn ToolExecutor>) signature
+    wake_loop.rs       — MODIFIED: loads agent.permission_mode, threads exec, passes to dispatch_tool
+    capability.rs      — NEW: ToolCapability, PermissionMode, required_for, mode_allows
+    sandbox.rs         — NEW: ToolExecutor trait, ProcessExecutor, ShellCommand, SandboxProfile, ExecResult
+  api/
+    mod.rs             — MODIFIED: AppState gains executor: Arc<dyn ToolExecutor>
+  main.rs              — MODIFIED: constructs Arc::new(ProcessExecutor::default()) at startup
+migrations/
+  20260420000001_agent_status_states.sql  — NEW: ALTER CHECK constraint to include 'wake_acquiring', 'wake_ending'
+tests/
+  agent_status_test.rs       — NEW: AC-34 round-trip test
+  no_raw_status_literals.rs  — NEW: AC-34 build-time grep guard
+  capability_gate_test.rs    — NEW: AC-35 mode×capability table + locked-agent integration
+  sandbox_test.rs            — NEW: AC-36 env-strip, timeout, sudo-reject
+  no_raw_command_new.rs      — NEW: AC-36 build-time grep guard
+  deny_config_test.rs        — NEW: AC-37 deny.toml schema assertion
+deny.toml                    — MODIFIED: vulnerability = "deny", ignore = []
+```
+
+### Interfaces
+
+**AC-34 — `src/models/agent.rs`:**
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AgentStatus {
+    Resting,       // DB: "asleep"        — spec name; legacy DB value preserved
+    WakeAcquiring, // DB: "wake_acquiring" — reserved, not yet written by any transition
+    Awake,         // DB: "awake"
+    WakeEnding,    // DB: "wake_ending"    — reserved, not yet written by any transition
+    Maintenance,   // DB: "maintenance"
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("invalid agent status: {0}")]
+pub struct InvalidStatus(pub String);
+
+impl AgentStatus {
+    pub const DB_RESTING: &'static str = "asleep";
+    pub const DB_WAKE_ACQUIRING: &'static str = "wake_acquiring";
+    pub const DB_AWAKE: &'static str = "awake";
+    pub const DB_WAKE_ENDING: &'static str = "wake_ending";
+    pub const DB_MAINTENANCE: &'static str = "maintenance";
+
+    pub fn as_db_str(self) -> &'static str { /* match */ }
+    pub fn from_db_str(s: &str) -> Result<Self, InvalidStatus> { /* match */ }
+}
+```
+
+Existing SQL sites in `src/models/agent.rs` keep their lowercase literals but each literal is replaced with a `const` identifier local to the same file (`DB_AWAKE`, `DB_MAINTENANCE`, `DB_RESTING`). The `no_raw_status_literals` test enforces that every `status = '…'` or `status IN (…)` occurrence under `src/` is either inside the `src/models/agent.rs` constant-definition block or uses one of those constants via interpolation; a future spec rename therefore either updates the enum mapping or fails compilation.
+
+**AC-35 — `src/runtime/capability.rs`:**
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCapability { ReadLocal, WriteLocal, ExecuteLocal, Network, Destructive }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionMode { Yolo, Supervised, Locked }
+
+impl PermissionMode {
+    pub fn from_db_str(s: &str) -> Self { /* yolo/supervised/locked; unknown → Locked */ }
+}
+
+pub fn required_for(tool_name: &str) -> ToolCapability {
+    match tool_name {
+        "shell" => ToolCapability::ExecuteLocal,
+        "plan"  => ToolCapability::ReadLocal,
+        "sleep" => ToolCapability::ReadLocal,
+        _       => ToolCapability::Destructive, // unknown tools default to most-restrictive
+    }
+}
+
+pub fn mode_allows(mode: PermissionMode, cap: ToolCapability) -> bool {
+    use PermissionMode::*; use ToolCapability::*;
+    match (mode, cap) {
+        (Yolo, _)                        => true,
+        (Supervised, Destructive)        => false,
+        (Supervised, _)                  => true,
+        (Locked, ReadLocal)              => true,
+        (Locked, _)                      => false,
+    }
+}
+```
+
+Gate table (15 cells; every row covered by unit test):
+
+| mode \ cap  | ReadLocal | WriteLocal | ExecuteLocal | Network | Destructive |
+| ----------- | :-------: | :--------: | :----------: | :-----: | :---------: |
+| Yolo        |     ✓     |     ✓      |      ✓       |    ✓    |      ✓      |
+| Supervised  |     ✓     |     ✓      |      ✓       |    ✓    |      ✗      |
+| Locked      |     ✓     |     ✗      |      ✗       |    ✗    |      ✗      |
+
+Denied dispatch appends event `{event_type:"tool_capability_denied", source:"runtime", tool_name, content JSON {required_capability, permission_mode}}` and returns `ToolResult::Error("tool disallowed by permission mode")` without invoking the executor.
+
+**AC-36 — `src/runtime/sandbox.rs`:**
+
+```rust
+#[async_trait::async_trait]
+pub trait ToolExecutor: Send + Sync {
+    async fn run(&self, cmd: &ShellCommand, profile: &SandboxProfile) -> ExecResult;
+}
+
+pub struct ShellCommand { pub command: String }
+
+pub struct SandboxProfile {
+    pub cwd: Option<PathBuf>,         // None => fresh tempdir per call
+    pub env_allowlist: Vec<String>,   // default ["PATH"]
+    pub deny_net: bool,               // default true; advisory in v6, enforced in v8
+    pub timeout: Duration,            // default 30s
+}
+
+pub enum ExecResult {
+    Ok { stdout: String, stderr: String, exit_code: i32 },
+    Timeout,
+    Rejected(String),
+    Err(String),
+}
+
+pub struct ProcessExecutor;
+
+impl Default for ProcessExecutor { /* zero-field */ }
+```
+
+`ProcessExecutor::run` behavior:
+1. If `cmd.command.trim_start().starts_with("sudo")` (word-boundary match) → `ExecResult::Rejected("sudo is not permitted")` (no process spawned).
+2. Create a fresh tempdir via `tempfile::tempdir()`; on failure → `ExecResult::Err`.
+3. Build `tokio::process::Command::new("sh")`, `.arg("-c").arg(&cmd.command)`, `.current_dir(tempdir_path)`, `.env_clear()`, then re-add only the allowlisted vars from the host environment (`for k in &profile.env_allowlist { if let Ok(v) = std::env::var(k) { cmd.env(k, v); } }`), `.stdin(Stdio::null())`.
+4. Spawn; wrap in `tokio::time::timeout(profile.timeout, child.wait_with_output())`; on timeout, `child.start_kill()` + `ExecResult::Timeout`.
+5. On success, return `Ok { stdout, stderr, exit_code }`. 50 KB truncation is applied by `dispatch_tool`, not by the executor.
+
+`dispatch_tool` signature updated:
+
+```rust
+pub async fn dispatch_tool(
+    tool_call: &ToolCallRequest,
+    mode: PermissionMode,
+    executor: &Arc<dyn ToolExecutor>,
+    pool: &PgPool,
+    agent_id: Uuid,
+    wake_id: Uuid,
+) -> ToolResult
+```
+
+(The additional `pool`/`agent_id`/`wake_id` parameters are needed so the capability-denial branch can append its own event. The unchanged `Output`/`Error`/`Sleep` tool-result event appends remain in `wake_loop.rs` as before.)
+
+`wake_loop::run_wake_loop` reads `current.permission_mode` once per loop iteration (it already loads `current` for the iteration-cap check) and passes `PermissionMode::from_db_str(&current.permission_mode)` plus `state.executor.clone()` into `dispatch_tool`.
+
+`AppState` (defined in `src/api/mod.rs`) gains `pub executor: Arc<dyn ToolExecutor>`. `src/main.rs` constructs it once at startup:
+
+```rust
+let executor: Arc<dyn ToolExecutor> = Arc::new(ProcessExecutor);
+```
+
+Tests inject their own `ToolExecutor` impl (a `CountingExecutor` that never spawns, used by `tests/capability_gate_test.rs`).
+
+**AC-37 — `deny.toml`:**
+
+```toml
+[advisories]
+version = 2
+vulnerability = "deny"   # v6: was implicit/high-critical only
+unmaintained = "warn"
+yanked = "deny"          # v6: was "warn"
+ignore = []              # v6: empty, was allowed to grow
+```
+
+`tests/deny_config_test.rs` parses `deny.toml` with a small `toml` dev-dep (add `toml = "0.8"` under `[dev-dependencies]` if not already present) and asserts the four fields above.
+
+### External Integrations
+
+None added. `ProcessExecutor` is a local-only executor; the only external call remains the existing LLM egress (unchanged). Zerobox, vault, proxy — all deferred to v7/v8/v9.
+
+### Test Strategy
+
+| AC    | Test file                         | Kind           | Notes                                                                                                                                       |
+| ----- | --------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| AC-34 | `tests/agent_status_test.rs`      | Unit           | Round-trip all 5 variants through `from_db_str` / `as_db_str`; `from_db_str("bogus")` → Err                                                 |
+| AC-34 | `tests/no_raw_status_literals.rs` | Static / grep  | Reads `src/**/*.rs` at test time, regex over `status\s*(=|IN)\s*['\(]`; allowlists the constant-definition block in `src/models/agent.rs`    |
+| AC-35 | `tests/capability_gate_test.rs`   | Unit + integ   | Table-driven: 15 `(mode, cap)` rows against `mode_allows`; integration creates a `Locked` agent, wakes via wiremock-served `shell` tool call, asserts one `tool_capability_denied` event + zero `tool_result` + a `CountingExecutor::spawns() == 0` |
+| AC-36 | `tests/sandbox_test.rs`           | Unit           | (a) set `HOME=/tmp/fake`, `MY_SECRET=leak`; run `printenv` via `ProcessExecutor` with allowlist `["PATH"]`; assert neither name appears in stdout. (b) `sleep 60` with `timeout = 1s` → `ExecResult::Timeout`. (c) command beginning with `sudo` → `ExecResult::Rejected` without spawn |
+| AC-36 | `tests/no_raw_command_new.rs`     | Static / grep  | Regex `Command::new\(` across `src/runtime/**` — exactly one match, inside `sandbox.rs`                                                     |
+| AC-37 | `tests/deny_config_test.rs`       | Unit           | Parse `deny.toml`; assert `[advisories].vulnerability == "deny"` and `ignore == []`                                                         |
+| AC-37 | CI `cargo deny check advisories`  | CI gate        | Already wired by v3 AC-16; must exit 0 on v6 HEAD                                                                                           |
+
+### Observability
+
+No new metrics. The existing `open_pincery_tool_call_total{tool}` counter is unchanged. A denied call does not increment `tool_call_total` (that counter reflects executions); the `tool_capability_denied` event in the event log is the system of record. We deliberately do not add a metric for this in v6 — when the denial rate becomes operationally interesting, a counter + runbook lands in whatever version ships `supervised`/`locked` as a UI-surfaced default.
+
+### Complexity Exceptions
+
+None. Every new file stays under 200 lines:
+- `src/runtime/capability.rs` ≈ 70 lines (two enums + two const tables).
+- `src/runtime/sandbox.rs` ≈ 130 lines (trait, types, `ProcessExecutor` with 5-step run).
+- Migration ≈ 20 lines.
+- Each test file < 150 lines.
+
+### Key Scenario Trace
+
+Scenario: a `Locked` agent receives a message; the LLM returns a `shell` tool call requesting a destructive filesystem command.
+
+1. `src/background/listener.rs::on_notify` CAS-acquires wake (unchanged).
+2. `run_wake_loop` loads `current.permission_mode = "locked"` → `PermissionMode::Locked`.
+3. `run_wake_loop` calls `llm.chat(...)`; response contains `tool_calls: [{name:"shell", arguments:"{\"command\":\"<destructive>\"}"}]`.
+4. `run_wake_loop` appends `tool_call` event (unchanged).
+5. `tools::dispatch_tool(tc, PermissionMode::Locked, &state.executor, ...)` is invoked:
+   - `capability::required_for("shell")` → `ExecuteLocal`.
+   - `capability::mode_allows(Locked, ExecuteLocal)` → `false`.
+   - Appends `tool_capability_denied` event with payload `{required_capability:"execute_local", permission_mode:"locked"}`.
+   - Returns `ToolResult::Error("tool disallowed by permission mode")`.
+6. `run_wake_loop` receives `Error` branch, appends `tool_result` event with the error body (existing v5 path), continues the loop.
+7. Next LLM turn sees the error in the assembled prompt; `sleep` is the typical next action.
+8. `ProcessExecutor::run` is never called. Host filesystem is untouched.
+
+For a `Yolo` agent the same flow dispatches to `ProcessExecutor::run`, which runs the command under `sh -c` inside a fresh tempdir with `env_clear()` + `PATH`-only. A destructive command targeted at the tempdir is a near-no-op, which by itself illustrates why this is a defense-in-depth baseline, not a sandbox — the real sandbox (Zerobox) lands in v8 at the same `ToolExecutor` seam.
+
+### Open Questions
+
+None. The `ToolExecutor` trait seam is stable enough to host Zerobox (v8) and a test `CountingExecutor` (v6) without further refactor. The two reserved DB status values do not change existing transition code; the TLA+-faithful CAS split that uses them is tracked for v10.d change the compose ports line (documented in Troubleshooting).

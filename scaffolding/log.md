@@ -592,3 +592,11 @@
 - **Changes**: `scaffolding/scope.md` (v6 section appended)
 - **Retries**: 0
 - **Next**: DESIGN
+
+## v6 DESIGN — 2026-04-20T06:15Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: design.md v6 addendum appended covering all 4 ACs. Has Architecture Delta (ASCII wake-loop diagram showing capability gate + executor seam), Directory Structure (new/modified files + 1 migration), Interfaces (AgentStatus enum with DB_* consts, ToolCapability/PermissionMode enums with 15-cell gate table, ToolExecutor trait + ProcessExecutor 5-step behavior, dispatch_tool signature with pool/agent_id/wake_id for denial-event append, deny.toml schema), External Integrations (none added — ProcessExecutor is local-only), Test Strategy (per-AC test file + kind), Observability (deliberately none in v6), Complexity Exceptions (none — all new files under 200 lines), Key Scenario Trace (Locked agent + destructive shell call → tool_capability_denied, no spawn), Open Questions (none). Design review (skyscraper tier) traced the key scenario end-to-end. Every external integration (only LLM) already has v1 error handling + test strategy — no change required.
+- **Changes**: `scaffolding/design.md` (v6 addendum appended)
+- **Retries**: 0
+- **Next**: ANALYZE
