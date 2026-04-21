@@ -19,8 +19,24 @@ pub struct Cli {
     url: Option<String>,
     #[arg(long)]
     token: Option<String>,
+    /// AC-47 (v8): global output format. Accepts
+    /// `table|json|yaml|name|jsonpath=<expr>`. Default is `table` on
+    /// a TTY, `json` when stdout is piped. Every data-printing leaf
+    /// must honour this flag (enforced by the AC-52b naming lint).
+    #[arg(long, global = true, value_parser = parse_output_format)]
+    output: Option<output::OutputFormat>,
+    /// AC-47 (v8): suppress ANSI colour in `table` output. Equivalent
+    /// to setting `NO_COLOR=1` for the lifetime of the invocation.
+    #[arg(long = "no-color", global = true)]
+    no_color: bool,
     #[command(subcommand)]
     command: Commands,
+}
+
+/// Thin adapter between clap's string-in / `Result<T, String>`-out
+/// value-parser contract and [`output::OutputFormat`]'s [`FromStr`].
+fn parse_output_format(s: &str) -> Result<output::OutputFormat, String> {
+    s.parse::<output::OutputFormat>().map_err(|e| e.to_string())
 }
 
 #[derive(Subcommand, Debug)]
@@ -144,6 +160,18 @@ async fn run_inner() -> Result<ExitCode, AppError> {
     let url = resolve_url(&cli, &cfg);
     let token = resolve_token(&cli, &cfg);
 
+    // AC-47: `--no-color` is an alias for `NO_COLOR=1` so every
+    // `output::render_table` call (including ones spawned by nested
+    // libraries) sees the same contract. Kept as a process-level env
+    // mutation rather than an explicit parameter so we don't need to
+    // thread a `no_color` bool into every renderer.
+    if cli.no_color {
+        // Safety: single-threaded code path at CLI entry, before any
+        // task spawns. `std::env::set_var` is `unsafe` in Rust 2024
+        // but we're on 2021.
+        std::env::set_var("NO_COLOR", "1");
+    }
+
     match cli.command {
         Commands::Bootstrap { bootstrap_token } => {
             let bootstrap_token = bootstrap_token
@@ -257,11 +285,12 @@ async fn run_inner() -> Result<ExitCode, AppError> {
             Ok(ExitCode::SUCCESS)
         }
         Commands::Context { command } => {
-            // AC-48 slice 2d-i: pure on-disk verbs, no HTTP. Uses the
-            // default output format (table when TTY, json when piped)
-            // until slice 2e wires `--output` to the root `Cli`.
+            // AC-48 slice 2d-i: pure on-disk verbs, no HTTP.
+            // AC-47 slice 2e-a: `--output` flows from the root `Cli`;
+            // unset falls back to the TTY-aware default (`table` on a
+            // terminal, `json` when piped).
             let path = config::config_path()?;
-            let fmt = output::default_for_tty(None);
+            let fmt = output::default_for_tty(cli.output.clone());
             let stdout = nouns::context::run(command, &path, &fmt)?;
             if !stdout.is_empty() {
                 println!("{stdout}");
