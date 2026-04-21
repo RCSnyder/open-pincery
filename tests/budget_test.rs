@@ -70,6 +70,7 @@ async fn test_budget_exceeded_blocks_wake_and_llm_call() {
         stale_wake_hours: 2,
         wake_summary_limit: 20,
         event_window_limit: 200,
+        vault_key_b64: common::TEST_VAULT_KEY_B64.into(),
     });
 
     // Should never be called when budget is exhausted.

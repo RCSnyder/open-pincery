@@ -44,6 +44,9 @@ pub struct AppState {
     /// HTTP handlers and the wake loop use the same instance, and so
     /// tests can inject a mock executor without rebuilding app wiring.
     pub executor: Arc<dyn crate::runtime::sandbox::ToolExecutor>,
+    /// AC-38 (v7): credential vault. Shared across HTTP handlers and
+    /// the wake loop so one master key is loaded per process.
+    pub vault: Arc<crate::runtime::vault::Vault>,
 }
 
 #[derive(Clone)]
@@ -156,6 +159,15 @@ impl AppState {
         config: crate::config::Config,
         executor: Arc<dyn crate::runtime::sandbox::ToolExecutor>,
     ) -> Self {
+        // AC-38 (v7): decode the vault master key here so the same
+        // constructor works for both production wiring and every test
+        // that already calls `new_with_executor`. A bad key is a
+        // configuration error — panic with a clear message rather than
+        // silently starting with a broken vault.
+        let vault = Arc::new(
+            crate::runtime::vault::Vault::from_base64(&config.vault_key_b64)
+                .unwrap_or_else(|e| panic!("invalid OPEN_PINCERY_VAULT_KEY: {e}")),
+        );
         let unauth_limiter = Arc::new(RateLimiter::keyed(Quota::per_minute(
             NonZeroU32::new(10).unwrap(),
         )));
@@ -170,6 +182,7 @@ impl AppState {
             listener_alive: Arc::new(AtomicBool::new(false)),
             stale_alive: Arc::new(AtomicBool::new(false)),
             executor,
+            vault,
         }
     }
 }

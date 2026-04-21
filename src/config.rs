@@ -15,6 +15,12 @@ pub struct Config {
     pub stale_wake_hours: i64,
     pub wake_summary_limit: i64,
     pub event_window_limit: i64,
+    /// AC-38 (v7): base64-encoded 32-byte AES-256-GCM master key for the
+    /// credential vault. Loaded from `OPEN_PINCERY_VAULT_KEY`. Validated
+    /// at startup by `Vault::from_base64` — this field is kept as the raw
+    /// base64 string so tests can build a `Config` without decoding
+    /// first; the decoded `Vault` lives on `AppState`.
+    pub vault_key_b64: String,
 }
 
 impl Config {
@@ -48,6 +54,7 @@ impl Config {
             event_window_limit: env_or("EVENT_WINDOW_LIMIT", "200")
                 .parse()
                 .map_err(|e| format!("Invalid EVENT_WINDOW_LIMIT: {e}"))?,
+            vault_key_b64: require_env("OPEN_PINCERY_VAULT_KEY")?,
         })
     }
 

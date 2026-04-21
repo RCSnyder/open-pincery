@@ -40,6 +40,8 @@ dirs = "6"
 toml = "0.8"
 async-trait = "0.1"
 tempfile = "3"
+aes-gcm = "0.10"
+rpassword = "7"
 
 [dev-dependencies]
 wiremock = "0.6"

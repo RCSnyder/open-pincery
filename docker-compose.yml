@@ -31,6 +31,8 @@ services:
       OPEN_PINCERY_PORT: ${OPEN_PINCERY_PORT:-8080}
       # Bootstrap secret — required; compose refuses to start if unset.
       OPEN_PINCERY_BOOTSTRAP_TOKEN: ${OPEN_PINCERY_BOOTSTRAP_TOKEN:?Set OPEN_PINCERY_BOOTSTRAP_TOKEN in .env}
+      # Credential vault master key (v7) — required; base64 32 bytes.
+      OPEN_PINCERY_VAULT_KEY: ${OPEN_PINCERY_VAULT_KEY:?Set OPEN_PINCERY_VAULT_KEY in .env}
       # LLM provider — required.
       LLM_API_BASE_URL: ${LLM_API_BASE_URL:?Set LLM_API_BASE_URL in .env}
       LLM_API_KEY: ${LLM_API_KEY:?Set LLM_API_KEY in .env}

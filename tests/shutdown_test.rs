@@ -23,6 +23,7 @@ async fn test_shutdown_cancels_stale_recovery() {
             stale_wake_hours: 2,
             wake_summary_limit: 20,
             event_window_limit: 200,
+            vault_key_b64: common::TEST_VAULT_KEY_B64.into(),
         },
     ));
 

@@ -27,6 +27,7 @@ async fn test_bootstrap_flow() {
         stale_wake_hours: 2,
         wake_summary_limit: 20,
         event_window_limit: 200,
+        vault_key_b64: common::TEST_VAULT_KEY_B64.into(),
     };
 
     let state = AppState::new(pool.clone(), config.clone());
@@ -93,6 +94,7 @@ async fn test_bootstrap_wrong_token() {
         stale_wake_hours: 2,
         wake_summary_limit: 20,
         event_window_limit: 200,
+        vault_key_b64: common::TEST_VAULT_KEY_B64.into(),
     };
 
     let state = AppState::new(pool, config);
