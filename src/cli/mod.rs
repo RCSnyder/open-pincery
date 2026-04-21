@@ -59,6 +59,33 @@ enum Commands {
         bootstrap_token: Option<String>,
     },
     Status,
+    /// AC-40 (v7): manage workspace credentials. Values are prompted
+    /// interactively (hidden) or piped via stdin — there is no
+    /// `--value` flag so secrets never land in shell history.
+    Credential {
+        #[command(subcommand)]
+        command: CredentialCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CredentialCommands {
+    /// Create or rotate a credential. Prompts for the value with echo
+    /// disabled unless `--stdin` is passed.
+    Add {
+        name: String,
+        /// Read the value from stdin instead of prompting interactively.
+        #[arg(long)]
+        stdin: bool,
+    },
+    /// List active credential names (no ciphertext).
+    List,
+    /// Revoke an active credential by name. Requires `--yes` to confirm.
+    Revoke {
+        name: String,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -202,6 +229,22 @@ async fn run_inner() -> Result<ExitCode, AppError> {
                     )
                 })?;
             commands::demo::run(url, bootstrap_token).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Credential { command } => {
+            let token = token.clone().ok_or_else(|| {
+                AppError::Unauthorized("missing token; run pcy login first".into())
+            })?;
+            let client = ApiClient::new(url, Some(token));
+            match command {
+                CredentialCommands::Add { name, stdin } => {
+                    commands::credential::add(&client, name, stdin).await?
+                }
+                CredentialCommands::List => commands::credential::list(&client).await?,
+                CredentialCommands::Revoke { name, yes } => {
+                    commands::credential::revoke(&client, name, yes).await?
+                }
+            }
             Ok(ExitCode::SUCCESS)
         }
     }

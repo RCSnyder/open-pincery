@@ -24,6 +24,9 @@ pub async fn run_with_bootstrap(
     let mut cfg = load()?;
     cfg.url = Some(client.base_url.clone());
     cfg.token = Some(token.clone());
+    if let Some(ws) = resp["workspace_id"].as_str() {
+        cfg.workspace_id = Some(ws.to_string());
+    }
     save(&cfg)?;
 
     println!("{}", serde_json::json!({"session_token": token}));

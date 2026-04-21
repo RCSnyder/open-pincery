@@ -19,6 +19,7 @@ pub mod bootstrap;
 pub mod credentials;
 pub mod events;
 pub mod health;
+pub mod me;
 pub mod messages;
 pub mod webhooks;
 
@@ -210,6 +211,7 @@ pub fn router(state: AppState) -> Router {
         .merge(messages::router())
         .merge(events::router())
         .merge(credentials::router())
+        .merge(me::router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,

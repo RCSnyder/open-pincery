@@ -7,6 +7,11 @@ use crate::error::AppError;
 pub struct CliConfig {
     pub url: Option<String>,
     pub token: Option<String>,
+    /// AC-40 (v7): cached workspace_id from the most recent bootstrap or
+    /// `pcy` session, so `credential` subcommands can target the caller's
+    /// workspace without requiring the user to pass `--workspace`.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 fn config_path() -> Result<PathBuf, AppError> {
