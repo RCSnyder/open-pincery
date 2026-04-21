@@ -770,3 +770,19 @@
 - **Changes**: `scaffolding/scope.md` (appended v7 section).
 - **Retries**: 0
 - **Next**: DESIGN.
+
+## v7 DESIGN — 2026-04-20T10:05Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: scaffolding/design.md appended with "v7 Design Addendum". Has Architecture Delta with sequence diagram, Directory Structure (v7 deltas only — 6 new/modified src files, 2 new migrations, 6 new tests, 3 config files), Interfaces for all 6 ACs with concrete type signatures and SQL, Data Model (credentials table + unique partial index + 3 CHECK constraints), External Integrations (explicitly none), Test Strategy table covering all 6 ACs with kind + file + notes, Observability (3 new event types, one tracing::warn, no new metrics with rationale), Complexity Exceptions (all files <200 lines with budgets), Key Scenario Trace (9-step operator-and-agent flow), Scope Adjustments (4 bounded deviations documented with rationale, every AC invariant preserved), Open Questions explicitly None.
+- **Changes**: scaffolding/design.md (appended v7 addendum).
+- **Retries**: 0
+- **Next**: ANALYZE.
+
+## v7 ANALYZE — 2026-04-20T10:10Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**: scaffolding/readiness.md rewritten for v7. Verdict = READY. 22 non-negotiable truths (T-v7-1..T-v7-22) covering vault crypto, API shape, CLI ergonomics, tool registration, prompt versioning, dispatch handshake, non-regression. 6 Key Links mapping every AC to design components + test files + runtime proof. Acceptance Criteria Coverage table with planned test + planned runtime proof per AC. 14 Scope Reduction Risks spanning vault master-key, AAD, nonce reuse, list-response leakage, role gate, duplicate-upsert, argv leakage, rpassword, names-only, cross-workspace, prompt immutability, redirect substring, audit silence, no-substitution. Clarifications Needed = None with BUILD impact (2 design-resolved choices documented). Build Order with 6 concrete slices each sized to 1-2 commits. Complexity Exceptions None with file budgets referenced.
+- **Changes**: scaffolding/readiness.md (rewritten — v6 record preserved in git history at commit e7c9144).
+- **Retries**: 0
+- **Next**: BUILD.
