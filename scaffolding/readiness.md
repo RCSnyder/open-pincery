@@ -79,10 +79,15 @@ Non-negotiable statements that must be true in the shipped v6 system:
   on each loop iteration and passes `PermissionMode::from_db_str(&…)` plus
   `state.executor.clone()` into `tools::dispatch_tool`.
 - **T-v6-17** `deny.toml` `[advisories]` sets `version = 2`,
-  `yanked = "deny"`, and `ignore = []`. Version 2 implicitly denies known
-  vulnerabilities (the legacy `vulnerability = "deny"` key was removed in
-  cargo-deny's v2 advisories schema), so these three settings together
-  establish the zero-advisory floor. No `RUSTSEC-*` ignore remains.
+  `yanked = "deny"`, and an `ignore` list containing only documented,
+  allowlisted exceptions pinned by `tests/deny_config_test.rs`. Version 2
+  implicitly denies known vulnerabilities (the legacy `vulnerability = "deny"`
+  key was removed in cargo-deny's v2 advisories schema), so these three
+  settings together establish the zero-new-advisory floor. As of v6 HEAD
+  the allowlist is a single dated entry: `RUSTSEC-2023-0071` (`rsa` via
+  `sqlx-macros-core -> sqlx-mysql`; no Postgres-runtime exposure; no
+  upstream fix). Any additional entry requires co-editing deny.toml and
+  the test's `ALLOWED_ADVISORIES` constant in the same change.
 - **T-v6-18** `cargo deny check advisories` exits 0 on v6 HEAD.
 - **T-v6-19** No v1–v5 AC regresses: CAS lifecycle, wake loop, maintenance,
   drain, event log, API surface, HMAC verification, rate limiting, budget

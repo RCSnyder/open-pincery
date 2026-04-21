@@ -702,3 +702,28 @@
   - `cargo test --all-targets -- --test-threads=1`: green. Sandbox suite is now 6/6 including the new chained-sudo regression.
 - **Retries**: 0
 - **Next**: RECONCILE (after commit).
+
+## v6 RECONCILE — 2026-04-20T08:30Z
+
+- **Phase**: RECONCILE (seven-axis audit between scaffolding and code at HEAD `fb98e8c`).
+- **Verdict**: FIXED-DRIFT. No spec-violating drift. Four structural fixes applied to `scaffolding/design.md`; one cosmetic/wording fix applied to `scaffolding/readiness.md`.
+- **Axis 1 — Directory structure**: CLEAN. `src/runtime/capability.rs`, `src/runtime/sandbox.rs`, `migrations/20260420000001_agent_status_states.sql`, and every new test file listed in the v6 design delta exist at the expected paths.
+- **Axis 2 — Interfaces**: CLEAN for `AgentStatus`, capability enums, and `ToolExecutor` trait/`ProcessExecutor`. Structural drift on `AppState`: code now exposes both `AppState::new` and `AppState::new_with_executor`; design.md's directory-structure line was silent on the two-constructor shape — updated to describe both.
+- **Axis 3 — Acceptance criteria**: CLEAN. AC-34..AC-37 each have a shipped test, a code site, and a runtime-proof trail. No code behaviour exceeds scope; no AC became impossible.
+- **Axis 4 — External integrations**: CLEAN. v6 added no external integrations; design.md explicitly states "none added".
+- **Axis 5 — Stack & deploy**: CLEAN. Cargo.toml adds `async-trait = "0.1"` and promotes `tempfile` to a runtime dep, matching the v6 BUILD log. Deploy target unchanged.
+- **Axis 6 — Log accuracy**: CLEAN. `scaffolding/log.md` covers v6 EXPAND → DESIGN → ANALYZE → BUILD → POST-BUILD GATE → POST-BUILD FIX (RUSTSEC-2023-0071) → REVIEW → REVIEW-FIX, in agreement with `git log --oneline` (`c46d4bc`, `436f4d9`, `f8a7517`, `f872f53`, `9167dc5`, `e72454b`, `162cbe2`, `ac828ed`, `c0215b8`, `fb98e8c`).
+- **Axis 7 — Readiness / traceability**: STRUCTURAL drift on `T-v6-17`. Truth still read `ignore = []`, but the post-BUILD RUSTSEC fix deliberately added one documented, dated allowlisted entry. Coverage row and risk row already reflected the documented-exception policy, so this was wording-level staleness only. Wording updated to "contains only documented, allowlisted exceptions pinned by tests/deny_config_test.rs" and names the current single entry (RUSTSEC-2023-0071). T-v6-15 (`AppState.executor`) was already corrected during REVIEW-FIX; re-verified against code.
+- **Structural fixes applied (all in `scaffolding/design.md`)**:
+  - Architecture-delta caption for `deny.toml` rewritten from `vulnerability = "deny", ignore = []` to describe the v2 schema + documented-exception policy.
+  - Directory-structure delta line for `deny.toml` rewritten to match the v2 schema + single allowlisted entry.
+  - AC-37 `[advisories]` TOML block rewritten to match the shipped file: drops the non-existent `vulnerability` key (v2 implicit), keeps `yanked = "deny"`, includes the RUSTSEC-2023-0071 entry, and documents the `ALLOWED_ADVISORIES` pin. Also corrects the stale "add `toml = "0.8"` as a dev-dep" note — `toml = "0.8"` is already a runtime dep.
+  - AC-36 `ProcessExecutor::run` step 1 rewritten from `trim_start().starts_with("sudo")` to the actual tokenised word-boundary check (catches prefix, bare, and chained forms; explicitly documents the absolute-path case as out of scope).
+  - AC-36 test-strategy row rewritten from "3 tests" to the shipped 6-test list (env strip, timeout, sudo-prefixed, bare sudo, chained sudo, Ok path).
+  - `src/api/mod.rs` directory-structure entry extended to name both `AppState::new` and `AppState::new_with_executor` constructors.
+- **Wording fix applied (`scaffolding/readiness.md`)**:
+  - `T-v6-17` rewritten to describe the allowlisted-exception policy and to name the single current entry (RUSTSEC-2023-0071) without weakening the floor.
+- **Spec-violating drift**: NONE.
+- **Verification**: doc-only edits; no code changed. `cargo` verification ladder not re-run.
+- **Changes**: `scaffolding/design.md`, `scaffolding/readiness.md`, `scaffolding/log.md`.
+- **Next**: VERIFY.

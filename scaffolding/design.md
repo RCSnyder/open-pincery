@@ -1187,7 +1187,9 @@ Four strictly-additive changes. No schema refactor, no API changes, no new crate
 AgentStatus enum (v6 AC-34) lives in src/models/agent.rs and
 is the sole as_db_str() source for every SQL status literal in that file.
 
-deny.toml (v6 AC-37): vulnerability = "deny", ignore = [].
+deny.toml (v6 AC-37): cargo-deny v2 advisories schema (implicit vulnerability
+deny) + yanked = "deny" + ignore list limited to a single documented,
+dated exception (RUSTSEC-2023-0071) pinned against the test allowlist.
 ```
 
 ### Directory Structure (v6 deltas only)
@@ -1202,7 +1204,11 @@ src/
     capability.rs      — NEW: ToolCapability, PermissionMode, required_for, mode_allows
     sandbox.rs         — NEW: ToolExecutor trait, ProcessExecutor, ShellCommand, SandboxProfile, ExecResult
   api/
-    mod.rs             — MODIFIED: AppState gains executor: Arc<dyn ToolExecutor>
+    mod.rs             — MODIFIED: AppState gains executor: Arc<dyn ToolExecutor>.
+                         Two constructors: `AppState::new(pool, config)` defaults the
+                         executor to `Arc::new(ProcessExecutor)` (convenience for tests);
+                         `AppState::new_with_executor(pool, config, executor)` is the
+                         production path so AppState and the wake loop share one instance.
   main.rs              — MODIFIED: constructs Arc::new(ProcessExecutor::default()) at startup
 migrations/
   20260420000001_agent_status_states.sql  — NEW: ALTER CHECK constraint to include 'wake_acquiring', 'wake_ending'
@@ -1213,7 +1219,8 @@ tests/
   sandbox_test.rs            — NEW: AC-36 env-strip, timeout, sudo-reject
   no_raw_command_new.rs      — NEW: AC-36 build-time grep guard
   deny_config_test.rs        — NEW: AC-37 deny.toml schema assertion
-deny.toml                    — MODIFIED: vulnerability = "deny", ignore = []
+deny.toml                    — MODIFIED: v2 advisories schema; yanked = "deny";
+                                ignore = [ documented RUSTSEC-2023-0071 only ]
 ```
 
 ### Interfaces
@@ -1322,7 +1329,7 @@ impl Default for ProcessExecutor { /* zero-field */ }
 ```
 
 `ProcessExecutor::run` behavior:
-1. If `cmd.command.trim_start().starts_with("sudo")` (word-boundary match) → `ExecResult::Rejected("sudo is not permitted")` (no process spawned).
+1. Tokenise `cmd.command` on shell word-boundaries (whitespace, `;`, `&`, `|`, `(`, `)`, backtick, `$(`, quotes) and reject if any token equals `sudo` → `ExecResult::Rejected("sudo is not permitted")` (no process spawned). Catches prefix, bare, and chained forms (`echo ok && sudo …`); does NOT attempt to catch absolute-path escalation (`/usr/bin/sudo`) — that is defense-in-depth territory owned by env_clear + tempdir + timeout.
 2. Create a fresh tempdir via `tempfile::tempdir()`; on failure → `ExecResult::Err`.
 3. Build `tokio::process::Command::new("sh")`, `.arg("-c").arg(&cmd.command)`, `.current_dir(tempdir_path)`, `.env_clear()`, then re-add only the allowlisted vars from the host environment (`for k in &profile.env_allowlist { if let Ok(v) = std::env::var(k) { cmd.env(k, v); } }`), `.stdin(Stdio::null())`.
 4. Spawn; wrap in `tokio::time::timeout(profile.timeout, child.wait_with_output())`; on timeout, `child.start_kill()` + `ExecResult::Timeout`.
@@ -1357,14 +1364,29 @@ Tests inject their own `ToolExecutor` impl (a `CountingExecutor` that never spaw
 
 ```toml
 [advisories]
-version = 2
-vulnerability = "deny"   # v6: was implicit/high-critical only
-unmaintained = "warn"
+version = 2              # v2 schema: known vulnerabilities are implicitly denied
 yanked = "deny"          # v6: was "warn"
-ignore = []              # v6: empty, was allowed to grow
+ignore = [
+    # Single documented exception — every entry must carry advisory ID,
+    # dated justification, and a revisit trigger. Pinned by
+    # tests/deny_config_test.rs against an explicit ALLOWED_ADVISORIES
+    # allowlist; adding any new entry requires touching both files
+    # in the same change (a STOP-and-raise event).
+    { id = "RUSTSEC-2023-0071", reason = "rsa via sqlx-macros-core->sqlx-mysql; no Postgres runtime exposure; no upstream fix. Revisit on rsa release or sqlx 0.9." },
+]
 ```
 
-`tests/deny_config_test.rs` parses `deny.toml` with a small `toml` dev-dep (add `toml = "0.8"` under `[dev-dependencies]` if not already present) and asserts the four fields above.
+Note: cargo-deny's v2 advisories schema removed the explicit `vulnerability`
+key — the v2 header itself IS the "deny known vulnerabilities" contract. The
+v6 BUILD first shipped `ignore = []` (Slice 1) and then a post-BUILD fix added
+the single RUSTSEC-2023-0071 entry after investigation showed the transitive
+path is compile-time-only (sqlx-macros pulls sqlx-mysql regardless of runtime
+features; no Postgres-runtime exposure; no upstream rsa fix since 2023-11).
+
+`tests/deny_config_test.rs` parses `deny.toml` using the runtime `toml = "0.8"`
+dep (already present for config parsing) and asserts `version = 2`,
+`yanked = "deny"`, and that the ignored advisory ID set equals the test's
+`ALLOWED_ADVISORIES` constant with every entry carrying a non-empty `reason`.
 
 ### External Integrations
 
@@ -1377,7 +1399,7 @@ None added. `ProcessExecutor` is a local-only executor; the only external call r
 | AC-34 | `tests/agent_status_test.rs`      | Unit           | Round-trip all 5 variants through `from_db_str` / `as_db_str`; `from_db_str("bogus")` → Err                                                 |
 | AC-34 | `tests/no_raw_status_literals.rs` | Static / grep  | Reads `src/**/*.rs` at test time, regex over `status\s*(=|IN)\s*['\(]`; allowlists the constant-definition block in `src/models/agent.rs`    |
 | AC-35 | `tests/capability_gate_test.rs`   | Unit + integ   | Table-driven: 15 `(mode, cap)` rows against `mode_allows`; integration creates a `Locked` agent, wakes via wiremock-served `shell` tool call, asserts one `tool_capability_denied` event + zero `tool_result` + a `CountingExecutor::spawns() == 0` |
-| AC-36 | `tests/sandbox_test.rs`           | Unit           | (a) set `HOME=/tmp/fake`, `MY_SECRET=leak`; run `printenv` via `ProcessExecutor` with allowlist `["PATH"]`; assert neither name appears in stdout. (b) `sleep 60` with `timeout = 1s` → `ExecResult::Timeout`. (c) command beginning with `sudo` → `ExecResult::Rejected` without spawn |
+| AC-36 | `tests/sandbox_test.rs`           | Unit           | (a) set `HOME=/tmp/fake`, `MY_SECRET=leak`; run `printenv` via `ProcessExecutor` with allowlist `["PATH"]`; assert neither name appears in stdout. (b) `sleep 60` with `timeout = 1s` → `ExecResult::Timeout`. (c) `sudo`-prefixed, (d) bare `sudo`, (e) chained `echo ok && sudo …` — all `ExecResult::Rejected` without spawn (probe file absent). (f) Ok path reports stdout + exit code. Six tests total. |
 | AC-36 | `tests/no_raw_command_new.rs`     | Static / grep  | Regex `Command::new\(` across `src/runtime/**` — exactly one match, inside `sandbox.rs`                                                     |
 | AC-37 | `tests/deny_config_test.rs`       | Unit           | Parse `deny.toml`; assert `[advisories].vulnerability == "deny"` and `ignore == []`                                                         |
 | AC-37 | CI `cargo deny check advisories`  | CI gate        | Already wired by v3 AC-16; must exit 0 on v6 HEAD                                                                                           |
