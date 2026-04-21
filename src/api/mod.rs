@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 pub mod agents;
 pub mod bootstrap;
+pub mod credentials;
 pub mod events;
 pub mod health;
 pub mod messages;
@@ -208,6 +209,7 @@ pub fn router(state: AppState) -> Router {
         .merge(agents::router())
         .merge(messages::router())
         .merge(events::router())
+        .merge(credentials::router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
