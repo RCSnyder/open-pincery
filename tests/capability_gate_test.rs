@@ -35,6 +35,8 @@ fn required_for_known_tools() {
     assert_eq!(required_for("shell"), ToolCapability::ExecuteLocal);
     assert_eq!(required_for("plan"), ToolCapability::ReadLocal);
     assert_eq!(required_for("sleep"), ToolCapability::ReadLocal);
+    // AC-41 (v7): list_credentials returns names + metadata only.
+    assert_eq!(required_for("list_credentials"), ToolCapability::ReadLocal);
 }
 
 #[test]
@@ -212,6 +214,7 @@ async fn locked_agent_shell_call_is_denied_and_audited() {
         PermissionMode::Locked,
         &pool,
         agent_row.id,
+        agent_row.workspace_id,
         wake_id,
         &executor,
     )

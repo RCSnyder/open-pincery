@@ -66,6 +66,23 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 }),
             },
         },
+        // AC-41 (v7): list active credential NAMES for the current
+        // workspace. The response never contains ciphertext, nonces,
+        // or plaintext values — agents learn only which credentials
+        // exist so they can construct `PLACEHOLDER:<name>` tokens
+        // (AC-43) and let the sandbox resolve them at exec time.
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionDef {
+                name: "list_credentials".into(),
+                description: "List the names of credentials stored in the workspace vault. Returns only names and metadata; values are never returned. To USE a credential, place `PLACEHOLDER:<name>` into a shell command's env and the runtime will substitute the value at exec time.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            },
+        },
     ]
 }
 
@@ -84,6 +101,7 @@ pub async fn dispatch_tool(
     mode: PermissionMode,
     pool: &PgPool,
     agent_id: Uuid,
+    workspace_id: Uuid,
     wake_id: Uuid,
     executor: &Arc<dyn ToolExecutor>,
 ) -> ToolResult {
@@ -136,6 +154,31 @@ pub async fn dispatch_tool(
         "sleep" => {
             info!("Agent called sleep tool");
             ToolResult::Sleep
+        }
+        // AC-41 (v7): vault projection. Returns `{"credentials": [{"name": "...",
+        // "created_at": "..."}]}` — names only. We deliberately do not
+        // expose ciphertext or plaintext. Failures surface as a benign
+        // ToolResult::Error so the model can retry or sleep.
+        "list_credentials" => {
+            match crate::models::credential::list_active(pool, workspace_id).await {
+                Ok(rows) => {
+                    let names: Vec<_> = rows
+                        .into_iter()
+                        .map(|r| {
+                            json!({
+                                "name": r.name,
+                                "created_at": r.created_at,
+                            })
+                        })
+                        .collect();
+                    let body = json!({ "credentials": names }).to_string();
+                    ToolResult::Output(body)
+                }
+                Err(e) => {
+                    warn!(error = %e, "list_credentials tool failed");
+                    ToolResult::Error(format!("list_credentials failed: {e}"))
+                }
+            }
         }
         other => ToolResult::Error(format!("Unknown tool: {other}")),
     }

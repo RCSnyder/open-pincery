@@ -181,8 +181,16 @@ pub async fn run_wake_loop(
                 // as read this tick so an operator mid-wake lockdown takes
                 // effect on the next call).
                 let mode = PermissionMode::from_db_str(&current.permission_mode);
-                let result =
-                    tools::dispatch_tool(tc, mode, pool, agent_id, wake_id, executor).await;
+                let result = tools::dispatch_tool(
+                    tc,
+                    mode,
+                    pool,
+                    agent_id,
+                    current.workspace_id,
+                    wake_id,
+                    executor,
+                )
+                .await;
 
                 match result {
                     ToolResult::Sleep => {

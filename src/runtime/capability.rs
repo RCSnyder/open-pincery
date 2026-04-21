@@ -72,6 +72,11 @@ pub fn required_for(tool_name: &str) -> ToolCapability {
         "shell" => ToolCapability::ExecuteLocal,
         "plan" => ToolCapability::ReadLocal,
         "sleep" => ToolCapability::ReadLocal,
+        // AC-41 (v7): list active credential names for the agent's
+        // workspace. Returns names + metadata only — never the sealed
+        // ciphertext or the plaintext value — so it counts as a local
+        // read and is safe in every permission mode including `Locked`.
+        "list_credentials" => ToolCapability::ReadLocal,
         _ => ToolCapability::Destructive,
     }
 }
