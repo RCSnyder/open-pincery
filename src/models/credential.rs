@@ -28,8 +28,9 @@ pub struct Credential {
 
 /// Wire-facing projection — names + metadata only. No value, no
 /// ciphertext, no nonce. `#[derive(Serialize)]` is intentionally
-/// restricted to this type.
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+/// restricted to this type. `ToSchema` (AC-44, v8) is required for
+/// OpenAPI coverage.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct CredentialSummary {
     pub name: String,
     pub created_at: DateTime<Utc>,

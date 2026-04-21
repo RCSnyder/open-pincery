@@ -34,13 +34,33 @@ fn verify_hmac(secret: &[u8], payload: &[u8], signature: &str) -> bool {
     mac.verify_slice(&sig_bytes).is_ok()
 }
 
-#[derive(serde::Deserialize)]
-struct WebhookPayload {
-    content: String,
-    source: Option<String>,
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct WebhookPayload {
+    pub content: String,
+    pub source: Option<String>,
 }
 
-async fn receive_webhook(
+/// Receive an external webhook for an agent. Authenticated via
+/// HMAC-SHA256 signature (`X-Webhook-Signature: sha256=<hex>`) using
+/// the agent's rotating webhook secret. Optional `X-Idempotency-Key`
+/// header dedupes retries. Not behind the session auth middleware;
+/// lives on the outer router.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/webhooks",
+    tag = "webhooks",
+    params(("id" = Uuid, Path, description = "Agent ID")),
+    request_body = WebhookPayload,
+    responses(
+        (status = 202, description = "Event accepted"),
+        (status = 200, description = "Duplicate — no new event appended"),
+        (status = 400, description = "Malformed payload"),
+        (status = 401, description = "Missing or invalid HMAC signature"),
+        (status = 403, description = "Agent disabled"),
+        (status = 404, description = "Agent not found"),
+    ),
+)]
+pub async fn receive_webhook(
     State(state): State<AppState>,
     Path(agent_id): Path<Uuid>,
     headers: HeaderMap,

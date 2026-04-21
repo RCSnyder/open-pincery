@@ -23,16 +23,17 @@ use axum::{
     Json, Router,
 };
 use serde::Deserialize;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::{AppState, AuthUser};
 use crate::error::AppError;
 use crate::models::credential::{self, CredentialSummary};
 
-#[derive(Deserialize)]
-struct CreateCredentialBody {
-    name: String,
-    value: String,
+#[derive(Deserialize, ToSchema)]
+pub struct CreateCredentialBody {
+    pub name: String,
+    pub value: String,
 }
 
 pub fn router() -> Router<AppState> {
@@ -74,7 +75,23 @@ async fn require_workspace_admin(
     Ok(())
 }
 
-async fn create_handler(
+/// Create a new credential in the workspace. Admin-only.
+/// The plaintext `value` is sealed server-side; list and get never
+/// return the plaintext.
+#[utoipa::path(
+    post,
+    path = "/api/workspaces/{id}/credentials",
+    tag = "credentials",
+    params(("id" = Uuid, Path, description = "Workspace ID")),
+    request_body = CreateCredentialBody,
+    responses(
+        (status = 201, description = "Credential created", body = CredentialSummary),
+        (status = 403, description = "Caller is not a workspace admin"),
+        (status = 404, description = "Workspace not found"),
+    ),
+    security(("bearerAuth" = [])),
+)]
+pub async fn create_handler(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthUser>,
     Path(ws_id): Path<Uuid>,
@@ -123,7 +140,19 @@ async fn create_handler(
     ))
 }
 
-async fn list_handler(
+/// List active credential names in the workspace. Admin-only.
+#[utoipa::path(
+    get,
+    path = "/api/workspaces/{id}/credentials",
+    tag = "credentials",
+    params(("id" = Uuid, Path, description = "Workspace ID")),
+    responses(
+        (status = 200, description = "Credential names (no values)", body = [CredentialSummary]),
+        (status = 403, description = "Caller is not a workspace admin"),
+    ),
+    security(("bearerAuth" = [])),
+)]
+pub async fn list_handler(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthUser>,
     Path(ws_id): Path<Uuid>,
@@ -133,7 +162,23 @@ async fn list_handler(
     Ok(Json(rows))
 }
 
-async fn revoke_handler(
+/// Revoke a credential by name. Admin-only.
+#[utoipa::path(
+    delete,
+    path = "/api/workspaces/{id}/credentials/{name}",
+    tag = "credentials",
+    params(
+        ("id" = Uuid, Path, description = "Workspace ID"),
+        ("name" = String, Path, description = "Credential name"),
+    ),
+    responses(
+        (status = 204, description = "Credential revoked"),
+        (status = 403, description = "Caller is not a workspace admin"),
+        (status = 404, description = "Credential not found"),
+    ),
+    security(("bearerAuth" = [])),
+)]
+pub async fn revoke_handler(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthUser>,
     Path((ws_id, name)): Path<(Uuid, String)>,

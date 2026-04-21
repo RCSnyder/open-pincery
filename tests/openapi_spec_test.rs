@@ -109,3 +109,100 @@ async fn openapi_includes_me_endpoint() {
     let paths = body.get("paths").expect("paths");
     assert!(paths.get("/api/me").is_some(), "/api/me must be annotated");
 }
+
+/// AC-44 / AC-52a — every public API path declared in `api::router()`
+/// must appear in the OpenAPI document, modulo the operational /
+/// spec-itself allowlist.
+#[tokio::test]
+async fn openapi_covers_every_public_route() {
+    let (_, body) = fetch_openapi_json().await;
+    let paths = body
+        .get("paths")
+        .and_then(Value::as_object)
+        .expect("paths object");
+
+    // The exhaustive public-API path list. Any new route added to
+    // `src/api/*` must be appended here AND carry `#[utoipa::path]`.
+    // Allowlist (intentionally NOT in OpenAPI): /health, /ready,
+    // /openapi.json, /openapi.yaml, static file fallback.
+    let expected: &[&str] = &[
+        "/api/bootstrap",
+        "/api/login",
+        "/api/me",
+        "/api/agents",
+        "/api/agents/{id}",
+        "/api/agents/{id}/webhook/rotate",
+        "/api/agents/{id}/messages",
+        "/api/agents/{id}/events",
+        "/api/agents/{id}/webhooks",
+        "/api/workspaces/{id}/credentials",
+        "/api/workspaces/{id}/credentials/{name}",
+    ];
+
+    let mut missing: Vec<&str> = Vec::new();
+    for p in expected {
+        if !paths.contains_key(*p) {
+            missing.push(p);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "OpenAPI missing expected paths: {missing:?}. Annotate the handler with #[utoipa::path] and register it in ApiDoc::paths(...)."
+    );
+}
+
+/// AC-44 / AC-52a — grep-style lint: every `.route(...)` declared in
+/// `src/api/*.rs` must live beside an `#[utoipa::path]` annotation in
+/// the same file. This keeps the OpenAPI document from silently going
+/// out of sync with the router at the source-code level, independent
+/// of the aggregator's `paths(...)` list.
+#[test]
+fn every_api_route_handler_is_utoipa_annotated() {
+    use std::fs;
+    use std::path::Path;
+
+    // Handlers that are intentionally not part of the public OpenAPI
+    // contract (operational only, or the spec itself). `mod.rs` holds
+    // only `/health` and `/ready`, which are operational by design.
+    let allowlist_files: &[&str] = &["health.rs", "openapi.rs", "mod.rs"];
+
+    let api_dir = Path::new("src/api");
+    let entries = fs::read_dir(api_dir).expect("read src/api");
+
+    let mut offenders: Vec<String> = Vec::new();
+
+    for entry in entries {
+        let entry = entry.expect("dir entry");
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !file_name.ends_with(".rs") {
+            continue;
+        }
+        if allowlist_files.contains(&file_name) {
+            continue;
+        }
+        let contents = fs::read_to_string(&path).expect("read api source");
+
+        // Count `.route(` occurrences and `#[utoipa::path` occurrences.
+        // A file with at least one route must have at least as many
+        // utoipa path annotations as distinct route-registration calls.
+        let route_count = contents.matches(".route(").count();
+        if route_count == 0 {
+            continue;
+        }
+        let utoipa_count = contents.matches("#[utoipa::path").count();
+        if utoipa_count < route_count {
+            offenders.push(format!(
+                "{file_name}: {route_count} .route(...) calls but only {utoipa_count} #[utoipa::path] annotations"
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "AC-52a: every handler registered via `.route(...)` must carry `#[utoipa::path]`.\n{}",
+        offenders.join("\n")
+    );
+}
