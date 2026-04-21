@@ -7,6 +7,7 @@ use crate::error::AppError;
 
 pub mod commands;
 pub mod config;
+pub mod output;
 
 #[derive(Parser, Debug)]
 #[command(name = "pcy")]

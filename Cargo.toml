@@ -46,6 +46,13 @@ rpassword = "7"
 # `axum_extras` unlocks type-driven path-param extraction; `yaml` is
 # used by the /openapi.yaml handler.
 utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid", "yaml"] }
+# AC-47 (v8): universal `--output` flag. serde_yaml handles the
+# `yaml` format; `jsonpath-rust` handles the kubectl-compatible
+# `jsonpath='...'` subset. tabled drives the TTY-default `table`
+# renderer with NO_COLOR honouring.
+serde_yaml = "0.9"
+jsonpath-rust = "0.7"
+tabled = "0.15"
 
 [dev-dependencies]
 wiremock = "0.6"
