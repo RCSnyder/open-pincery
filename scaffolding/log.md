@@ -549,4 +549,36 @@
   - Readiness filenames normalized to hyphens: `enterprise-readiness.md`, `saas-readiness.md`, `self-host-readiness.md`. Backlinks updated in `scope.md` and `first-principles-assessment.md`.
   - `docs/input/README.md` gains a Directory layout section distinguishing live top-level inputs from `v6_pre_iterate/` provenance.
 - **Not committed**: staged pending review before the v6 EXPAND run.
-- **Next**: v6 EXPAND — the north star drives documentation-level ACs of the form *"north-star states X in ≤N sentences"*; v6 ships no code and reconciles the north star into `docs/reference/north-star.md`.
+- **Next**: v6 EXPAND — the north star drives documentation-level ACs of the form _"north-star states X in ≤N sentences"_; v6 ships no code and reconciles the north star into `docs/reference/north-star.md`.
+
+## Pre-EXPAND — 2026-04-20 — v6.1 synthesis (external inputs + architectural decisions)
+
+- **Phase**: pre-EXPAND continuation (v6.1 is a documentation/meta increment on top of the v6 synthesis; no code ships).
+- **Evidence**: Five curated technical-source notes added to `docs/input/` and absorbed into `north-star-2026-04.md`. Two architectural decisions that surfaced during absorption resolved and recorded in a new "Decisions Carried Into v7" section.
+- **New curated notes**:
+  - `stonebraker-dbos-notes-2026-04.md` — memory-as-substrate, atomic multi-step missions, structured recall over NL-to-SQL.
+  - `cloudflare-ai-infra-notes-2026-04.md` — tool-context ceiling, AGENTS.md as acceptance contract, ephemeral sandboxes, open-weight cost argument, role as reasoner axis, engineering-codex shape.
+  - `cloudflare-agents-sdk-notes-2026-04.md` — pincer-as-actor, session/mission/sandbox triad, long-running reasoning support, inbound email as wake event, per-pincer SQL question.
+  - `genericagent-notes-2026-04.md` — auto-crystallized skill trees, L0–L4 memory layering, `code_run` primitive, context-budget discipline, browser capability shape.
+  - `agent-harness-landscape-2026-04.md` — peer-harness survey (ReAct/Reflexion/Voyager/DSPy/autoresearch), fixed-budget experiment loops, Autonomous Overnight Benchmark proposal, two-clock authoring model.
+- **North-star updates absorbed from new inputs**:
+  - Bet #3 rewritten to name the concrete credential-vault + Zerobox + proxy-mediated injection mechanism from the TLA spec and security architecture. Secrets never enter chat, event log, or reasoner context.
+  - Bet #6a added (auto-crystallized skill trees, distinct from the canonical catalog).
+  - Bet #10 expanded with role as a fourth axis and long-running-reasoning-model support.
+  - Bet #11a names Zerobox (Layer 1 per-tool sandbox) and Greywall (Layer 4 host sandbox) explicitly; session/mission/sandbox triad documented.
+  - Bet #12 invariant list extended: credential-vault-and-proxy-injection, no pincer-to-pincer messaging, no pincer-authored pincer creation, no self-rotation.
+  - Tripwires added: sandbox escape, skill-tree rot, context-budget drift.
+  - Absorbed-advice cleanup: removed Cloudflare "classify-and-fanout as agent-to-agent delegation" and Agents SDK "multi-agent coordination via addressed pincers" bullets; replaced with explicit "what OP does not adopt" blocks pointing to Bet #12.
+- **Architectural decisions resolved** (new "Decisions Carried Into v7" section):
+  - **D1. No chat primitive in v7.** Operator surface is mission console + signal inbox + vault. Rationale: reversibility — adding chat later is cheap; removing chat after secrets land in the event log is impossible. Makes Bet #3 mechanically enforceable instead of prompt-dependent. Retired `chat` from the Signals delivery-policy list. Revisit condition: three or more Tier 1 operators independently request a conversational surface AND a substrate-level mechanism exists to keep secrets out of the chat event stream.
+  - **D2. Pincers do not create pincers (v7 hard invariant, framing A).** Multi-role work inside a mission runs as multiple reasoner calls at different roles (Bet #10), not as pincer-to-pincer delegation. Rationale: CS theory (CSP, capability-security, event-sourcing, what TLA+ verifies) leans toward restriction; asymmetric commitment cost — A → B is one event type plus one catalog field added later, B → A is architecturally impossible to walk back. Framing B (catalog-mediated spawning) named as the likely v8/v9 relaxation. Revisit conditions: a concrete Tier 1 mission stalling three times from no-fan-out, an external operator reporting the pattern, or a security incident that locks in A permanently.
+- **Discussion provenance**: the Q1/Q2 framings, steelmans, and CS-theory reasoning that led to D1/D2 live in the conversation history and in git blame on the `Decisions Carried Into v7` section of `north-star-2026-04.md`. Not duplicated into a separate doc.
+- **Changes**:
+  - `docs/input/stonebraker-dbos-notes-2026-04.md` (new)
+  - `docs/input/cloudflare-ai-infra-notes-2026-04.md` (new)
+  - `docs/input/cloudflare-agents-sdk-notes-2026-04.md` (new)
+  - `docs/input/genericagent-notes-2026-04.md` (new)
+  - `docs/input/agent-harness-landscape-2026-04.md` (new)
+  - `docs/input/north-star-2026-04.md` (Bet #3 mechanism, Bet #6a, Bet #10 axes, Bet #11a sandbox names, Bet #12 invariant list, tripwires, absorbed-advice blocks, new Decisions Carried Into v7 section, Signals delivery-policy fix)
+  - `docs/input/README.md` (curated-notes list expanded from two to five)
+- **Next**: v6.1 EXPAND. Scope will cover the five new curated notes, the absorbed north-star updates, and D1/D2 as committed defaults with revisit triggers. v6.1 ships no code; the north-star lock-in point remains the v7 substrate spine (reasoner abstraction, memory controller v0, Zerobox integration, credential vault v0, codebase-steward Tier 1 mission, MCP outward surface).
