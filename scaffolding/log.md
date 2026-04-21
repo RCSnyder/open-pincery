@@ -638,3 +638,18 @@
 - **Retries**: 0
 - **Next**: REVIEW (subagent audit of v6 BUILD slices).
 
+## v6 POST-BUILD GATE — 2026-04-20T07:15Z
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**:
+  - [x] Code compiles / typechecks — `cargo build --all-targets` green on `162cbe2`.
+  - [x] Every AC-* has a test + proof trail — AC-34 (agent_status_test + no_raw_status_literals + wake_loop regressions), AC-35 (capability_gate_test 8 units + 1 DB integration), AC-36 (sandbox_test 5 + no_raw_command_new guard), AC-37 (deny_config_test 3).
+  - [x] All tests pass — `cargo test --all-targets -- --test-threads=1` green (parallel-mode flake on `observability::logging` env-var test is pre-existing, not v6-induced).
+  - [x] No secrets/credentials in source.
+  - [x] Dependency audit — `cargo audit` surfaces exactly one pre-existing finding: RUSTSEC-2023-0071 (rsa 0.9.10 via sqlx-mysql transitive; 5.9 medium; no upstream fix). This is the same finding v4 documented; no v6 regression introduced it. Gate language ("no high/critical") satisfied. **However**, AC-37's stated intent is a zero-advisory floor including this one; `cargo deny check advisories` would fail in CI until either sqlx-mysql is truly excised from the dep tree or an ignore entry with an expiration is added. Flagging for REVIEW to decide which path to pursue without weakening AC-37.
+  - [x] Lockfile exists (`Cargo.lock` updated with async-trait + tempfile promotion).
+  - [x] Code follows design.md directory structure + interfaces — one documented deviation: `AppState.executor` deferred (no API-side tool invocation yet); executor lives on listener→wake_loop path. Noted in v6 BUILD log entry.
+  - [x] No AC-* closed with placeholder.
+- **Retries**: 0
+- **Next**: REVIEW (subagent audit).
+
