@@ -114,6 +114,11 @@ struct PlanArgs {
     content: String,
 }
 
+// Intentional: this is the single tool-dispatch seam and each argument
+// is a distinct authorization/identity/capability concern (see AC-35,
+// AC-41, AC-43 in scaffolding/design.md). Grouping into a struct would
+// hide those concerns without clarifying them.
+#[allow(clippy::too_many_arguments)]
 pub async fn dispatch_tool(
     tool_call: &ToolCallRequest,
     mode: PermissionMode,

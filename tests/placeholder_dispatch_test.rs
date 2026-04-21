@@ -381,18 +381,19 @@ async fn ac43_plaintext_never_appears_in_events_on_success() {
         .unwrap();
 
     for row in &rows {
-        for field in [
+        for s in [
             row.tool_input.as_deref(),
             row.tool_output.as_deref(),
             row.content.as_deref(),
-        ] {
-            if let Some(s) = field {
-                assert!(
-                    !s.contains("LEAK_CANARY_UNIQUE_STRING_97531"),
-                    "plaintext leaked into event '{}': {s}",
-                    row.event_type
-                );
-            }
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert!(
+                !s.contains("LEAK_CANARY_UNIQUE_STRING_97531"),
+                "plaintext leaked into event '{}': {s}",
+                row.event_type
+            );
         }
     }
 
