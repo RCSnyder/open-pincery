@@ -1,8 +1,8 @@
-# DELIVERY.md — Open Pincery v7
+# DELIVERY.md — Open Pincery v8.0
 
 ## What Was Built
 
-A multi-agent platform runtime implementing the Open Pincery architecture: event-sourced agents with CAS lifecycle management, LLM-powered wake/sleep cycles, maintenance projections, HTTP API, graceful shutdown, Docker Compose deployment, API rate limiting, webhook ingress, agent management, structured JSON logging, Prometheus metrics, health/readiness split, CI pipeline, signed release artifacts with SBOMs, and operator runbooks. v4 adds self-host hardening: non-root container user, runtime budget-cap enforcement with transactional cost accounting, authenticated webhook-secret rotation, a `pcy` CLI binary, a vanilla-JS control plane UI, and a published v4 API stability contract. Single-binary Rust server backed by PostgreSQL.
+A multi-agent platform runtime implementing the Open Pincery architecture: event-sourced agents with CAS lifecycle management, LLM-powered wake/sleep cycles, maintenance projections, HTTP API, graceful shutdown, Docker Compose deployment, API rate limiting, webhook ingress, agent management, structured JSON logging, Prometheus metrics, health/readiness split, CI pipeline, signed release artifacts with SBOMs, and operator runbooks. v4 adds self-host hardening: non-root container user, runtime budget-cap enforcement with transactional cost accounting, authenticated webhook-secret rotation, a `pcy` CLI binary, a vanilla-JS control plane UI, and a published v4 API stability contract. v7 adds an AES-256-GCM credential vault with reasoner-cooperative PLACEHOLDER dispatch. **v8.0 lands the agentic-harness CLI polish**: auto-generated OpenAPI, named connection contexts with `pcy whoami`, idempotent `pcy login`/`bootstrap`, JSON-by-default piped output (`--output`), shell completions (`pcy completion`), and a clap-tree naming lint that forced every subcommand to carry a real `about` description. Single-binary Rust server backed by PostgreSQL.
 
 ## How to Use It
 
@@ -99,6 +99,32 @@ A multi-agent platform runtime implementing the Open Pincery architecture: event
 - **New tool available to agents**: `list_credentials` (names only). The reasoner is prompted to use `PLACEHOLDER:<name>` in `env` on any shell call instead of ever pasting a secret value.
 - **Zero runtime substitution outside dispatch**: There is no network-level redaction or proxy. If an agent names a credential and also echoes the raw value in its own text, the harness cannot prevent that — the v2 prompt makes this refusal contract explicit. Cryptographic isolation of secrets from the reasoner (Zerobox-style) is the v8/v9 step.
 - **Additive migrations**: Three new migration files; no v6 row is mutated.
+
+## v8.0 Changes (from v7) — Agentic-Harness CLI Polish
+
+v8 was originally scoped as a 9-AC unified-surface rework (OpenAPI generator, noun-verb tree with legacy shims, MCP stdio server, signed installer, two-file schema lints). Mid-stream review narrowed the **v8.0 ship** to the slice that unblocks downstream automation; the remaining work is tracked as **v8.1**.
+
+- **AC-44**: Auto-generated OpenAPI 3.1 document at `/openapi.json` from utoipa annotations covering agents, credentials, contexts, workspaces, events, bootstrap/login/me, webhook ingress, and health.
+- **AC-45**: `pcy login` and `pcy bootstrap` are now idempotent. `login --bootstrap-token <token>` attempts `POST /api/bootstrap` first; on HTTP 409 (already bootstrapped) it silently falls back to `POST /api/login` using the same token. Output JSON carries `already_bootstrapped: bool` so CI jobs can distinguish first-run from re-run.
+- **AC-47**: Global `--output` and `--no-color` flags land on the root `Cli` and are propagated to every data-printing leaf. `--output` accepts `table|json|yaml|name|jsonpath=<expr>`; default is `table` on a TTY, `json` when stdout is piped. `--no-color` is an alias for `NO_COLOR=1`. `pcy credential list` is the first v7-era noun migrated onto `output::render` (uniform with the v8 `context` noun).
+- **AC-48**: Named connection contexts on disk (`~/.config/open-pincery/config.toml`). `pcy context list|current|use|set|delete` manages them; legacy flat fields are kept as a mirror of the active context for backward compatibility with every v1–v7 call-site. A one-shot `.pre-v8` backup migrates v4-shaped configs on first load. **New `pcy whoami`** prints `{context, url, user_id?, workspace_id?}` as one JSON line for scripts.
+- **AC-51**: `pcy completion <bash|zsh|fish|powershell>` emits a completion script via `clap_complete::generate`. Follows the `aws`/`kubectl`/`gh` convention.
+- **AC-52b**: `tests/cli_naming_test.rs` walks the clap command tree and enforces the project-wide conventions: every subcommand has `about`, `--format` is banned (only `--output`), `--yes` is allowlisted to `credential revoke`, `--output` and `--no-color` are declared global. Shipping this lint surfaced 15 naked subcommands (bootstrap, login, agent/*, message, events, budget/*, status) that previously showed blank descriptions in `--help`; all now carry one-line guidance.
+
+### v8.0 Operator Impact
+
+- **`pcy login` is safe to run twice.** Runbooks and CI jobs can re-invoke bootstrap without branching on error strings.
+- **`pcy whoami`** replaces hand-rolled `curl /api/me | jq` probes.
+- **JSON by default when piped.** `pcy credential list | jq` works with no flags. TTY users still see a formatted table.
+- **Shell completion is one command away.** `pcy completion bash | sudo tee /etc/bash_completion.d/pcy` etc.
+- **`--format` is gone.** If any v7 script or doc used it, switch to `--output`. No legacy shim — the lint refuses to compile with `--format` anywhere.
+
+### v8.1 — Deferred
+
+- AC-46: Full noun-verb tree (`pcy credential`/`pcy agent`/`pcy budget`/`pcy event`) with byte-identical legacy-shim delegates.
+- AC-49: MCP stdio server (`pcy mcp serve`) exposing the OpenAPI surface as Model Context Protocol tools.
+- AC-50: Signed installer script (`curl ... | sh`) with cosign verification and `pcy --version` self-check.
+- AC-52a: OpenAPI schema-layer naming lint (`tests/api_naming_test.rs`) — plural collections, `{id}` params, summary length.
 
 ## Known Limitations
 

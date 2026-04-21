@@ -1,5 +1,17 @@
 # Open Pincery — Experiment Log
 
+## BUILD v8.0 landing — 2026-04-22T02:00Z
+
+- **Scope re-cut**: v8 was a 9-AC unified surface rework (AC-44..AC-52). After a mid-stream CEO-grade audit the remainder of v8 was narrowed to **v8.0**: ship the pieces that unblock agentic scripting (idempotent login, whoami, JSON-by-default, shell completions, naming lint). Defer the hard pieces (full noun-verb migration with legacy shims, MCP stdio server, installer with cosign) to **v8.1**. Rationale: vertical-slice value beats horizontal layering; the harness needs working CLI now, not a half-migrated tree.
+- **Gate**: PASS per-slice; v8.0 aggregate gate still pending Slice V6 (full test suite + push + PR).
+- **Slice V1 — AC-45 idempotent login + AC-48 whoami** (commit `5ef6666`): `src/cli/commands/login.rs` now retries `client.login` when `client.bootstrap` returns HTTP 409; output JSON carries `already_bootstrapped: bool` so callers can distinguish. `src/cli/commands/whoami.rs` (NEW) prints `{context, url, user_id?, workspace_id?}` as one JSON line. New `Commands::Whoami` dispatch. 2 unit tests on `is_already_bootstrapped` pass.
+- **Slice V2 — AC-47 credential list honours --output** (commit `da2c637`): `src/cli/commands/credential.rs` — new `CredentialRow { name, created_at, created_by }` (TableRow + Serialize + Deserialize). `list()` takes `&OutputFormat` and dispatches through `output::render`. Old hand-rolled tab-separated fallback deleted. `revoke` now prints `{revoked: <name>}` JSON. 3 integration tests in `cli_credential_test` pass against live test DB.
+- **Slice V3 — AC-51 pcy completion** (commit `253dffe`): added `clap_complete = "4.5"` to Cargo.toml. `src/cli/commands/completion.rs` (NEW) uses `clap::CommandFactory` + `clap_complete::generate` to emit completion scripts. `Commands::Completion { shell: clap_complete::Shell }` dispatch. `tests/cli_completion_test.rs` (NEW, 5 tests) asserts signature markers per shell (`_pcy()` / `#compdef pcy` / `complete -c pcy` / `Register-ArgumentCompleter`) and clap exit-2 on unknown shell. All 5 pass.
+- **Slice V4 — AC-52b cli_naming_test** (commit `d700346`): `tests/cli_naming_test.rs` (NEW) walks `Cli::command()` and enforces (1) every subcommand has `about`/`long_about`, (2) `--format` banned everywhere, (3) `--yes` only on `credential revoke`, (4) `--output` and `--no-color` declared global. Lint surfaced 15 naked subcommands (bootstrap/login/agent/*/message/events/budget/*/status) and forced adding one-line `about` doc comments so `pcy --help` is usable. All 5 tests pass.
+- **Deferred to v8.1**: AC-46 full noun-verb migration (credential/agent/budget/event nouns + byte-identical legacy shim delegates), AC-49 MCP stdio server, AC-50 installer with cosign verification, AC-52a OpenAPI naming lint (the `api_naming_test.rs` half of AC-52).
+- **Retries**: 0 blocking — Slice V4 `every_subcommand_has_about` correctly failed on first run, surfacing the 15 real gaps; fixed in-slice by adding docstrings.
+- **Next**: Slice V5 — update DELIVERY.md with v8.0 section. Slice V6 — run full `cargo test` suite, push `v6-01_implementation` to origin, open draft PR.
+
 ## BUILD v8 Slice 2e-a — 2026-04-21T21:45Z
 
 - **Gate**: partial (Slice 2e split into 2e-a root flags + 2e-b `--context` threading; full Slice 2 gate still deferred until 2d-ii + 2e-b land)
