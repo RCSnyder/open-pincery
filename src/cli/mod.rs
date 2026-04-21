@@ -8,6 +8,7 @@ use crate::error::AppError;
 pub mod commands;
 pub mod config;
 pub mod migrate;
+pub mod nouns;
 pub mod output;
 pub mod resolve;
 
@@ -68,6 +69,11 @@ enum Commands {
     Credential {
         #[command(subcommand)]
         command: CredentialCommands,
+    },
+    /// AC-48 (v8): manage named connection contexts on disk.
+    Context {
+        #[command(subcommand)]
+        command: nouns::context::ContextCommands,
     },
 }
 
@@ -247,6 +253,18 @@ async fn run_inner() -> Result<ExitCode, AppError> {
                 CredentialCommands::Revoke { name, yes } => {
                     commands::credential::revoke(&client, name, yes).await?
                 }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Context { command } => {
+            // AC-48 slice 2d-i: pure on-disk verbs, no HTTP. Uses the
+            // default output format (table when TTY, json when piped)
+            // until slice 2e wires `--output` to the root `Cli`.
+            let path = config::config_path()?;
+            let fmt = output::default_for_tty(None);
+            let stdout = nouns::context::run(command, &path, &fmt)?;
+            if !stdout.is_empty() {
+                println!("{stdout}");
             }
             Ok(ExitCode::SUCCESS)
         }
