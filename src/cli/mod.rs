@@ -41,10 +41,15 @@ fn parse_output_format(s: &str) -> Result<output::OutputFormat, String> {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Initialise the first admin session against a fresh server.
+    /// Idempotent: if the server is already bootstrapped, falls back
+    /// to `login` (AC-45).
     Bootstrap {
         #[arg(long)]
         bootstrap_token: Option<String>,
     },
+    /// Exchange a bootstrap token or session token for a stored
+    /// session. Idempotent against already-bootstrapped servers.
     Login {
         /// Paste a session token directly
         #[arg(long, conflicts_with = "bootstrap_token")]
@@ -53,14 +58,15 @@ enum Commands {
         #[arg(long)]
         bootstrap_token: Option<String>,
     },
+    /// Manage agents (create, list, show, disable, rotate secrets).
     Agent {
         #[command(subcommand)]
         command: AgentCommands,
     },
-    Message {
-        agent: String,
-        text: String,
-    },
+    /// Send a single text message to a named agent and exit.
+    Message { agent: String, text: String },
+    /// Stream events for a named agent. Use `--tail` to follow live
+    /// and `--since <timestamp>` to replay from a checkpoint.
     Events {
         agent: String,
         #[arg(long)]
@@ -68,6 +74,7 @@ enum Commands {
         #[arg(long)]
         since: Option<String>,
     },
+    /// Inspect or set per-agent budget limits.
     Budget {
         #[command(subcommand)]
         command: BudgetCommands,
@@ -78,6 +85,7 @@ enum Commands {
         #[arg(long)]
         bootstrap_token: Option<String>,
     },
+    /// Print a one-line health summary of the configured server.
     Status,
     /// AC-40 (v7): manage workspace credentials. Values are prompted
     /// interactively (hidden) or piped via stdin — there is no
@@ -126,17 +134,25 @@ enum CredentialCommands {
 
 #[derive(Subcommand, Debug)]
 enum AgentCommands {
+    /// Create a new agent with the given name.
     Create { name: String },
+    /// List all agents in the current workspace.
     List,
+    /// Show detailed metadata for one agent.
     Show { agent: String },
+    /// Disable an agent so it stops receiving work.
     Disable { agent: String },
+    /// Rotate the per-agent authentication secret.
     RotateSecret { agent: String },
 }
 
 #[derive(Subcommand, Debug)]
 enum BudgetCommands {
+    /// Show the current budget and spend for one agent.
     Show { agent: String },
+    /// Set the budget limit for one agent (e.g. `1.50usd`).
     Set { agent: String, limit: String },
+    /// Reset the accumulated spend for one agent to zero.
     Reset { agent: String },
 }
 
