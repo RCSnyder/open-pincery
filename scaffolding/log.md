@@ -1,5 +1,15 @@
 # Open Pincery — Experiment Log
 
+## BUILD v8 Slice 2 (partial) — 2026-04-21T19:30Z
+
+- **Gate**: partial (2 of ~5 sub-slices complete; full Slice 2 gate deferred until 2c–2e land)
+- **Evidence**: Slice 2 (AC-46 + AC-47 + AC-48 bundled CLI restructure) is being implemented as five sub-slices due to depth. First two sub-slices shipped:
+  - **Slice 2a** (`eefbf8a`) — AC-47 foundation. Added deps `serde_yaml 0.9`, `jsonpath-rust 0.7`, `tabled 0.15`. Created `src/cli/output.rs` (~400 lines, under the 250-line design ceiling excluding tests): `OutputFormat { Json, Yaml, Name, Table, JsonPath(String) }` with `FromStr` parser (accepts `jsonpath='{...}'`, `jsonpath={...}`, `jsonpath=$...`); `TableRow` trait; `render<T>(rows, fmt)` + `render_value<T>(value, fmt)` entry points; `default_for_tty(Option<OutputFormat>) -> OutputFormat` using `std::io::IsTerminal` on stdout with `PCY_NO_TTY=1` test override; `no_color()` honouring the `NO_COLOR` env contract; kubectl-compatible jsonpath normalisation (`{.x}` / `.x` / `$.x` all work). 14 in-module unit tests pass: variant parsing, quoted/unquoted jsonpath, empty/unknown rejection, JSON/YAML parseability, `name` one-per-line, `table` headers+rows, kv-fallback for object scalars, NO_COLOR env read, TTY default fork.
+  - **Slice 2b** (`f28af48`) — AC-46 resolver foundation. Created `src/cli/resolve.rs` (~285 lines): `resolve_id_from_list(noun, input, &Value) -> Result<String, ResolveError>` with strict rules — UUID short-circuits with no list call; non-UUID does exact-equality name match; 0 matches = `NotFound` (exit 1); 2+ matches = `Ambiguous` carrying the full candidate set (exit 2). Substring and case-insensitive matches are explicitly forbidden per the readiness.md scope-reduction lock. `ResolveError -> AppError` mapping preserves the 1 vs 2 exit-code semantics. 9 in-module unit tests pass including the substring-is-unsupported and case-mismatch-is-not-found guardrails.
+- **Changes**: `Cargo.toml`, `Cargo.lock`, `src/cli/mod.rs` (two new `pub mod` lines), `src/cli/output.rs` (NEW), `src/cli/resolve.rs` (NEW)
+- **Retries**: 0
+- **Next**: BUILD Slice 2c — `src/cli/config.rs` v8 `ContextConfig`/`CliConfig` + `src/cli/migrate.rs` v4→v8 auto-migration + atomic save + `tests/cli_context_test.rs`. Then Slice 2d (noun-verb CLI tree + shim delegates + `tests/cli_noun_verb_test.rs`), Slice 2e (root Cli `--context`/`--output` wiring + `tests/cli_output_flag_test.rs`). Full v1–v7 regression suite must remain green at every sub-slice. Slice 2 gate PASS when all three integration test files land green.
+
 ## BUILD v8 Slice 1 — 2026-04-21T18:00Z
 
 - **Gate**: PASS (attempt 1)
