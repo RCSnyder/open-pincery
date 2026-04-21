@@ -5,7 +5,7 @@
 # `pcyconfig` named volume.
 #
 # Usage: ./pcy <subcommand> [args...]
-#   ./pcy bootstrap --bootstrap-token "$OPEN_PINCERY_BOOTSTRAP_TOKEN"
+#   ./pcy login --bootstrap-token "$OPEN_PINCERY_BOOTSTRAP_TOKEN"
 #   ./pcy agent create scout
 #   ./pcy message <agent> "hello"
 #   ./pcy events <agent> --tail

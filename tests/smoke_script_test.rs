@@ -11,7 +11,7 @@ fn ac_30_smoke_scripts_exist_and_cover_required_steps() {
     for needle in [
         "docker compose up -d --wait",
         "/ready",
-        "bootstrap",
+        "login --bootstrap-token",
         "agent create",
         "message",
         "events",

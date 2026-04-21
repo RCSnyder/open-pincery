@@ -41,15 +41,9 @@ fn parse_output_format(s: &str) -> Result<output::OutputFormat, String> {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Initialise the first admin session against a fresh server.
-    /// Idempotent: if the server is already bootstrapped, falls back
-    /// to `login` (AC-45).
-    Bootstrap {
-        #[arg(long)]
-        bootstrap_token: Option<String>,
-    },
-    /// Exchange a bootstrap token or session token for a stored
-    /// session. Idempotent against already-bootstrapped servers.
+    /// Authenticate against a Pincery server. Idempotent: on a fresh
+    /// server it initialises the admin session; on an already-
+    /// bootstrapped server it logs in using the same token (AC-45).
     Login {
         /// Paste a session token directly
         #[arg(long, conflicts_with = "bootstrap_token")]
@@ -200,19 +194,6 @@ async fn run_inner() -> Result<ExitCode, AppError> {
     }
 
     match cli.command {
-        Commands::Bootstrap { bootstrap_token } => {
-            let bootstrap_token = bootstrap_token
-                .or_else(|| std::env::var("OPEN_PINCERY_BOOTSTRAP_TOKEN").ok())
-                .ok_or_else(|| {
-                    AppError::BadRequest(
-                        "missing bootstrap token: pass --bootstrap-token or OPEN_PINCERY_BOOTSTRAP_TOKEN"
-                            .into(),
-                    )
-                })?;
-            let client = ApiClient::new(url, None);
-            commands::bootstrap::run(&client, bootstrap_token).await?;
-            Ok(ExitCode::SUCCESS)
-        }
         Commands::Login {
             token,
             bootstrap_token,

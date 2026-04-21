@@ -158,14 +158,14 @@ Non-negotiable statements that must be true in the shipped v7 system:
 
 ## Acceptance Criteria Coverage
 
-| AC    | Planned test                           | Planned runtime proof                                                                                                                                  |
-| ----- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| AC-38 | `tests/vault_roundtrip_test.rs`        | 100 seal/open round-trips with distinct nonces; tamper on ciphertext/nonce/name/workspace/key → `VaultError::Authentication`, no panic                 |
-| AC-39 | `tests/vault_api_test.rs`              | admin POST/GET/DELETE green-paths; non-admin 403; list JSON byte-scan finds zero secret-value matches; 409 on duplicate; revoke-then-readd             |
-| AC-40 | `tests/cli_credential_test.rs`         | `Cli::try_parse_from([..."--value","bar"])` returns clap error; `--stdin` round-trip succeeds against an `ApiClient`; grep finds one `rpassword` site  |
-| AC-41 | `tests/list_credentials_tool_test.rs`  | dispatch returns 2 summaries for WS-A (1 revoked filtered), `[]` for WS-B; output bytes contain zero occurrences of any stored value                   |
-| AC-42 | `tests/reasoner_refusal_test.rs`       | active `wake_system_prompt` row = v2; template contains `pcy credential add`, `REFUSE`, `POST /api/workspaces/:id/credentials`; v1 preserved inactive  |
-| AC-43 | `tests/placeholder_envelope_test.rs`   | missing → `credential_unresolved` + zero spawns; hit → child env contains literal `PLACEHOLDER:<name>`; revoked → `credential_unresolved`              |
+| AC    | Planned test                          | Planned runtime proof                                                                                                                                 |
+| ----- | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AC-38 | `tests/vault_roundtrip_test.rs`       | 100 seal/open round-trips with distinct nonces; tamper on ciphertext/nonce/name/workspace/key → `VaultError::Authentication`, no panic                |
+| AC-39 | `tests/vault_api_test.rs`             | admin POST/GET/DELETE green-paths; non-admin 403; list JSON byte-scan finds zero secret-value matches; 409 on duplicate; revoke-then-readd            |
+| AC-40 | `tests/cli_credential_test.rs`        | `Cli::try_parse_from([..."--value","bar"])` returns clap error; `--stdin` round-trip succeeds against an `ApiClient`; grep finds one `rpassword` site |
+| AC-41 | `tests/list_credentials_tool_test.rs` | dispatch returns 2 summaries for WS-A (1 revoked filtered), `[]` for WS-B; output bytes contain zero occurrences of any stored value                  |
+| AC-42 | `tests/reasoner_refusal_test.rs`      | active `wake_system_prompt` row = v2; template contains `pcy credential add`, `REFUSE`, `POST /api/workspaces/:id/credentials`; v1 preserved inactive |
+| AC-43 | `tests/placeholder_envelope_test.rs`  | missing → `credential_unresolved` + zero spawns; hit → child env contains literal `PLACEHOLDER:<name>`; revoked → `credential_unresolved`             |
 
 ## Scope Reduction Risks
 
@@ -319,7 +319,7 @@ Non-negotiable statements that must be true in the shipped v8 system:
   against an already-bootstrapped server never surfaces a `409`.**
 - **T-v8-4** The clap root `Cli` exposes the v8 nouns
   (`agent credential budget event context auth api completion mcp
-  whoami login`) plus hidden shim variants (`bootstrap message events`)
+whoami login`) plus hidden shim variants (`bootstrap message events`)
   that emit exactly one `warning:` stderr line via
   `nouns::warn_deprecated` and delegate to the new verb. `--help`
   output lists the new tree; `--help --all` (or equivalent) surfaces
@@ -395,24 +395,24 @@ Non-negotiable statements that must be true in the shipped v8 system:
 - **AC-44** → scope.md v8 AC-44 → `src/api/openapi.rs` (`ApiDoc`,
   `openapi_router`) + `#[utoipa::path]` annotations on every handler
   in `src/api/{agents,credentials,me,events,messages,webhooks,
-  bootstrap}.rs` + `src/api/mod.rs` (mount on unauth router) →
+bootstrap}.rs` + `src/api/mod.rs` (mount on unauth router) →
   `tests/openapi_spec_test.rs` → runtime proof: in-process
   `api::router()` spin-up; `GET /openapi.json` parses as
   `openapiv3::OpenAPI`; path enumeration diff vs `router()` is empty;
   `Content-Type` is `application/json`; rate-limit bucket is the
   `/health` bucket; YAML variant returns the same document.
-- **AC-45** → scope.md v8 AC-45 → `src/cli/nouns/auth.rs` (`login`
-  verb) + `src/api_client.rs` (bootstrap-or-login branch) +
-  `src/cli/commands/mod.rs` (`bootstrap_shim`) →
+- **AC-45** → scope.md v8 AC-45 → `src/cli/commands/login.rs`
+  (`run_with_bootstrap`, bootstrap-or-login branch) + `src/cli/mod.rs`
+  (sole `Login` variant; no `Bootstrap` variant) →
   `tests/cli_login_idempotent_test.rs` → runtime proof:
-  docker-compose fresh reset + `pcy login` → exit 0; second `pcy
-  login` against same server → exit 0, **no 409**; `pcy bootstrap`
-  alias emits exactly one `warning:` stderr line and delegates;
-  `pcy --help` does not list `bootstrap`; stdout on both runs matches
-  `^Logged in to <context> as <email>$`.
+  docker-compose fresh reset + `pcy login --bootstrap-token $T` →
+  exit 0 with `already_bootstrapped:false`; second `pcy login
+--bootstrap-token $T` against same server → exit 0 with
+  `already_bootstrapped:true` and **no 409**; `pcy --help` does not
+  list `bootstrap` (matches `gh auth login` / `oc login` ergonomic).
 - **AC-46** → scope.md v8 AC-46 → `src/cli/mod.rs` (v8 `Commands`
   enum) + `src/cli/nouns/{agent,credential,budget,event,context,auth,
-  completion,mcp}.rs` + `src/cli/resolve.rs` + `src/cli/commands/mod.rs`
+completion,mcp}.rs` + `src/cli/resolve.rs` + `src/cli/commands/mod.rs`
   (shim delegates) → `tests/cli_noun_verb_test.rs` → runtime proof:
   parameterized `(legacy_cmd, new_cmd)` pairs produce byte-identical
   stdout against a common fixture; ambiguous-name case exits 2 with
@@ -453,18 +453,18 @@ Non-negotiable statements that must be true in the shipped v8 system:
   is logged to stderr, not stdout.
 - **AC-50** → scope.md v8 AC-50 → `install.sh` at repo root +
   `tests/installer_test.rs` (behind `#[cfg(feature = "installer-e2e")]`)
-  + `docs/runbooks/cli-install.md` → runtime proof: `bash -n
-  install.sh` clean; `shellcheck -S warning install.sh` clean;
-  local-fixture GitHub mirror drives end-to-end install; sha256
-  mismatch exits non-zero and leaves no binary installed; cosign
-  absent + `--require-cosign` exits non-zero; cosign absent + default
-  prints `warning:` and installs; cosign present with bad signature
-  exits non-zero.
+  - `docs/runbooks/cli-install.md` → runtime proof: `bash -n
+install.sh` clean; `shellcheck -S warning install.sh` clean;
+    local-fixture GitHub mirror drives end-to-end install; sha256
+    mismatch exits non-zero and leaves no binary installed; cosign
+    absent + `--require-cosign` exits non-zero; cosign absent + default
+    prints `warning:` and installs; cosign present with bad signature
+    exits non-zero.
 - **AC-51** → scope.md v8 AC-51 → `src/cli/nouns/completion.rs`
   (clap_complete dispatch) + `Cargo.toml` (`clap_complete` dev-dep or
   runtime dep per design) + README + `docs/runbooks/cli-install.md` →
   `tests/cli_completion_test.rs` → runtime proof: `pcy completion
-  bash` exits 0 with non-empty stdout containing `_pcy`; zsh output
+bash` exits 0 with non-empty stdout containing `_pcy`; zsh output
   contains `#compdef`; fish contains `complete -c pcy`; powershell
   contains `Register-ArgumentCompleter`.
 - **AC-52** → scope.md v8 AC-52 → `tests/api_naming_test.rs` (AC-52a,
@@ -479,18 +479,18 @@ Non-negotiable statements that must be true in the shipped v8 system:
 
 ### Acceptance Criteria Coverage
 
-| AC    | Planned Test                           | Planned Runtime Verification                                                                                                            | Status  |
-| ----- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| AC-44 | `tests/openapi_spec_test.rs`           | `/openapi.json` returns 200 + parses as `openapiv3::OpenAPI`; path diff vs `api::router()` is empty; YAML variant parses; unauth + `/health` rate-limit bucket | Planned |
-| AC-45 | `tests/cli_login_idempotent_test.rs`   | Fresh compose + `pcy login` × 2 both exit 0 (no 409); `bootstrap` alias emits one warn; `--help` excludes `bootstrap`; stdout regex match | Planned |
-| AC-46 | `tests/cli_noun_verb_test.rs`          | Parameterized (legacy, new) pairs → byte-identical stdout; ambiguous-name exit 2 + stderr table; not-found exit 1; UUID path works       | Planned |
-| AC-47 | `tests/cli_output_flag_test.rs`        | json/yaml/name/jsonpath all parse; PTY fixture confirms TTY default table, pipe default json; NO_COLOR suppresses ANSI; `--format`/`--yes` warn | Planned |
-| AC-48 | `tests/cli_context_test.rs`            | v4 flat → v8 migration writes `.pre-v8` backup, idempotent; `use` switches `current-context`; flag > env > file precedence; atomic save  | Planned |
-| AC-49 | `tests/mcp_smoke_test.rs`              | `pcy mcp serve` subprocess: `initialize` + `tools/list` diff vs `ApiDoc` empty + `tools/call agent.create` → event lands server-side    | Planned |
-| AC-50 | `tests/installer_test.rs` (feature-gated) | `bash -n` + `shellcheck -S warning` clean; fixture-served install succeeds; sha256 mismatch + cosign-required both exit non-zero        | Planned |
-| AC-51 | `tests/cli_completion_test.rs`         | Four shells each exit 0 with non-empty stdout containing shell-specific marker (`_pcy`/`#compdef`/`complete -c pcy`/`Register-Argument…`) | Planned |
-| AC-52a| `tests/api_naming_test.rs`             | `ApiDoc::openapi()` walk: plural collection paths, `{id}` params, summaries ≤72 no-period, no PUT, no `format:"uuid-v7"`                 | Planned |
-| AC-52b| `tests/cli_naming_test.rs`             | clap `Command` walk: every command has `about`; every data leaf exposes `--output`; `--format`/`--yes` absent outside deprecated shim   | Planned |
+| AC     | Planned Test                              | Planned Runtime Verification                                                                                                                                   | Status  |
+| ------ | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| AC-44  | `tests/openapi_spec_test.rs`              | `/openapi.json` returns 200 + parses as `openapiv3::OpenAPI`; path diff vs `api::router()` is empty; YAML variant parses; unauth + `/health` rate-limit bucket | Planned |
+| AC-45  | `tests/cli_login_idempotent_test.rs`      | Fresh compose + `pcy login` × 2 both exit 0 (no 409); `bootstrap` alias emits one warn; `--help` excludes `bootstrap`; stdout regex match                      | Planned |
+| AC-46  | `tests/cli_noun_verb_test.rs`             | Parameterized (legacy, new) pairs → byte-identical stdout; ambiguous-name exit 2 + stderr table; not-found exit 1; UUID path works                             | Planned |
+| AC-47  | `tests/cli_output_flag_test.rs`           | json/yaml/name/jsonpath all parse; PTY fixture confirms TTY default table, pipe default json; NO_COLOR suppresses ANSI; `--format`/`--yes` warn                | Planned |
+| AC-48  | `tests/cli_context_test.rs`               | v4 flat → v8 migration writes `.pre-v8` backup, idempotent; `use` switches `current-context`; flag > env > file precedence; atomic save                        | Planned |
+| AC-49  | `tests/mcp_smoke_test.rs`                 | `pcy mcp serve` subprocess: `initialize` + `tools/list` diff vs `ApiDoc` empty + `tools/call agent.create` → event lands server-side                           | Planned |
+| AC-50  | `tests/installer_test.rs` (feature-gated) | `bash -n` + `shellcheck -S warning` clean; fixture-served install succeeds; sha256 mismatch + cosign-required both exit non-zero                               | Planned |
+| AC-51  | `tests/cli_completion_test.rs`            | Four shells each exit 0 with non-empty stdout containing shell-specific marker (`_pcy`/`#compdef`/`complete -c pcy`/`Register-Argument…`)                      | Planned |
+| AC-52a | `tests/api_naming_test.rs`                | `ApiDoc::openapi()` walk: plural collection paths, `{id}` params, summaries ≤72 no-period, no PUT, no `format:"uuid-v7"`                                       | Planned |
+| AC-52b | `tests/cli_naming_test.rs`                | clap `Command` walk: every command has `about`; every data leaf exposes `--output`; `--format`/`--yes` absent outside deprecated shim                          | Planned |
 
 ### Scope Reduction Risks
 
@@ -587,7 +587,7 @@ full v1–v7 suite must remain green at every checkpoint.
    `openapi_router()` + `openapi_json`/`openapi_yaml` handlers + the
    `BearerAuthAddon` security modifier. Add `#[utoipa::path]` on every
    handler in `src/api/{me,agents,credentials,events,messages,
-   webhooks,bootstrap}.rs` and `#[derive(ToSchema)]` on every DTO.
+webhooks,bootstrap}.rs` and `#[derive(ToSchema)]` on every DTO.
    Mount `openapi_router()` on the unauth side in `src/api/mod.rs`.
    Write `tests/openapi_spec_test.rs` (spec served, 3.1 parses, route
    diff empty, Content-Type correct, rate-limit shared with `/health`).
@@ -610,7 +610,7 @@ full v1–v7 suite must remain green at every checkpoint.
    `tests/cli_output_flag_test.rs`. Keep `src/cli/output.rs` ≤ 250
    lines; push overflow into noun modules.
 3. **Slice 3 — AC-45 idempotent login.** Implement `src/cli/nouns/
-   auth.rs::login` with the bootstrap-or-login decision tree (probe
+auth.rs::login` with the bootstrap-or-login decision tree (probe
    `/api/me`, fall through to `/api/bootstrap` on 401 "not
    bootstrapped", fall through to `/api/login` on 409 "already
    bootstrapped"), persist token into active context. Wire
@@ -627,8 +627,8 @@ full v1–v7 suite must remain green at every checkpoint.
    (subprocess spawn, initialize, tools/list diff vs `ApiDoc`,
    tools/call agent.create → server-side event lands). Keep
    `src/mcp/mod.rs` ≤ 300 lines; beyond that split into `event_loop.rs`
-   + `dispatch.rs`. **Depends on Slice 1 (ApiDoc) and Slice 2 (active
-   context).**
+   - `dispatch.rs`. **Depends on Slice 1 (ApiDoc) and Slice 2 (active
+     context).**
 5. **Slice 5 — AC-50 installer + AC-51 completions.** Finalize
    `install.sh` at repo root (platform detect, release resolve,
    sha256 enforce, cosign verify with soft/hard fail modes, install

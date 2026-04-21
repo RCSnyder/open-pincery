@@ -678,8 +678,7 @@ src/
     config.rs                # NEW — read/write ~/.config/open-pincery/config.toml
     commands/
       mod.rs                 # NEW — re-exports
-      bootstrap.rs           # NEW — pcy bootstrap
-      login.rs               # NEW — pcy login --token ...
+      login.rs               # NEW — pcy login (idempotent; bootstrap-or-login fallback)
       agent.rs               # NEW — pcy agent {create,list,show,disable,rotate-secret}
       message.rs             # NEW — pcy message
       events.rs              # NEW — pcy events [--tail --since]
@@ -1121,7 +1120,7 @@ The onramp is the documented + test-enforced path from an empty clone to a worki
 | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | `docker-compose.caddy.yml`        | Overlay file adding a Caddy service in front of app; published ports switch from app:8080 to caddy:80/443                                 |
 | `Caddyfile.example`               | Template with a single-line site block + env-var placeholders for domain and email                                                        |
-| `scripts/smoke.sh`                | Bash: `compose up --wait` → poll `/ready` → `pcy bootstrap/login/agent create/message` → `pcy events` → assert `message_received`         |
+| `scripts/smoke.sh`                | Bash: `compose up --wait` → poll `/ready` → `pcy login/agent create/message` → `pcy events` → assert `message_received`                   |
 | `scripts/smoke.ps1`               | PowerShell equivalent                                                                                                                     |
 | `tests/compose_env_test.rs`       | Runs `docker compose config` against a fixture env; asserts passthrough + secure defaults + fail-fast                                     |
 | `tests/env_example_test.rs`       | Parses `.env.example`; scans source for `env::var`; asserts coverage modulo explicit allowlist                                            |
@@ -1441,7 +1440,6 @@ For a `Yolo` agent the same flow dispatches to `ProcessExecutor::run`, which run
 
 None. The `ToolExecutor` trait seam is stable enough to host Zerobox (v8) and a test `CountingExecutor` (v6) without further refactor. The two reserved DB status values do not change existing transition code; the TLA+-faithful CAS split that uses them is tracked for v10.d change the compose ports line (documented in Troubleshooting).
 
-
 ---
 
 ## v7 Design Addendum — Credential Vault & Reasoner-Secret Refusal
@@ -1588,6 +1586,7 @@ struct CredentialSummary {
 ```
 
 Validation:
+
 - `name` must match `^[a-z0-9_]{1,64}$` (regex verified without the `regex` crate using a hand-rolled ASCII check — avoids new dep).
 - `value` length: 1..=8192 bytes.
 - All three handlers require `require_workspace_admin(&state.pool, auth.user_id, ws_id)` which returns 403 for non-admin members and 404 for workspaces the user is not a member of. Denials append an `auth_forbidden` event.
@@ -1672,11 +1671,12 @@ VALUES (
 The existing one-active-per-name unique partial index guarantees v1 becomes inactive before v2 becomes active (done in a single migration transaction).
 
 Test asserts:
+
 - `SELECT template FROM prompt_templates WHERE name='wake_system_prompt' AND is_active=TRUE` contains literal substrings `pcy credential add`, `REFUSE`, and `POST /api/workspaces/:id/credentials`.
 - Active row version is `2`, not `1`.
 - Prompt assembly (AC-3) continues to pass: assembled prompt includes the new template text.
 
-This is a prompt-content assertion — we do **not** attempt to test LLM behavior (that requires a real model). The scope language "LLM response asserted to contain `pcy credential add`" is satisfied by asserting the *instruction* to the LLM is present; behavioral compliance of real models is out of v7's verifiability scope and covered by the existing wiremock framework if needed.
+This is a prompt-content assertion — we do **not** attempt to test LLM behavior (that requires a real model). The scope language "LLM response asserted to contain `pcy credential add`" is satisfied by asserting the _instruction_ to the LLM is present; behavioral compliance of real models is out of v7's verifiability scope and covered by the existing wiremock framework if needed.
 
 **AC-43 — `PLACEHOLDER:<name>` dispatch envelope:**
 
@@ -1756,14 +1756,14 @@ None added. The vault is an in-process crypto module over the existing Postgres;
 
 ### Test Strategy
 
-| AC    | Test file                          | Kind         | Notes                                                                                                                                                                                                                                                                                 |
-| ----- | ---------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| AC-38 | `tests/vault_roundtrip_test.rs`    | Unit         | Seal+open round-trips 100 iterations with distinct nonces (nonce set size == 100); tampering ciphertext/nonce/name/workspace_id/key → `VaultError::Authentication`, no panic. Uses `aes-gcm` directly; no DB.                                                                         |
-| AC-39 | `tests/vault_api_test.rs`          | DB integ     | admin create/list/revoke; non-admin 403; list JSON contains zero bytes of the secret value; duplicate non-revoked name → 409; revoke-then-readd works                                                                                                                                |
-| AC-40 | `tests/cli_credential_test.rs`     | CLI unit     | Invokes `Cli::try_parse_from(["pcy","credential","add","foo","--value","bar"])` and asserts a clap error (no `--value` flag exists). Stdin round-trip with `--stdin` handled by test using `ApiClient` directly (full PTY path smoke-tested at the `rpassword` call site by integration test scaffold, not in CI) |
-| AC-41 | `tests/list_credentials_tool_test.rs` | DB integ  | Workspace A has 3 creds (1 revoked); dispatch_tool("list_credentials") returns Output JSON of 2 summaries; workspace B (isolated) returns `[]`; payload contains zero bytes of any stored secret value                                                                                |
-| AC-42 | `tests/reasoner_refusal_test.rs`   | DB integ     | Active `wake_system_prompt` row has `version = 2`; template text contains `pcy credential add`, `REFUSE`, `POST /api/workspaces/:id/credentials`; v1 row still exists with `is_active = false`                                                                                       |
-| AC-43 | `tests/placeholder_envelope_test.rs` | DB integ   | (a) Yolo agent + `PLACEHOLDER:missing` → `ToolResult::Error("credential not found: missing")`, one `credential_unresolved` event, zero `CountingExecutor` spawns. (b) `PLACEHOLDER:stripe_test` after seeding stripe_test → dispatch proceeds, child env contains literal `PLACEHOLDER:stripe_test`. (c) Revoke stripe_test, re-dispatch → `credential_unresolved` event. |
+| AC    | Test file                             | Kind     | Notes                                                                                                                                                                                                                                                                                                                                                                     |
+| ----- | ------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AC-38 | `tests/vault_roundtrip_test.rs`       | Unit     | Seal+open round-trips 100 iterations with distinct nonces (nonce set size == 100); tampering ciphertext/nonce/name/workspace_id/key → `VaultError::Authentication`, no panic. Uses `aes-gcm` directly; no DB.                                                                                                                                                             |
+| AC-39 | `tests/vault_api_test.rs`             | DB integ | admin create/list/revoke; non-admin 403; list JSON contains zero bytes of the secret value; duplicate non-revoked name → 409; revoke-then-readd works                                                                                                                                                                                                                     |
+| AC-40 | `tests/cli_credential_test.rs`        | CLI unit | Invokes `Cli::try_parse_from(["pcy","credential","add","foo","--value","bar"])` and asserts a clap error (no `--value` flag exists). Stdin round-trip with `--stdin` handled by test using `ApiClient` directly (full PTY path smoke-tested at the `rpassword` call site by integration test scaffold, not in CI)                                                         |
+| AC-41 | `tests/list_credentials_tool_test.rs` | DB integ | Workspace A has 3 creds (1 revoked); dispatch_tool("list_credentials") returns Output JSON of 2 summaries; workspace B (isolated) returns `[]`; payload contains zero bytes of any stored secret value                                                                                                                                                                    |
+| AC-42 | `tests/reasoner_refusal_test.rs`      | DB integ | Active `wake_system_prompt` row has `version = 2`; template text contains `pcy credential add`, `REFUSE`, `POST /api/workspaces/:id/credentials`; v1 row still exists with `is_active = false`                                                                                                                                                                            |
+| AC-43 | `tests/placeholder_envelope_test.rs`  | DB integ | (a) Yolo agent + `PLACEHOLDER:missing` → `ToolResult::Error("credential not found: missing")`, one `credential_unresolved` event, zero `CountingExecutor` spawns. (b) `PLACEHOLDER:stripe_test` after seeding stripe_test → dispatch proceeds, child env contains literal `PLACEHOLDER:stripe_test`. (c) Revoke stripe_test, re-dispatch → `credential_unresolved` event. |
 
 ### Observability
 
@@ -1794,7 +1794,7 @@ Scenario: operator stores `stripe_test`, agent reasons "I should charge a test c
 6. Next LLM turn: tool_call `shell` with `{"command":"curl -sS -u $KEY: https://api.stripe.com/...", "env":{"KEY":"PLACEHOLDER:stripe_test"}}`.
 7. `dispatch_tool`: capability gate passes for Yolo (ExecuteLocal). Placeholder scan finds `PLACEHOLDER:stripe_test`, looks up, row exists and is not revoked. Proceed.
 8. `ProcessExecutor::run` creates tempdir, `env_clear()`, re-adds `PATH`, then adds `KEY=PLACEHOLDER:stripe_test`. Child sees the placeholder string, not the secret. v7 has no proxy; the curl fails (or Stripe returns auth error). The correct outcome for v7 — the seam exists, the secret never leaves the substrate process memory, v9 will plug in the proxy.
-9. For a `Locked` agent: step 7 trips the capability gate on `ExecuteLocal`; `list_credentials` still works (ReadLocal) so the agent can at least observe what it *would* have access to if promoted.
+9. For a `Locked` agent: step 7 trips the capability gate on `ExecuteLocal`; `list_credentials` still works (ReadLocal) so the agent can at least observe what it _would_ have access to if promoted.
 
 ### Scope Adjustments (from EXPAND)
 
@@ -1811,7 +1811,6 @@ None with BUILD impact. Two tracked as v7 Deferred in `scope.md`:
 
 - Master-key rotation (re-key every sealed row) — bounded, land when operator community asks.
 - Per-mission credential ACLs — v10 `capability_scope`.
-
 
 ---
 
@@ -2201,18 +2200,18 @@ No new server-side outbound integrations.
 
 ### Test Strategy (one row per v8 AC)
 
-| AC     | Test file                       | Kind         | Notes                                                                                                                    |
-| ------ | ------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------ |
-| AC-44  | openapi_spec_test.rs            | integration  | Spins up `api::router()` in-process; fetches `/openapi.json`; `openapiv3::OpenAPI` parse; diff vs route enumeration.     |
-| AC-45  | cli_login_idempotent_test.rs    | e2e (compose)| Fresh compose reset + `pcy login` × 2; `pcy bootstrap` alias single warning; `--help` excludes `bootstrap`.              |
-| AC-46  | cli_noun_verb_test.rs           | e2e (compose)| Parameterized (legacy, new) pairs; stdout byte-identical; ambiguous name → exit 2 + table on stderr.                     |
-| AC-47  | cli_output_flag_test.rs         | e2e (compose)| json parses; name line-per-item; jsonpath selector; TTY detection via `PTY` fixture; `NO_COLOR`; `--force` vs `--yes`.   |
-| AC-48  | cli_context_test.rs             | unit + e2e   | Unit: migrate.rs over fixture files. E2e: two contexts, switching, env/flag override, whoami 200/1 against wrong token. |
-| AC-49  | mcp_smoke_test.rs               | integration  | Spawn `pcy mcp serve` subprocess; full JSON-RPC round-trip; tools/list diff vs router; agent.create loop → event lands. |
-| AC-50  | installer_test.rs               | script       | `bash -n` + shellcheck warning-level; local fixture GitHub mirror; sha256 mismatch; cosign-required gate. Feature-gated. |
-| AC-51  | cli_completion_test.rs          | unit         | Four shells; non-empty + shell-specific marker string.                                                                   |
-| AC-52a | api_naming_test.rs              | integration  | Walks `ApiDoc::openapi()`; asserts plural paths / `{id}` / summaries / no PUT / no `format` field.                       |
-| AC-52b | cli_naming_test.rs              | unit         | Walks clap `Command` tree; asserts about strings, `-o` parity, no `--format`/`--yes` outside deprecated.                 |
+| AC     | Test file                    | Kind          | Notes                                                                                                                                        |
+| ------ | ---------------------------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| AC-44  | openapi_spec_test.rs         | integration   | Spins up `api::router()` in-process; fetches `/openapi.json`; `openapiv3::OpenAPI` parse; diff vs route enumeration.                         |
+| AC-45  | cli_login_idempotent_test.rs | e2e (compose) | Fresh compose reset + `pcy login --bootstrap-token` × 2 (second reports `already_bootstrapped:true`); `--help` does not contain `bootstrap`. |
+| AC-46  | cli_noun_verb_test.rs        | e2e (compose) | Parameterized (legacy, new) pairs; stdout byte-identical; ambiguous name → exit 2 + table on stderr.                                         |
+| AC-47  | cli_output_flag_test.rs      | e2e (compose) | json parses; name line-per-item; jsonpath selector; TTY detection via `PTY` fixture; `NO_COLOR`; `--force` vs `--yes`.                       |
+| AC-48  | cli_context_test.rs          | unit + e2e    | Unit: migrate.rs over fixture files. E2e: two contexts, switching, env/flag override, whoami 200/1 against wrong token.                      |
+| AC-49  | mcp_smoke_test.rs            | integration   | Spawn `pcy mcp serve` subprocess; full JSON-RPC round-trip; tools/list diff vs router; agent.create loop → event lands.                      |
+| AC-50  | installer_test.rs            | script        | `bash -n` + shellcheck warning-level; local fixture GitHub mirror; sha256 mismatch; cosign-required gate. Feature-gated.                     |
+| AC-51  | cli_completion_test.rs       | unit          | Four shells; non-empty + shell-specific marker string.                                                                                       |
+| AC-52a | api_naming_test.rs           | integration   | Walks `ApiDoc::openapi()`; asserts plural paths / `{id}` / summaries / no PUT / no `format` field.                                           |
+| AC-52b | cli_naming_test.rs           | unit          | Walks clap `Command` tree; asserts about strings, `-o` parity, no `--format`/`--yes` outside deprecated.                                     |
 
 Every test carries `// AC-NN` comment trailing the test function; the v3 grep guardrail already ensures this.
 

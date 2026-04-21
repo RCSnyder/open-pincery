@@ -1,5 +1,22 @@
 # Open Pincery — Experiment Log
 
+## POST-LANDING v8.0 scope trim — 2026-04-22T08:30Z
+
+- **Trigger**: live smoke against the v8.0 container surfaced `pcy bootstrap --bootstrap-token` leaking HTTP 409 instead of falling back to login. Dispatch path routed directly to `commands::bootstrap::run` instead of `login::run_with_bootstrap`, so the idempotent wrapper from AC-45 Slice V1 was unreachable via the top-level subcommand.
+- **Decision**: user elected to **remove `pcy bootstrap` entirely** rather than fix the dispatch bug. Rationale: kubectl / gh / terraform / oc all expose exactly one auth verb (`login`). An idempotent `login` that handles fresh-server bootstrap internally is the ergonomic floor; a separate `bootstrap` subcommand is scope bloat, not a feature.
+- **Gate**: PASS — `cargo check --bins --tests` clean, `cargo test --no-fail-fast` 48/48 suites green, `pcy bootstrap` → `unrecognized subcommand`, `pcy login --bootstrap-token <tk>` against already-bootstrapped server → `{"already_bootstrapped":true,"session_token":"..."}`.
+- **Changes**:
+  - `src/cli/mod.rs`: removed `Commands::Bootstrap` variant + its dispatch arm. Updated `Login` doc-comment to own the sole-auth-verb contract.
+  - `src/cli/commands/mod.rs`: dropped `pub mod bootstrap;`.
+  - `src/cli/commands/bootstrap.rs`: **deleted**.
+  - `src/api/bootstrap.rs`: server-side "already bootstrapped" error text now directs callers to `pcy login --bootstrap-token <token>`.
+  - `scripts/smoke.sh`, `scripts/smoke.ps1`, `pcy` wrapper: swap `pcy bootstrap` for `pcy login --bootstrap-token`.
+  - `README.md`: quickstart + troubleshooting updated.
+  - `tests/cli_e2e_test.rs`, `tests/cli_credential_test.rs`, `tests/readme_quickstart_test.rs`, `tests/smoke_script_test.rs`: argv arrays and string needles migrated to `login`.
+  - `scaffolding/scope.md` AC-45, `scaffolding/design.md` file-tree + AC-45 test strategy + smoke script row, `scaffolding/readiness.md` AC-45, `DELIVERY.md` (AC-25, AC-30, AC-45, AC-52b subcommand count): spec rewritten — AC-45 now reads "`pcy bootstrap` does not exist; `pcy login --bootstrap-token <token>` is idempotent, returning `{already_bootstrapped: bool, session_token: String}` both on first run and against an already-bootstrapped server. `pcy --help` lists no `bootstrap` subcommand."
+- **Retries**: 1 — initial cargo test run failed `test_pcy_cli_e2e_core_flow` because the argv array still passed `"bootstrap"`; fixed to `"login"` + `--bootstrap-token` and all 48 suites pass.
+- **Next**: commit with `feat(cli): remove pcy bootstrap subcommand; login is sole auth verb (AC-45)`, then continue v8.0 Slice V6 (push + PR) or move to v8.1 planning per user direction.
+
 ## BUILD v8.0 landing — 2026-04-22T02:00Z
 
 - **Scope re-cut**: v8 was a 9-AC unified surface rework (AC-44..AC-52). After a mid-stream CEO-grade audit the remainder of v8 was narrowed to **v8.0**: ship the pieces that unblock agentic scripting (idempotent login, whoami, JSON-by-default, shell completions, naming lint). Defer the hard pieces (full noun-verb migration with legacy shims, MCP stdio server, installer with cosign) to **v8.1**. Rationale: vertical-slice value beats horizontal layering; the harness needs working CLI now, not a half-migrated tree.
@@ -7,7 +24,7 @@
 - **Slice V1 — AC-45 idempotent login + AC-48 whoami** (commit `5ef6666`): `src/cli/commands/login.rs` now retries `client.login` when `client.bootstrap` returns HTTP 409; output JSON carries `already_bootstrapped: bool` so callers can distinguish. `src/cli/commands/whoami.rs` (NEW) prints `{context, url, user_id?, workspace_id?}` as one JSON line. New `Commands::Whoami` dispatch. 2 unit tests on `is_already_bootstrapped` pass.
 - **Slice V2 — AC-47 credential list honours --output** (commit `da2c637`): `src/cli/commands/credential.rs` — new `CredentialRow { name, created_at, created_by }` (TableRow + Serialize + Deserialize). `list()` takes `&OutputFormat` and dispatches through `output::render`. Old hand-rolled tab-separated fallback deleted. `revoke` now prints `{revoked: <name>}` JSON. 3 integration tests in `cli_credential_test` pass against live test DB.
 - **Slice V3 — AC-51 pcy completion** (commit `253dffe`): added `clap_complete = "4.5"` to Cargo.toml. `src/cli/commands/completion.rs` (NEW) uses `clap::CommandFactory` + `clap_complete::generate` to emit completion scripts. `Commands::Completion { shell: clap_complete::Shell }` dispatch. `tests/cli_completion_test.rs` (NEW, 5 tests) asserts signature markers per shell (`_pcy()` / `#compdef pcy` / `complete -c pcy` / `Register-ArgumentCompleter`) and clap exit-2 on unknown shell. All 5 pass.
-- **Slice V4 — AC-52b cli_naming_test** (commit `d700346`): `tests/cli_naming_test.rs` (NEW) walks `Cli::command()` and enforces (1) every subcommand has `about`/`long_about`, (2) `--format` banned everywhere, (3) `--yes` only on `credential revoke`, (4) `--output` and `--no-color` declared global. Lint surfaced 15 naked subcommands (bootstrap/login/agent/*/message/events/budget/*/status) and forced adding one-line `about` doc comments so `pcy --help` is usable. All 5 tests pass.
+- **Slice V4 — AC-52b cli_naming_test** (commit `d700346`): `tests/cli_naming_test.rs` (NEW) walks `Cli::command()` and enforces (1) every subcommand has `about`/`long_about`, (2) `--format` banned everywhere, (3) `--yes` only on `credential revoke`, (4) `--output` and `--no-color` declared global. Lint surfaced 15 naked subcommands (bootstrap/login/agent/_/message/events/budget/_/status) and forced adding one-line `about` doc comments so `pcy --help` is usable. All 5 tests pass.
 - **Deferred to v8.1**: AC-46 full noun-verb migration (credential/agent/budget/event nouns + byte-identical legacy shim delegates), AC-49 MCP stdio server, AC-50 installer with cosign verification, AC-52a OpenAPI naming lint (the `api_naming_test.rs` half of AC-52).
 - **Retries**: 0 blocking — Slice V4 `every_subcommand_has_about` correctly failed on first run, surfacing the 15 real gaps; fixed in-slice by adding docstrings.
 - **Next**: Slice V5 — update DELIVERY.md with v8.0 section. Slice V6 — run full `cargo test` suite, push `v6-01_implementation` to origin, open draft PR.

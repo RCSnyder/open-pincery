@@ -102,20 +102,20 @@ async fn test_pcy_cli_e2e_core_flow() {
     .await;
     assert_ok("preflight status", &out);
 
-    // bootstrap
+    // login (idempotent: handles bootstrap-or-login internally)
     let out = run_pcy(
         pcy_bin.clone(),
         cfg_path.clone(),
         vec![
             "--url".into(),
             base_url.clone(),
-            "bootstrap".into(),
+            "login".into(),
             "--bootstrap-token".into(),
             "test-token".into(),
         ],
     )
     .await;
-    assert_ok("bootstrap", &out);
+    assert_ok("login", &out);
 
     // create agent
     let out = run_pcy(

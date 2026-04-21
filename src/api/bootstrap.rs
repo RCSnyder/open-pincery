@@ -131,7 +131,7 @@ pub async fn login(
     let admin = user::find_local_admin(&state.pool)
         .await?
         .ok_or(AppError::BadRequest(
-            "System not bootstrapped yet. Run 'pcy bootstrap' first.".into(),
+            "System not bootstrapped yet. Run 'pcy login --bootstrap-token <token>' first.".into(),
         ))?;
 
     let raw_token = crate::auth::generate_token();

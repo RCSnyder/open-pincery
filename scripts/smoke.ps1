@@ -75,10 +75,10 @@ if (-not $ready) {
   Fail "Service did not reach /ready within 60s." "#silent-wake"
 }
 
-Write-Host "Bootstrapping session..."
-& $Pcy --url $BaseUrl bootstrap --bootstrap-token $BootstrapToken *> "$env:TEMP\pcy-bootstrap.log"
+Write-Host "Logging in..."
+& $Pcy --url $BaseUrl login --bootstrap-token $BootstrapToken *> "$env:TEMP\pcy-login.log"
 if ($LASTEXITCODE -ne 0) {
-  Fail "pcy bootstrap failed. Check $env:TEMP\pcy-bootstrap.log" "#bootstrap-401"
+  Fail "pcy login failed. Check $env:TEMP\pcy-login.log" "#bootstrap-401"
 }
 
 $AgentName = "smoke-$(Get-Date -UFormat %s)"

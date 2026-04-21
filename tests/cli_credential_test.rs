@@ -171,20 +171,14 @@ async fn ac40_add_list_revoke_round_trip() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = tmp.path().join("config.toml");
 
-    // Bootstrap (blocks until the pcy binary writes cfg + session token).
+    // Log in (blocks until the pcy binary writes cfg + session token).
     let out = tokio::task::spawn_blocking({
         let cfg = cfg.clone();
         let base = base_url.clone();
         move || {
             run_pcy_with_stdin(
                 &cfg,
-                &[
-                    "--url",
-                    &base,
-                    "bootstrap",
-                    "--bootstrap-token",
-                    "test-token",
-                ],
+                &["--url", &base, "login", "--bootstrap-token", "test-token"],
                 None,
             )
         }
@@ -193,7 +187,7 @@ async fn ac40_add_list_revoke_round_trip() {
     .unwrap();
     assert!(
         out.status.success(),
-        "bootstrap failed: stderr={}",
+        "login failed: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
 

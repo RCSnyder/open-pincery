@@ -265,7 +265,7 @@ If `OPEN_PINCERY_URL=http://localhost:8080` is exported, the shortest command
 forms are:
 
 ```bash
-pcy bootstrap --bootstrap-token "$OPEN_PINCERY_BOOTSTRAP_TOKEN"
+pcy login --bootstrap-token "$OPEN_PINCERY_BOOTSTRAP_TOKEN"
 pcy agent create "my-agent"
 pcy message AGENT_ID "hello from cli"
 pcy events AGENT_ID
@@ -350,7 +350,7 @@ Anchor index:
 
 #### bootstrap-401
 
-- Confirm `.env` has the same `OPEN_PINCERY_BOOTSTRAP_TOKEN` you pass to `pcy bootstrap`.
+- Confirm `.env` has the same `OPEN_PINCERY_BOOTSTRAP_TOKEN` you pass to `pcy login --bootstrap-token`.
 - Verify the compose stack loaded your env: `docker compose config | grep OPEN_PINCERY_BOOTSTRAP_TOKEN`.
 
 #### rate-limit-429

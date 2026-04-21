@@ -72,9 +72,9 @@ if [[ "$ready_ok" -ne 1 ]]; then
   fail "Service did not reach /ready within 60s." "#silent-wake"
 fi
 
-echo "Bootstrapping session..."
-"$PCY_CMD" --url "$BASE_URL" bootstrap --bootstrap-token "$BOOTSTRAP_TOKEN" >/tmp/pcy-bootstrap.out 2>/tmp/pcy-bootstrap.err \
-  || fail "pcy bootstrap failed: $(cat /tmp/pcy-bootstrap.err)" "#bootstrap-401"
+echo "Logging in..."
+"$PCY_CMD" --url "$BASE_URL" login --bootstrap-token "$BOOTSTRAP_TOKEN" >/tmp/pcy-login.out 2>/tmp/pcy-login.err \
+  || fail "pcy login failed: $(cat /tmp/pcy-login.err)" "#bootstrap-401"
 
 agent_name="smoke-$(date +%s)"
 echo "Creating agent: $agent_name"
