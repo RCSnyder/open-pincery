@@ -1,5 +1,25 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — Slice A0 Linux Parity VERIFIED — 2026-04-21T21:15Z
+
+- **Gate**: end-to-end AC-75 verification PASS on Windows + WSL2 host.
+- **Trigger**: user directive "i do have wsl2, you verify it".
+- **Evidence**:
+  - Host: Windows 11, Docker Desktop 23.0.5, WSL2 kernel 5.4.72-microsoft-standard-WSL2.
+  - Built `ghcr.io/open-pincery/devshell:v9` locally from `Dockerfile.devshell` (sha256 `d08954b4733a`, 1.21 GB).
+  - Toolchain sanity check inside image: `rustc 1.88.0`, `cargo 1.88.0`, `sqlx-cli 0.8.6`, `bubblewrap 0.9.0`, `slirp4netns 1.2.1` — all five required binaries present and executable.
+  - `bash scripts/devshell.sh --version-check` → PASS (prints Docker version + pinned image tag).
+  - `powershell.exe scripts/devshell.ps1 --version-check` → PASS (identical output path).
+  - In-container run: `MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W):/work" -w /work -e CARGO_TARGET_DIR=/work/target/devshell ghcr.io/open-pincery/devshell:v9 cargo test --test devshell_parity_test --test security_doc_test` → **11/11 pass** (6 devshell_parity + 5 security_doc) after a 7m 34s cold compile.
+- **Runbook fixes discovered during verification**:
+  - Docker floor relaxed from 24+ to 23+ in `docs/runbooks/dev_setup_windows.md` (23.0.5 verified working).
+  - Added Git-Bash MSYS workaround to Windows troubleshooting table: `MSYS_NO_PATHCONV=1` + `$(pwd -W)` for ad-hoc `docker run -v` invocations; the PowerShell wrapper is unaffected.
+  - Added troubleshooting row for `landlock: not supported` → run `wsl --update` (kernel ≥ 5.13).
+- **Verification ladder**: native `cargo test --test devshell_parity_test --test security_doc_test` → 11/11 (no regression from runbook edits); in-container same command → 11/11.
+- **Retries**: 0 (one transient issue: initial `tail -40` pipe on async terminal didn't flush; resolved by re-running with `>/tmp/devshell_test.log` capture).
+- **Concerns**: WSL2 kernel 5.4.72 on this host is **below the 5.13 landlock floor** required by AC-53. `wsl --update` needed before Slice A2a. Noted as a prereq, not a regression — AC-75's structural contract is independent of AC-53 runtime.
+- **Next**: Slice A2a — AC-53 Zerobox real sandbox + AC-73 mode flag. Prereqs: (1) user runs `wsl --update` to bring kernel ≥ 5.13; (2) agreement on `deny.toml` allowlist for `seccompiler`, `landlock`, `cgroups-rs`, `nix`; (3) `cargo deny check` green before first code line.
+
 ## BUILD v9 — Slice A1 (AC-54 SECURITY.md) — 2026-04-21T20:30Z
 
 - **Gate**: post-build slice PASS (attempt 1).

@@ -13,7 +13,7 @@ see AC-75 in [`scaffolding/scope.md`](../../scaffolding/scope.md).
 ## Prerequisites
 
 - Windows 10 22H2+ or Windows 11 (x64)
-- [Docker Desktop 24+ for Windows](https://www.docker.com/products/docker-desktop/) with the **WSL2 backend** enabled (Settings → General → _Use the WSL 2 based engine_)
+- [Docker Desktop 23+ for Windows](https://www.docker.com/products/docker-desktop/) with the **WSL2 backend** enabled (Settings → General → _Use the WSL 2 based engine_). Verified working on Docker Desktop 23.0.5.
 - [Git for Windows](https://git-scm.com/download/win) 2.40+
 - PowerShell 7+ (Windows PowerShell 5.1 also works but PS7 is recommended)
 
@@ -82,6 +82,8 @@ use the devshell only for `cargo test`.
 | `privileged mode is incompatible with rootless`                                                         | Docker Desktop rootless mode must stay **off** for AC-75 — the sandbox needs `--privileged`.                                |
 | Line-ending errors on shell scripts                                                                     | Run `git config --global core.autocrlf input` before cloning, or `git checkout -- .` after cloning to rewrite line endings. |
 | Slow first build                                                                                        | The initial `cargo build` populates `target\devshell\`; subsequent runs are incremental.                                    |
+| Git Bash: `docker: invalid reference format` or path like `C:/Program Files/Git/work`                   | MSYS is mangling the `-v` bind-mount path. Prefix `docker run` with `MSYS_NO_PATHCONV=1` and use `$(pwd -W)` for the host path. The PowerShell wrapper is unaffected. |
+| AC-53 sandbox tests fail with `landlock: not supported`                                                 | WSL2 kernel is older than 5.13. Run `wsl --update` and restart Docker Desktop; confirm with `wsl cat /proc/version`.        |
 
 ## Next steps
 
