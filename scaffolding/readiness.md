@@ -758,3 +758,63 @@ Total engineering budget: 7-9 weeks.
 4. `src/tenancy.rs::Binds` is a bespoke subset of `sqlx` binds.
 
 All four are explicit and REVIEW-gated; none is a placeholder waiver.
+
+---
+
+## v9 AUDIT ADDENDUM — Risks, Mitigations, Hardening (2026-04-22T11:00Z)
+
+An adversarial audit of the v9 plan surfaced 18 concrete risks. Three warranted new ACs (AC-73 Sandbox Mode Flag, AC-74 Credential Hygiene, AC-75 Cross-Platform Dev Env). The remaining 15 are hardening details internal to existing ACs, documented below with the mitigation embedded in the slice that owns it.
+
+### Risk Register
+
+| # | Risk                                                                                                    | Owning AC / Slice      | Mitigation                                                                                                                                                                                     | Evidence gate                                                   |
+| - | ------------------------------------------------------------------------------------------------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| 1 | CI runner may not support user namespaces / unprivileged bwrap                                          | AC-53 / A2a            | CI job installs `bubblewrap slirp4netns uidmap` explicitly; preflight step greps `/proc/sys/kernel/unprivileged_userns_clone == 1`; if missing, sets it via `sudo sysctl -w`.                   | `ci/sandbox-preflight.yml` green on ubuntu-24.04                |
+| 2 | Sandbox startup cost regresses tool-call latency past acceptance                                        | AC-73 / A2a            | Hard perf budget 300ms p95, 500ms hard fail. Counter `sandbox_exec_duration_ms` emitted per call; CI runs 100 warm tool calls and asserts histogram.                                           | `tests/sandbox_perf_test.rs`                                    |
+| 3 | `SANDBOX_MODE=disabled` footgun in production                                                           | AC-73                  | Requires paired `OPEN_PINCERY_ALLOW_UNSAFE=true`; emits `sandbox_mode_changed` event at startup; stderr warning every 60s while disabled.                                                       | `tests/sandbox_mode_test.rs`                                    |
+| 4 | HTMX + CSP incompatibility (inline `hx-on:` handlers require `unsafe-inline`)                           | AC-61 / C1             | Use nonce-based CSP: server generates per-response nonce; HTMX 1.9 `htmx.config.inlineScriptNonce`. No `unsafe-inline`, no `unsafe-eval`.                                                      | `tests/ui_smoke_test_v9.rs` asserts CSP header includes nonce, rejects inline without matching nonce |
+| 5 | Deposit page is unauthenticated (AC-56) — vulnerable to CSRF + brute force                              | AC-56 / B2             | Form includes a double-submit token derived from the deposit_token; IP-based rate-limit (10 POSTs/min/IP); every attempt (success OR fail) emits `deposit_attempt` event.                       | `tests/credential_deposit_test.rs` + rate-limit assertion       |
+| 6 | Session cookie flags missing `HttpOnly` / `Secure` / `SameSite`                                         | AC-58 / A3             | `Set-Cookie` contract documented in `src/api/sessions.rs`; `tests/session_cookie_flags_test.rs` asserts all three flags.                                                                       | Cookie flags test green                                         |
+| 7 | Session token comparison timing attack                                                                  | AC-58 / A3             | Use `subtle::ConstantTimeEq` for every session-token compare.                                                                                                                                  | Code review checks for `==` on bytes in session lookup          |
+| 8 | Existing rows have NULL `workspace_id` on upgrade (AC-65 migrations fail)                               | AC-65 / E1a            | Migration `20260501000001_add_workspace_id_to_sessions.sql` CREATEs a "legacy" default workspace if none exists, backfills all existing rows, THEN adds NOT NULL. Rollback note in migration.  | Migration dry-run on v8 snapshot + `tests/upgrade_from_v8_test.rs` |
+| 9 | Tenancy lint false positives (health checks, migrations legitimately use raw `sqlx::query`)             | AC-65 / E1b            | Lint allowlist: files matching `src/db/**` or `src/background/startup/**`; else `#[allow(tenancy::unscoped)]` attribute required with a comment explaining why.                                | `tests/tenancy_middleware_test.rs` exercises both allow and deny paths |
+| 10 | Concurrent tool calls collide on cgroup / netns names; leaked cgroups from crashed processes accumulate | AC-53 / A2a            | Naming: `pincery-<uuid_v4>`; on startup, sweep `/sys/fs/cgroup/pincery-*` older than server uptime and remove. Drop-guard on `SandboxHandle` cleans up even on panic.                          | `tests/sandbox_concurrency_test.rs` runs 50 parallel tool calls, asserts no leaked cgroups         |
+| 11 | `zeroize` is best-effort; compiler may elide writes                                                     | AC-74 / A2c            | Use `zeroize` crate (which marks as `volatile`); `SecretBuffer` wraps `Vec<u8>` with `Drop` + `ZeroizeOnDrop` derives; `#[deny(unsafe_code)]` on the module.                                   | `tests/credential_hygiene_test.rs` does post-drop memory grep   |
+| 12 | Log redaction layer false negatives on secret-shaped values without obvious names                       | AC-74 / A2c            | Dual strategy: (a) name-matching (password, token, secret, bearer, api_key) via regex on log-record keys; (b) length+shape heuristic for values matching `sk-[a-zA-Z0-9]{16,}` / `ghp_[a-zA-Z0-9]{36}` / JWT tri-dot format. Both yield `<REDACTED>`. | `tests/credential_hygiene_test.rs` test matrix of 6 credential shapes |
+| 13 | New crates (`landlock`, `seccompiler`, `cgroups-rs`, `zeroize`, `subtle`, `slirp4netns-bindings`) may have questionable licensing/maintenance | AC-73 / A2a            | `deny.toml` updated with explicit allowlist + version pins; `cargo deny check licenses bans advisories sources` in CI; maintenance check: last commit within 12 months.                       | `cargo deny check` green; `deny.toml` diff reviewed             |
+| 14 | Dev path on Mac/Windows breaks (kernel primitives Linux-only) → contributors can't test sandbox         | AC-75 / A0             | `scripts/devshell.sh` + `.ps1` launches pinned Docker image; parity test re-runs sandbox suite inside devshell from a Linux CI host.                                                           | `tests/devshell_parity_test.rs` + manual Mac/Windows walkthrough |
+| 15 | Tool-call plaintext survives in kernel page cache / swap                                                | AC-71 / A2c            | `mlock()` the SecretBuffer region via `region::lock`; document in SECURITY.md that swap must be disabled on prod hosts or encrypted.                                                           | Code review + SECURITY.md section "Deployment Hardening"        |
+| 16 | AC-65 endpoint migration (25 files at once) too large to review safely                                  | AC-65 / E1c            | Pre-slice preparatory slice E1b MUST ship the middleware + lint first; E1c then becomes a mechanical migration where every file-edit follows an identical pattern. REVIEW checks the PATTERN once, then samples 5 files.                                  | REVIEW comment log in E1c commit                                |
+| 17 | No rollback plan if v9.0 production upgrade fails                                                       | Pre-v9 / bootstrap     | Tag `v8.0.1-pre-v9-baseline` on current `v6-01_implementation` HEAD; v9.0 release notes include "to roll back: `git checkout v8.0.1-pre-v9-baseline && docker compose down && up --build`".    | Tag exists before first v9 build commit                         |
+| 18 | No canary / staged rollout for self-hosted operators                                                    | AC-73 / A2a            | `SANDBOX_MODE=audit` lets operators run a week in log-only mode, see what WOULD be blocked, adjust allowlists, THEN flip to `enforce`. Documented in DELIVERY.md "v9 Upgrade Playbook".        | Upgrade playbook section exists                                 |
+
+### Definition-of-Done Matrix (per slice, enforced by REVIEW)
+
+| Check                                                | Mechanism                                                  | Pass condition                                      |
+| ---------------------------------------------------- | ---------------------------------------------------------- | --------------------------------------------------- |
+| Compiles + clippy clean                              | `cargo clippy --all-targets --all-features -- -D warnings` | Exit 0                                              |
+| Every new AC has a named test file that passes       | `cargo test`                                               | All targets green                                   |
+| Every P0 AC has an adversarial (not happy-path) test | Manual REVIEW                                              | Test file contains negative assertions that could only pass with the feature correctly implemented |
+| New event types registered in `src/models/events.rs` | `tests/event_type_lint.rs`                                 | All new event types enumerated                      |
+| New CLI verbs in noun-verb tree                      | `tests/cli_naming_lint.rs` (AC-52b)                        | Lint green                                          |
+| Migrations are additive + include backfill           | REVIEW + `tests/upgrade_from_v8_test.rs`                   | No destructive DDL, backfill covers all existing rows |
+| `CHANGELOG.md` has Phase-tagged entry                | `tests/changelog_test.rs`                                  | Entry exists with AC-IDs                            |
+| `deny.toml` + `cargo deny check`                     | CI                                                         | No unreviewed new crates; licenses allowed          |
+| `cargo audit`                                        | CI                                                         | No high/critical advisories                         |
+| Threat-model impact signed off                       | REVIEW                                                     | If slice touches auth / sandbox / tenancy, reviewer records impact in commit trailer |
+| Rollback tag                                         | Git                                                        | `v9.0.0-phase<X>-slice<N>` tag on slice commit     |
+
+### Pre-v9 Baseline Tag
+
+Before BUILD Slice A0 merges, tag the current HEAD:
+
+```bash
+git tag -a v8.0.1-pre-v9-baseline -m "Last v8 commit before v9 BUILD begins. Rollback target."
+git push origin v8.0.1-pre-v9-baseline
+```
+
+Rollback recipe documented in `docs/runbooks/rollback_to_v8.md` (create in Slice A0).
+
+### Upgraded Verdict
+
+**READY** — with the 3 new ACs (AC-73/74/75) added and the 15 in-slice risks documented. Scope totals: **23 ACs**, **8-10 weeks**. v9.0 ships after Phases A + B + C + E complete.

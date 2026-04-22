@@ -1,5 +1,27 @@
 # Open Pincery — Experiment Log
 
+## AUDIT v9 — Risk Register + 3 New ACs — 2026-04-22T11:00Z
+
+- **Gate**: post-expand + post-design + post-analyze re-PASS after audit (attempt 1).
+- **Trigger**: user asked for an audit of the v9 plan to increase probability of success.
+- **Evidence**: An adversarial audit surfaced 18 concrete risks; 3 warranted new acceptance criteria, the remaining 15 are in-slice hardening documented in `scaffolding/readiness.md` § "v9 AUDIT ADDENDUM". New ACs: **AC-73 Sandbox Mode Flag** (enforce/audit/disabled with `OPEN_PINCERY_ALLOW_UNSAFE` safety interlock + startup self-test + 300ms p95 perf budget), **AC-74 Credential Plaintext Hygiene** (`zeroize` + `mlock` + tracing `RedactionLayer` + event-emit filter + 6 credential-shape regexes), **AC-75 Cross-Platform Developer Environment** (`scripts/devshell.sh` + pinned Ubuntu 24.04 Docker image + Mac/Windows runbooks + parity test). Scope, design, and readiness all updated; Build Order now starts with Slice A0 (AC-75 dev env) so cross-platform contributors can run sandbox tests from day 1.
+- **Risk register highlights** (full table in readiness.md):
+  - CI kernel / unprivileged userns availability → CI preflight step with explicit `apt install` + `sysctl` check.
+  - HTMX + CSP nonce (not `unsafe-inline`) for AC-61.
+  - Deposit page CSRF double-submit + IP rate-limit + `deposit_attempt` event.
+  - Session cookies: `HttpOnly; Secure; SameSite=Strict` + `subtle::ConstantTimeEq`.
+  - AC-65 migration backfills default workspace for existing NULL rows.
+  - Tenancy lint allowlist for legitimate raw-query sites (`src/db/**`, startup).
+  - Concurrent sandbox: `pincery-<uuid>` naming + startup sweep of leaked cgroups + Drop-guard cleanup.
+  - `zeroize` + `mlock` + swap-disabled hardening note in SECURITY.md.
+  - Pre-v9 rollback tag `v8.0.1-pre-v9-baseline` before first BUILD commit.
+  - `SANDBOX_MODE=audit` as staged-rollout mechanism for self-hosted operators.
+- **Definition-of-Done matrix** (11 checks) added to both scope.md and readiness.md; REVIEW enforces it per slice.
+- **Threat model additions** for AC-54 SECURITY.md: 8 in-scope attacks enumerated with their mitigating ACs; 5 out-of-scope items documented; deployment-hardening checklist drafted.
+- **Scope growth**: 20 → 23 ACs; 7-9 weeks → **8-10 weeks** (audit-driven, user to confirm).
+- **Retries**: 0.
+- **Next**: user confirmation of the audit additions and the 8-10-week estimate, then STOP for user review before BUILD Slice A0 begins. If confirmed: tag `v8.0.1-pre-v9-baseline`, then BUILD A0 (devshell) → A1 (SECURITY.md) → A2a (sandbox core + AC-73 mode flag).
+
 ## ANALYZE v9 — Readiness READY — 2026-04-22T10:30Z
 
 - **Gate**: post-analyze PASS (attempt 1). Verdict: READY.

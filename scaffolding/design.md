@@ -2460,3 +2460,45 @@ network_blocked   { tool_call_id, destination_host, destination_port, protocol }
 - v7 AC-40 credential vault: extended via `credential_requests` table; existing `credentials` table untouched. Secret proxy (AC-71) reuses the vault decrypt path.
 - v8 AC-45 idempotent login, AC-47 `--output`: every new list endpoint (requests, sessions, users, cost, network allowlist) honours `--output` and the noun-verb tree.
 - v8 AC-52b naming lint: extended to allowlist new subcommands (`credential request`, `session`, `user`, `cost`, `agent network`).
+
+### v9 DESIGN Addendum — Audit Hardening (AC-73 / AC-74 / AC-75)
+
+The audit pass added three ACs. Implementation notes:
+
+**AC-73 Sandbox Mode Flag** lives in `src/config.rs` as `pub enum SandboxMode { Enforce, Audit, Disabled }` with `FromStr` parsing `OPEN_PINCERY_SANDBOX_MODE`. `SandboxedExecutor::exec` reads mode at call time (not at construction) so it can be flipped without server restart. `Audit` mode short-circuits ALL deny decisions to Allow but emits `sandbox_would_block` events; `Disabled` skips the sandbox entirely but only if `OPEN_PINCERY_ALLOW_UNSAFE=true` is set — otherwise startup aborts with `SANDBOX_MODE=disabled requires OPEN_PINCERY_ALLOW_UNSAFE=true (this is a safety interlock)`. Startup self-test runs ONE synthetic tool call at `SANDBOX_MODE=enforce` with a known-blocking payload (`cat /etc/shadow`); if it succeeds, boot aborts.
+
+**AC-74 Credential Hygiene** introduces `src/observability/redaction.rs` exporting a `RedactionLayer` that implements `tracing_subscriber::Layer`. It wraps every field value in a `Visit` impl; if the field name matches `password|api_key|token|secret|authorization|bearer` (case-insensitive) OR the value matches one of six credential-shape regexes (`sk-[A-Za-z0-9]{16,}`, `ghp_[A-Za-z0-9]{36}`, `xox[baprs]-[A-Za-z0-9-]{10,}`, JWT tri-dot, AWS AKIA/ASIA, Azure Bearer), the value is replaced with `<REDACTED>` before the downstream formatter sees it. The same regex set plus dynamic credential names (loaded from the `credentials` table at startup + on `credential_added` events) runs inside `src/models/events.rs::Event::try_new`, rejecting events with `EventRejected::CredentialPlaintext`. `SecretBuffer` in `src/runtime/secret_proxy.rs`:
+
+```rust
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
+#[derive(ZeroizeOnDrop)]
+struct SecretBuffer {
+    #[zeroize(drop)]
+    bytes: Vec<u8>,
+    mlock_region: Option<region::LockGuard>,  // mlock() so pages never swap
+}
+```
+
+**AC-75 Cross-Platform Dev Env** ships `Dockerfile.devshell` (Ubuntu 24.04 + bubblewrap + slirp4netns + uidmap + libseccomp-dev + landlock headers + rustup + sqlx-cli). `scripts/devshell.sh` runs `docker run --rm -it --privileged --cgroupns=host -v $PWD:/work -w /work ghcr.io/open-pincery/devshell:v9 "$@"`. `.ps1` mirror for PowerShell. CI publishes the image on tag push. `docs/runbooks/dev_setup_{macos,windows}.md` walks a new contributor from clone to `devshell cargo test` green.
+
+### v9 Threat-Model Additions (feed into AC-54 SECURITY.md)
+
+Audit surfaced these explicit threat-model items SECURITY.md must address:
+
+1. **In-scope**: prompt-injection-driven credential-echo into event log (AC-74 rejects); tool-sandbox escape (AC-53 12-payload matrix); cross-workspace data access via session forgery (AC-65 + constant-time compare); session hijack via XSS (AC-61 nonce-CSP + cookie `HttpOnly`); CSRF on deposit page (AC-56 double-submit token); timing attack on session token (AC-58 + `subtle`); swap-leak of plaintext credentials (AC-71 + `mlock`); supply-chain attack via new sandbox crates (AC-73 + `cargo deny`).
+2. **Out-of-scope (documented, not mitigated)**: compromised host kernel; malicious Postgres admin; physical access; kernel CVEs (user must patch); side-channel attacks on CPU microarchitecture (Spectre-class).
+3. **Deployment hardening checklist** (new section): disable or encrypt swap; run with `--security-opt no-new-privileges`; kernel ≥ 5.13; `/proc/sys/kernel/unprivileged_userns_clone=1`; outbound firewall at host level defense-in-depth.
+
+### v9 Observability Additions (feed into Observability section)
+
+New event types added by the audit pass:
+
+- `sandbox_would_block { tool_call_id, payload_category, reason }` — AC-73 `audit` mode
+- `sandbox_mode_changed { old, new, user_id }` — AC-73
+- `sandbox_mode_default` — AC-73 startup warning (unset → enforce)
+- `sandbox_self_test_failed { reason }` — AC-73 startup abort
+- `credential_plaintext_rejected { event_type, pattern_matched }` — AC-74
+- `deposit_attempt { deposit_token_id, outcome, source_ip }` — AC-56 hardening
+
+Every new event type is registered in `src/models/events.rs` and enumerated in `tests/event_type_lint.rs`.

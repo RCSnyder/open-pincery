@@ -680,6 +680,12 @@ A v9.0 release where: (a) the binary ships with **industry-leading** Linux agent
 
 - **AC-72** (Per-Agent Network Egress Allowlist): A new migration creates `agent_network_allowlist (id uuid pk, agent_id uuid fk, host_pattern text, protocol text check (protocol in ('tcp','udp')), port integer, created_at timestamptz)`. When the sandbox (AC-53) starts a tool call, it reads the agent's allowlist and configures the network namespace's userspace proxy (slirp4netns) to permit ONLY those `(host_pattern, protocol, port)` tuples. Any attempted egress to a non-allowlisted destination is dropped at the proxy layer and a `network_blocked` event is emitted with `{destination_host, destination_port, protocol, tool_name}`. CLI: `pcy agent network allow <agent> <host>:<port>/<proto>`, `pcy agent network list <agent>`, `pcy agent network revoke <allowlist_id>`. UI: agent-detail page shows the allowlist with add/remove. Adversarial test `tests/network_egress_test.rs`: seed an agent with allowlist `[("api.openai.com", "tcp", 443)]`, execute a tool that curls `https://api.openai.com` (expect success) and a tool that curls `http://attacker.example.com` (expect blocked + `network_blocked` event).
 
+- **AC-73** (Sandbox Mode Feature Flag — safe rollout & incident brake): New config `OPEN_PINCERY_SANDBOX_MODE` with three values: `enforce` (default, production) blocks violations; `audit` logs what would be blocked and emits `sandbox_would_block` events but allows execution; `disabled` bypasses sandbox entirely (emergency brake for operators). Every mode change is logged as a `sandbox_mode_changed` event with `{old, new, user_id}`. The mode MUST be set explicitly at server start — unset defaults to `enforce` but logs a `sandbox_mode_default` warning. A startup self-test runs the 12-payload adversarial suite against a canary tool call at `sandbox_mode=enforce` on every boot; failure aborts startup with `sandbox_self_test_failed`. Verified by `tests/sandbox_mode_test.rs`: all three modes exercised; `audit` logs without blocking; `disabled` refused unless `OPEN_PINCERY_ALLOW_UNSAFE=true` is also set; `enforce` self-test must pass on CI. Performance budget: sandbox overhead ≤ 300ms p95 per tool call measured by `sandbox_exec_duration_ms` counter; regressions above 500ms p95 fail `tests/sandbox_perf_test.rs`.
+
+- **AC-74** (Credential Plaintext Hygiene — defense-in-depth): Plaintext credential bytes are explicitly zeroized on drop (via the `zeroize` crate) in `src/runtime/secret_proxy.rs` and in the sandboxed-child env-injection path. A tracing layer `src/observability/redaction.rs` scrubs any log record whose value matches the lexical pattern of a known credential name (configured from the `credentials` table's `name` column plus a static denylist: `password|api_key|token|secret|authorization|bearer`) — replacement is the literal string `<REDACTED>`. All structured log macros (`error!`, `warn!`, `info!`, `debug!`, `trace!`) flow through this layer; it is not opt-in. Event-log `content` fields are scanned by the same layer before DB insert — any match rejects the event with a `credential_plaintext_rejected` event that records `{event_type, pattern_matched}` but not the value. Verified by `tests/credential_hygiene_test.rs`: (1) inject a fake `sk-test-abc123` into a log message → assert log output contains `<REDACTED>`; (2) try to emit an event with a credential-shaped payload → assert rejection; (3) post-drop Valgrind-lite check (process-memory grep) after `SecretBuffer::drop()` → assert no plaintext bytes remain in the heap region.
+
+- **AC-75** (Cross-Platform Developer Environment): v9's Linux-only kernel primitives (landlock, bwrap, slirp4netns, cgroup v2) make native Mac/Windows development impossible. A new `scripts/devshell.sh` (and `.ps1` mirror) launches a Docker container (`ghcr.io/open-pincery/devshell:v9`) pinned to Ubuntu 24.04 with all required sandbox binaries pre-installed, the project bind-mounted, and `--privileged --cgroupns=host` set so kernel features work. `README.md` "Development" section documents: on Linux, `cargo test` runs natively; on Mac/Windows, `./scripts/devshell.sh cargo test` runs identical suites inside the container. A CI smoke `tests/devshell_parity_test.rs` runs an outer test on Linux that shells into devshell and re-runs `tests/sandbox_escape_test.rs` inside; both paths must produce identical verdicts. Verified by manual Mac/Windows walkthrough in `docs/runbooks/dev_setup_macos.md` and `docs/runbooks/dev_setup_windows.md`.
+
 ### Stack
 
 No new core Rust runtime dependencies beyond what's in v8. The following system binaries and Rust crates are added and pinned:
@@ -757,12 +763,13 @@ The order is sequenced so each slice gates the next and every slice is independe
 **Phase A — Security Truth (P0, ~3-4 weeks — now the largest phase)**
 
 1. **Slice A1 — AC-54 Threat Model + SECURITY.md**: writes the truth about what v8 actually protects. Ships first because every subsequent slice is scoped by this document. (1 day)
-2. **Slice A2a — AC-53 Sandbox core**: Bubblewrap + seccomp-bpf allowlist + `no_new_privs` + capability drop + cgroup v2 limits + landlock FS confinement. 4 adversarial payload categories (FS, privesc, resource) green. (5-7 days)
-3. **Slice A2b — AC-72 Per-agent network egress allowlist**: new table + network namespace wiring + slirp4netns proxy + `network_blocked` event + CLI `agent network {allow,list,revoke}`. Network-exfil payload category of AC-53's matrix goes green on this slice. (3-4 days)
-4. **Slice A2c — AC-71 Secret Injection Proxy**: `src/runtime/secret_proxy.rs` with unix-socket IPC; agent process memory sweep test; `secret_injected` event. (3-4 days)
-5. **Slice A3 — AC-58 Session TTL + Refresh + Revocation**: may ship parallel to A2a/b/c. (1-2 days)
-6. **Slice A4 — AC-59 Users + Roles**: depends on A3. (2-3 days)
-7. **Slice A5 — AC-60 Auth README Rewrite**: documentation commit. (½ day)
+2. **Slice A0 — AC-75 Developer Environment**: `scripts/devshell.sh` + Ubuntu 24.04 Docker image + Mac/Windows runbooks. Ships BEFORE A2a so cross-platform contributors can run the sandbox tests. (1-2 days)
+3. **Slice A2a — AC-53 Sandbox core + AC-73 Mode flag**: Bubblewrap + seccomp-bpf allowlist + `no_new_privs` + capability drop + cgroup v2 limits + landlock FS confinement + `OPEN_PINCERY_SANDBOX_MODE={enforce,audit,disabled}` + startup self-test + perf budget (300ms p95). 4 adversarial payload categories (FS, privesc, resource) green. (6-8 days)
+4. **Slice A2b — AC-72 Per-agent network egress allowlist**: new table + network namespace wiring + slirp4netns proxy + `network_blocked` event + CLI `agent network {allow,list,revoke}`. Network-exfil payload category of AC-53's matrix goes green on this slice. (3-4 days)
+5. **Slice A2c — AC-71 Secret Injection Proxy + AC-74 Hygiene**: `src/runtime/secret_proxy.rs` with unix-socket IPC; `zeroize` on all plaintext buffers; `src/observability/redaction.rs` tracing layer + event-emit filter; agent process memory sweep test; `secret_injected` event. (4-5 days)
+6. **Slice A3 — AC-58 Session TTL + Refresh + Revocation**: may ship parallel to A2a/b/c. Cookies set `HttpOnly; Secure; SameSite=Strict`; constant-time token compare. (1-2 days)
+7. **Slice A4 — AC-59 Users + Roles**: depends on A3. (2-3 days)
+8. **Slice A5 — AC-60 Auth README Rewrite**: documentation commit. (½ day)
 
 **Phase B — Credential Requests (P0, ~1 week)**
 
@@ -795,7 +802,23 @@ The order is sequenced so each slice gates the next and every slice is independe
 20. **Slice F4 — AC-69 Version Handshake**: `/api/version` + CLI mismatch warning. (1 day)
 21. **Slice F5 — AC-70 Terminology Lock**: README rewrite + lint test. (½ day)
 
-**Total estimate: 7-9 weeks of focused engineering at one-slice-per-day cadence** (was 4-6; multi-tenant enforcement + secret proxy + egress allowlist + expanded sandbox matrix add ~3 weeks, user-approved). v9.0 ships only after Phases A + B + C + E are complete (security truth + credential requests + UI + tenancy = the full trust gate). Phase D (observability) ships as v9.1. Phase F (polish) ships as v9.2.
+**Total estimate: 8-10 weeks of focused engineering at one-slice-per-day cadence** (audit addendum adds ~1 week for AC-73/74/75 — sandbox mode flag + credential hygiene + cross-platform dev environment; these are safe-rollout and defense-in-depth, not optional). v9.0 ships only after Phases A + B + C + E are complete (security truth + credential requests + UI + tenancy = the full trust gate). Phase D (observability) ships as v9.1. Phase F (polish) ships as v9.2.
+
+### Definition-of-Done (every slice, enforced by REVIEW)
+
+A slice is not done until ALL of the following are true:
+
+1. **Code compiles + clippy --deny warnings passes.**
+2. **Every new AC has a test file named in scope.md; that test passes.**
+3. **Every P0 AC has an adversarial test (not just happy-path).**
+4. **Event types introduced in the slice are registered in `src/models/events.rs` and appear in the CI event-type lint.**
+5. **New CLI verbs appear in `--help` and `tests/cli_naming_lint.rs` (AC-52b) passes.**
+6. **New migrations are additive-only and include a backfill for existing rows where applicable (e.g., `workspace_id` NOT NULL requires a default-workspace row).**
+7. **`CHANGELOG.md` has a Phase-tagged entry for the slice.**
+8. **`deny.toml` is updated if new crates are added; `cargo deny check` passes.**
+9. **`cargo audit` shows no new high/critical advisories.**
+10. **If the slice touches auth/sandbox/tenancy: REVIEW is mandatory and must explicitly sign off on the threat model impact.**
+11. **A commit is tagged `v9.0.0-phase<X>-slice<N>` for rollback traceability.**
 
 ### v9 Dependencies on Prior Versions
 
