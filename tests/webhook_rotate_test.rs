@@ -26,6 +26,7 @@ fn test_config() -> Config {
         wake_summary_limit: 20,
         event_window_limit: 200,
         vault_key_b64: common::TEST_VAULT_KEY_B64.into(),
+        sandbox: open_pincery::config::ResolvedSandboxMode::default(),
     }
 }
 

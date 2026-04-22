@@ -71,6 +71,7 @@ async fn test_budget_exceeded_blocks_wake_and_llm_call() {
         wake_summary_limit: 20,
         event_window_limit: 200,
         vault_key_b64: common::TEST_VAULT_KEY_B64.into(),
+        sandbox: open_pincery::config::ResolvedSandboxMode::default(),
     });
 
     // Should never be called when budget is exhausted.
