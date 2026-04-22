@@ -188,8 +188,8 @@ fn context_delete_refuses_active_and_removes_inactive() {
 
 /// AC-48: `pcy context current` prints the active name. Empty string
 /// + success (not an error) when nothing is configured — matches
-/// `kubectl config current-context` contract so shell scripts can
-/// test with `[ -n "$(pcy context current)" ]`.
+///   `kubectl config current-context` contract so shell scripts can
+///   test with `[ -n "$(pcy context current)" ]`.
 #[test]
 fn context_current_matches_active_or_empty() {
     let tmp = tempfile::tempdir().unwrap();

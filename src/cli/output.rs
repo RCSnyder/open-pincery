@@ -38,26 +38,21 @@ use crate::error::AppError;
 /// Output format selected via `--output`. Parsed by clap via the
 /// [`FromStr`] impl below so that `--output jsonpath='{.items[*].id}'`
 /// works without a second flag.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum OutputFormat {
     Json,
     Yaml,
     Name,
+    /// The default *at parse time*; [`default_for_tty`] folds this back
+    /// to `Json` when stdout is not a terminal. Consumers typically call
+    /// `default_for_tty(None)` rather than `OutputFormat::default()`
+    /// directly.
+    #[default]
     Table,
     /// kubectl-compatible subset: `.foo`, `.items[*].name`,
     /// `.items[0]`, `[?(@.k==v)]`. Full JQ is intentionally out of
     /// scope; reach for `-o json | jq` if you need it.
     JsonPath(String),
-}
-
-impl Default for OutputFormat {
-    fn default() -> Self {
-        // The default *at parse time* is `Table`; [`default_for_tty`]
-        // folds this back to `Json` when stdout is not a terminal.
-        // Consumers typically call `default_for_tty(None)` rather than
-        // `OutputFormat::default()` directly.
-        Self::Table
-    }
 }
 
 impl FromStr for OutputFormat {
