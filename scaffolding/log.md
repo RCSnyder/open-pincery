@@ -1,5 +1,34 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — Slice A2a (AC-73 Sandbox Mode Flag) — 2026-04-21T22:00Z
+
+- **Gate**: post-build slice PASS (attempt 1).
+- **Trigger**: user completed `wsl --install`, upgrading WSL2 kernel to 6.6.87.2 (landlock-capable); A2a plumbing slice unblocked.
+- **Evidence**:
+  - New `SandboxMode { Enforce, Audit, Disabled }` enum in `src/config.rs` with case-insensitive `parse()` and `Display`.
+  - New `ResolvedSandboxMode { mode, allow_unsafe }` struct + pure `resolve(mode: Option<&str>, allow_unsafe: Option<&str>) -> Result<_, SandboxModeError>` function — pure so tests avoid the `std::env::set_var` parallelism hazard.
+  - New `SandboxModeError { Invalid(String), DisabledRequiresAllowUnsafe }` with `Display` + `std::error::Error`.
+  - `Config::from_env()` now reads `OPEN_PINCERY_SANDBOX_MODE` and `OPEN_PINCERY_ALLOW_UNSAFE`; rejects `disabled` without paired `ALLOW_UNSAFE=true` (readiness T-AC73 footgun guard).
+  - `.env.example` documents both keys with a comment block listing all three valid modes + the `ALLOW_UNSAFE=true` requirement.
+  - 15 existing test `Config { ... }` literals updated with `sandbox: ResolvedSandboxMode::default()`.
+  - New `tests/sandbox_mode_test.rs` with 11 assertions covering: default=enforce, explicit enforce/audit/disabled parsing, case-insensitivity, Display round-trip, footgun guard (disabled+none, disabled+"false", disabled+"true"), unknown-value rejection, allow_unsafe passthrough when mode=enforce, and a filesystem guard that `.env.example` documents both keys with all three valid mode names.
+- **Verification ladder**:
+  - `cargo build --tests` green (no-DB tests link).
+  - `cargo test --test sandbox_mode_test` → **11/11 PASS**.
+  - `cargo test --test devshell_parity_test` → 6/6 (no regression).
+  - `cargo test --test security_doc_test` → 5/5 (no regression).
+  - `cargo test --lib --bins` → 57/57 (no regression).
+  - `cargo test --test openapi_spec_test --test env_example_test --test no_raw_command_new --test no_raw_status_literals --test deny_config_test` → all green.
+- **Commit**: `4f48016 feat(build): AC-73 sandbox mode config flag (Slice A2a)`.
+- **Retries**: 0 (one wrinkle: sed mass-update missed `tests/openapi_spec_test.rs` which uses a local const instead of `common::TEST_VAULT_KEY_B64`; caught by first compile attempt and fixed with a single manual edit).
+- **Concerns**:
+  - Clippy under Rust 1.94's `clippy::derivable_impls` now trips on the pre-existing `impl Default for OutputFormat` in `src/cli/output.rs`. Verified pre-existing via `git stash` round-trip — **NOT introduced by A2a**. Flagged for a separate `chore(clippy)` fix before the next slice.
+  - Four new Linux-only crates (`seccompiler`, `landlock`, `cgroups-rs`, `nix`) are deferred to A2b where they co-locate with the sandbox module growing into `src/runtime/sandbox/{mod,bwrap,seccomp,landlock,cgroup,netns}.rs`. `deny.toml` allowlist entries land in that same slice.
+  - A2a does not yet emit `sandbox_mode_changed` events or the 60-second stderr warning while `disabled` — those wire into the event log + background task system in A2b once the sandbox module exists to own them.
+- **Changed**: `src/config.rs` (+111 / -3), `.env.example` (+19), `tests/sandbox_mode_test.rs` (new, 128 lines), 16 existing test files (+1 line each).
+- **Not touched**: `src/runtime/sandbox.rs` (existing AC-36 ProcessExecutor untouched — it continues to implement `ToolExecutor` exactly as before; A2b will restructure it into a module folder).
+- **Next**: (1) Clippy fix for `OutputFormat::Default` (chore, one commit). (2) Slice A2b — AC-53 Zerobox real sandbox. Prereqs: (a) `deny.toml` allowlist for `seccompiler`, `landlock`, `cgroups-rs`, `nix`; (b) `cargo deny check` green; (c) `tests/sandbox_real_smoke.rs` gated under `#[cfg(target_os = "linux")]` + `OPEN_PINCERY_DEVSHELL=1`; (d) module restructure `src/runtime/sandbox.rs` → `src/runtime/sandbox/{mod,bwrap,seccomp,landlock,cgroup,netns}.rs` preserving the `ToolExecutor` trait.
+
 ## BUILD v9 — Slice A0 Linux Parity VERIFIED — 2026-04-21T21:15Z
 
 - **Gate**: end-to-end AC-75 verification PASS on Windows + WSL2 host.
