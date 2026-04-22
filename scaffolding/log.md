@@ -1,5 +1,15 @@
 # Open Pincery — Experiment Log
 
+## EXPAND v9 — Solo-Founder Trust Gate — 2026-04-22T09:00Z
+
+- **Trigger**: skeptical solo-founder CEO walk-through of v8.0 surfaced twelve blockers grouped P0/P1/P2: sandbox is marketing not code; secrets flow protects downstream but leaks upstream via the event log; bootstrap/session token model has no TTL/users/RBAC; UI is routing bones not product; no event search/export/cost reports/retention; no multi-tenant, no tool catalog beyond `shell`, no workspace rate limiting, no version handshake, no Ollama bullet, no terminology lock. CEO directive: "build all of this; do not release another version until it ships."
+- **Gate**: post-expand PASS (attempt 1).
+- **Evidence**: `scaffolding/scope.md` extended with a v9 section containing 18 new acceptance criteria (AC-53 … AC-70) across five phases: A — Security Truth (AC-53..AC-60), B — Credential Requests (AC-55..AC-57), C — UI Rebuild (AC-61), D — Observability (AC-62..AC-64), E — Multi-tenant + polish (AC-65..AC-70). Every AC has a stable identifier, a named test file, and a measurable / adversarial verification path. Smallest Useful Version explicitly carves v9.0 (Phase A + B + C) from v9.1 (Phase D) and v9.2 (Phase E). Clarifications Needed enumerates four pre-DESIGN decisions — AC-53 Option A (real Bubblewrap + seccomp) vs Option B (remove marketing lie), AC-61 UI stack (HTMX+Pico default), AC-65 multi-tenant declaration vs enforcement (declaration default), AC-59 role count (fixed three) — each with a recommended default. Deferred section is explicit about SaaS control plane, prompt-template editor, SSE streaming, macOS/Windows sandboxing, custom roles, MCP stdio, pgvector — all pushed to v10+. Build Order sequences 18 slices over 4-6 weeks with explicit gating (Phase A+B = v9.0 trust-gate ship, Phase C-E ship incrementally as v9.1/v9.2 under their own REVIEW+VERIFY cycles).
+- **Acceptance criteria new this version**: 18 (AC-53..AC-70), each with a stable ID, a measurable threshold (adversarial test payload list for AC-53; regex lint for AC-54; token TTL values for AC-56/AC-58; HTTP status codes for AC-55/AC-58; event count thresholds for AC-67), and a named test file.
+- **Quality tier**: House — production trust gate; REVIEW and RECONCILE mandatory per slice; every P0 AC requires an adversarial test.
+- **Retries**: 0.
+- **Next**: user confirmation of the four Clarifications Needed (especially AC-53 Option A vs B and AC-65 declaration vs enforcement), then DESIGN → ANALYZE → BUILD per slice. Phase A Slice A1 (AC-54 SECURITY.md) is the first committable unit.
+
 ## POST-LANDING v8.0 scope trim — 2026-04-22T08:30Z
 
 - **Trigger**: live smoke against the v8.0 container surfaced `pcy bootstrap --bootstrap-token` leaking HTTP 409 instead of falling back to login. Dispatch path routed directly to `commands::bootstrap::run` instead of `login::run_with_bootstrap`, so the idempotent wrapper from AC-45 Slice V1 was unreachable via the top-level subcommand.
