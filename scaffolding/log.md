@@ -1,5 +1,35 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — Slice A2b.3 evidence gate CLOSED (CI bwrap smoke green) — 2026-04-22T18:30Z
+
+- **Gate**: post-build slice **PASS (attempt 2)**. Evidence deferred in the 2026-04-22T02:15Z entry is now obtained on a real Linux kernel via GitHub Actions.
+- **Trigger**: user confirmed Docker Desktop + WSL2 were available but Docker daemon was hung (same symptom from prior session); CI path chosen as the canonical evidence channel.
+- **Changed**:
+  - `.github/workflows/ci.yml` (+38 / -1): cargo-test job and a new dedicated `sandbox-smoke` job both now (a) apt-install `bubblewrap slirp4netns uidmap`, (b) flip `kernel.apparmor_restrict_unprivileged_userns=0` — Ubuntu 24.04's default blocks `bwrap --unshare-user` for non-root, which caused the first attempt's 4/5 failures — (c) sanity-check `bwrap --unshare-user --unshare-pid --dev-bind / / /bin/true` before running the suite, and (d) the `sandbox-smoke` job hard-fails if the suite reports `0 passed` so future environment regressions are visible.
+  - `Cargo.lock`: `rustls-webpki` bumped 0.103.12 → 0.103.13 to close **RUSTSEC-2026-0104** (reachable panic in CRL parsing). No source diff, purely transitive through `sqlx-core`.
+  - `deny.toml`: removed stale `RUSTSEC-2023-0071` ignore (no longer matches any crate in the lockfile; cargo-deny emitted `advisory-not-detected` warning); added `RUSTSEC-2024-0370` ignore for `proc-macro-error` (unmaintained) with a dated justification — it's a build-time proc-macro helper with zero runtime footprint, pulled via `tabled_derive 0.7 → tabled 0.15`. Upgrade path = `tabled 0.20` breaking-API migration, tracked as separate maintenance.
+  - `tests/deny_config_test.rs`: `ALLOWED_ADVISORIES` allowlist rotated in lockstep with `deny.toml`. 3/3 tests pass locally on Windows.
+- **Verification ladder (CI — PR #4, run 24795066180)**:
+  - `rustfmt` ✓ (15s)
+  - `clippy -D warnings` ✓ (42s)
+  - `cargo deny check advisories bans licenses sources` ✓ (23s)
+  - `cargo test --all -- --test-threads=1` ✓ (2m22s) — full 62-binary suite including the previously-failing `sandbox_real_smoke` tests on real Ubuntu 24.04 kernel.
+  - `sandbox-smoke` dedicated job ✓ (2m2s): all 5 `tests/sandbox_real_smoke.rs` cases pass — `real_sandbox_runs_trivial_true`, `real_sandbox_echoes_expected_stdout`, `real_sandbox_rejects_sudo_preflight`, `real_sandbox_sees_fresh_uts_hostname`, `real_sandbox_denies_network_when_deny_net_is_true`.
+- **First attempt evidence (run 24794595910) — recorded for audit**: 4/5 smoke failures with exit code 1 / empty UTS hostname; cargo-deny found RUSTSEC-2026-0104 + RUSTSEC-2024-0370; root cause of smoke failures was Ubuntu 24.04's AppArmor restriction on unprivileged user namespaces, not a bug in `RealSandbox`. Fix applied in the same PR.
+- **Commits**:
+  - `ccae5da ci: install bwrap userland + dedicated sandbox-smoke job (AC-53 evidence gate)`
+  - `8ff23ae merge: keep v8 DELIVERY over v7 reconcile docs from origin`
+  - `11f1a3a fix(ci): close AC-53 evidence gate — patch rustls-webpki, allow unpriv userns, rotate deny.toml ignore`
+- **PR**: https://github.com/RCSnyder/open-pincery/pull/4 (draft — evidence vehicle; merge decision is a separate slice).
+- **Retries**: 1 (first CI run surfaced AppArmor + RustSec advisories simultaneously; both fixed in one follow-up commit).
+- **Concerns**:
+  - The AppArmor workaround is hosted-runner-specific. Production devshell sidesteps it via `--privileged`; any future self-hosted runner or different-base-image CI lane will need to carry the same sysctl tweak.
+  - `proc-macro-error` ignore is temporary and must be retired when `tabled` upgrade is done.
+- **Next**: Slice A2b.4 — landlock + seccomp + cgroup layers on top of the bwrap base. Prereqs now satisfied:
+  - (a) real bwrap isolation verified on Linux (this slice)
+  - (b) landlock / seccompiler / cgroups-rs crate pins already landed in Slice A2b.1
+  - (c) `src/runtime/sandbox/{landlock,seccomp,cgroup}.rs` stub modules already in place from Slice A2b.2
+
 ## BUILD v9 — Slice A2b.3 (RealSandbox + bwrap factory) — 2026-04-22T02:15Z
 
 - **Gate**: post-build slice **PARTIAL** — Windows-side ladder PASS (attempt 1); devshell runtime evidence **DEFERRED** to CI.

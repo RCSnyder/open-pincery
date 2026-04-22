@@ -40,11 +40,26 @@ TARGET_CACHE_CONTAINER="/cargo-target"
 
 mkdir -p "$TARGET_CACHE_HOST"
 
+# Windows git-bash / MSYS2 rewrites unix-style args (`/work`, `-w /work`)
+# into Windows paths before handing them to docker.exe, which then sees
+# `C:/Program Files/Git/work` and fails. Disable that translation for the
+# duration of this `docker run` invocation so in-container paths pass
+# through verbatim. No-op on Linux/macOS.
+export MSYS_NO_PATHCONV=1
+export MSYS2_ARG_CONV_EXCL='*'
+
+# Only attach a TTY when stdout is one; non-interactive callers
+# (CI, `./scripts/devshell.sh cargo test`) must not get `-it`.
+DOCKER_TTY_FLAGS=(-i)
+if [[ -t 1 ]]; then
+  DOCKER_TTY_FLAGS+=(-t)
+fi
+
 # --privileged + --cgroupns=host are required so the inner sandbox can
 # create user namespaces, mount tmpfs, and bind cgroup v2 controllers.
 # The bind mount exposes the repo read-write so `cargo test`, sqlx
 # migrations, and local edits all flow through to the host.
-exec docker run --rm -it \
+exec docker run --rm "${DOCKER_TTY_FLAGS[@]}" \
   --privileged \
   --cgroupns=host \
   --network host \
