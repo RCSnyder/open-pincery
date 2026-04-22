@@ -43,6 +43,21 @@
 - **Retries**: 0 (single-pass design, single-pass compile).
 - **Next**: push and watch CI. If green → move to Slice A2b.4b (seccomp-bpf). If any Linux-specific issue surfaces (e.g., `tokio::process::Child::id()` behavior, `fs::write` to `cgroup.procs` semantics), fix and re-run.
 
+### Post-push CI evidence (2026-04-22T20:08Z)
+
+- **First push `4a857f3`** — CI run `24799885601`: 4/5 green, 1 red.
+  - ✓ rustfmt 7s, ✓ cargo deny 28s, ✓ **sandbox real-bwrap smoke 1m0s** (bwrap regression guard passed after the new bwrap.rs cgroup wiring), cargo test was running
+  - ✗ clippy failed at `tests/sandbox_cgroup_test.rs:168:31` — `clippy::manual_range_contains` lint (only active on Linux with Rust 1.95.0; Windows clippy run didn't trigger it). One-line fix: `(survivors >= 0 && survivors < 20)` → `(0..20).contains(&survivors)`. Same semantics.
+- **Fix commit `cc354ad`** — one-line clippy fix, no behavior change.
+- **Second push CI run `24799988428`**: **5/5 green**.
+  - ✓ rustfmt 14s, ✓ clippy 23s, ✓ cargo deny 27s, ✓ sandbox real-bwrap smoke (A2b.3 regression guard still green), ✓ **cargo test** — including the full `sandbox_cgroup_test` suite on Linux:
+    - `test cgroup_init_failure_fails_closed_in_enforce ... ok`
+    - `test cgroup_init_failure_proceeds_in_audit ... ok`
+    - `test cgroup_permits_command_under_caps ... ok`
+    - `test cgroup_pids_max_limits_fork_count ... ok`
+- **Evidence**: **primary channel (CI, real Linux kernel, Rust 1.95.0) confirms AC-53 layer 2 ≫ green** on first attempt with only a cosmetic lint fix. Second-channel (local devshell) deferred until the Docker volume cache is repopulated — not blocking, since CI uses a real Linux kernel with actual cgroup v2 unified hierarchy. HEAD after green: `cc354ad`.
+- **AC-53 layer status after this slice**: ✓ bwrap (A2b.3) + ✓ cgroup v2 (A2b.4a). Remaining: ⏳ seccomp (A2b.4b), ⏳ landlock (A2b.4c), ⏳ uid/cap drop hardening, ⏳ slirp4netns + allowlist.
+
 ## BUILD v9 — Slice A2b.3 evidence gate RECONFIRMED (local devshell bwrap smoke green) — 2026-04-22T21:15Z
 
 - **Gate**: post-build slice **PASS (attempt 1, second-channel evidence)**. Independent confirmation of AC-53 on Windows/Docker Desktop via the canonical `scripts/devshell.sh` path, alongside the CI green from run 24795066180.
