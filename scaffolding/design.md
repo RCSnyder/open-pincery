@@ -2278,7 +2278,7 @@ None broken.
 
 ## v9 DESIGN — Trust Gate (2026-04-22)
 
-v9 adds 20 acceptance criteria (AC-53..AC-72) across security, auth, credential workflows, UI, observability, and multi-tenant enforcement. This section specifies the architecture for every AC; per-slice implementation detail lives in each build-slice commit.
+v9 adds 23 acceptance criteria (AC-53..AC-75) across security, auth, credential workflows, UI, observability, multi-tenant enforcement, and rollout hardening. This section specifies the architecture for every AC; per-slice implementation detail lives in each build-slice commit.
 
 ### Architecture Overview
 
@@ -2305,6 +2305,8 @@ src/
     events_export.rs              # AC-62 jsonl/csv streaming
     agent_network.rs              # AC-72 allowlist CRUD
   runtime/
+    observability/
+      redaction.rs                # AC-74 tracing/event redaction layer
     sandbox/
       mod.rs                      # SandboxedExecutor entry + compose()
       bwrap.rs                    # Bubblewrap wrapper (--unshare-all, bind mounts)
@@ -2336,9 +2338,19 @@ static/
   views/                          # AC-61 six server-rendered partials
     login.html | agents.html | agent_detail.html | events.html | budget.html | credential_inbox.html
 docs/SECURITY.md                  # AC-54 threat model
+docs/runbooks/
+  dev_setup_macos.md              # AC-75 contributor guide
+  dev_setup_windows.md            # AC-75 contributor guide
+  rollback_to_v8.md               # pre-v9 rollback recipe
+Dockerfile.devshell               # AC-75 pinned Ubuntu 24.04 dev shell image
+scripts/devshell.sh               # AC-75 Linux/macOS wrapper
+scripts/devshell.ps1              # AC-75 PowerShell wrapper
 tests/
   sandbox_escape_test.rs          # AC-53 12-payload matrix
+  sandbox_mode_test.rs            # AC-73 enforce/audit/disabled
+  sandbox_perf_test.rs            # AC-73 p95 budget
   secret_proxy_test.rs            # AC-71 memory sweep
+  credential_hygiene_test.rs      # AC-74 redaction + zeroize
   network_egress_test.rs          # AC-72 allow/block
   credential_request_tool_test.rs # AC-55
   credential_deposit_test.rs      # AC-56
@@ -2424,20 +2436,20 @@ network_blocked   { tool_call_id, destination_host, destination_port, protocol }
 
 ### External Integrations & Test Strategy
 
-| Integration                          | Purpose                  | Failure mode                                              | Test strategy                                            |
-| ------------------------------------ | ------------------------ | --------------------------------------------------------- | -------------------------------------------------------- |
-| `bubblewrap` binary                  | Namespace isolation      | Missing / ns disabled → exec refuses, `sandbox_unavailable` | Live on ubuntu-24.04 CI; ignored on non-Linux            |
-| `libseccomp` / `seccompiler` crate   | Syscall allowlist        | Profile load fails → exec refuses                         | Unit: load profile + assert denied syscalls error        |
-| `landlock` crate                     | FS confinement           | Kernel <5.13 → warn + fall-back, emit `landlock_unavailable` | Live; skip if unsupported; CI enforces supported kernel |
-| `slirp4netns`                        | Egress proxy + allowlist | Missing → exec refuses                                    | Live: allowed host succeeds, denied host blocks          |
-| `cgroups-rs`                         | Resource limits          | cgroup v2 not mounted → exec refuses                      | Live: small OOM / PID thresholds                         |
-| Postgres                             | Tenancy enforcement      | Middleware bypass → lint fails CI                         | Live: 5×5 isolation matrix + SQLi probes                 |
-| HTMX + Pico                          | UI                       | Static asset 404 → UI smoke red                           | Live: curl each route + check CSP header                 |
+| Integration                        | Purpose                  | Failure mode                                                 | Test strategy                                           |
+| ---------------------------------- | ------------------------ | ------------------------------------------------------------ | ------------------------------------------------------- |
+| `bubblewrap` binary                | Namespace isolation      | Missing / ns disabled → exec refuses, `sandbox_unavailable`  | Live on ubuntu-24.04 CI; ignored on non-Linux           |
+| `libseccomp` / `seccompiler` crate | Syscall allowlist        | Profile load fails → exec refuses                            | Unit: load profile + assert denied syscalls error       |
+| `landlock` crate                   | FS confinement           | Kernel <5.13 → warn + fall-back, emit `landlock_unavailable` | Live; skip if unsupported; CI enforces supported kernel |
+| `slirp4netns`                      | Egress proxy + allowlist | Missing → exec refuses                                       | Live: allowed host succeeds, denied host blocks         |
+| `cgroups-rs`                       | Resource limits          | cgroup v2 not mounted → exec refuses                         | Live: small OOM / PID thresholds                        |
+| Postgres                           | Tenancy enforcement      | Middleware bypass → lint fails CI                            | Live: 5×5 isolation matrix + SQLi probes                |
+| HTMX + Pico                        | UI                       | Static asset 404 → UI smoke red                              | Live: curl each route + check CSP header                |
 
 ### Observability
 
 - **Logs**: every sandbox layer failure → structured `error!` with `layer`, `kind`, `tool_call_id`. No plaintext credentials are ever logged (secret proxy scrubs at IPC boundary).
-- **New event types**: `sandbox_blocked`, `network_blocked`, `secret_injected`, `credential_requested`, `credential_deposited`, `credential_request_rejected`, `rate_limit_exceeded`.
+- **New event types**: `sandbox_blocked`, `sandbox_would_block`, `sandbox_mode_changed`, `sandbox_mode_default`, `sandbox_self_test_failed`, `network_blocked`, `secret_injected`, `credential_plaintext_rejected`, `credential_requested`, `credential_deposited`, `credential_request_rejected`, `deposit_attempt`, `rate_limit_exceeded`.
 - **Counters (stdout / structured)**: `sandbox_exec_total{outcome}`, `egress_attempts_total{decision}`, `secret_resolutions_total{mode}`, `tenancy_queries_total{workspace_id}`.
 - **CLI verbs added**: `pcy session {list,revoke,refresh}`, `pcy user {add,list,set-role,delete}`, `pcy credential request {list,approve,reject}`, `pcy agent network {allow,list,revoke}`, `pcy events archive`, `pcy cost`.
 

@@ -1,5 +1,13 @@
 # Open Pincery — Experiment Log
 
+## AUDIT v9 FOLLOW-UP — Consistency Cleanup — 2026-04-22T11:15Z
+
+- **Gate**: post-audit consistency PASS (attempt 1).
+- **Trigger**: second-pass audit found documentation drift introduced by the audit addendum itself.
+- **Evidence**: fixed four classes of inconsistency across scaffolding artifacts: (1) `readiness.md` v9 ANALYZE header now reflects **23 ACs (AC-53..AC-75)** instead of the stale 20; (2) Key Links table now includes **AC-73, AC-74, AC-75**, restoring the truth of "Every AC appears in the coverage table"; (3) Build Order is internally consistent — Phase A estimate raised to 4-5 weeks, A0 ordered before A1, Phase B/D/E/F numbering renumbered sequentially, Phase F marked **v9.2** (not the stale v9.1 label), and readiness total raised to **8-10 weeks** to match scope; (4) scope/design now include the audit-added dependencies and event types (`zeroize`, `region`, `subtle`, devshell image, `sandbox_would_block`, `credential_plaintext_rejected`, `deposit_attempt`, etc.).
+- **Retries**: 0.
+- **Next**: user review. BUILD remains blocked until the 23-AC / 8-10-week plan is accepted.
+
 ## AUDIT v9 — Risk Register + 3 New ACs — 2026-04-22T11:00Z
 
 - **Gate**: post-expand + post-design + post-analyze re-PASS after audit (attempt 1).
@@ -38,7 +46,7 @@
 
 ## EXPAND v9 REVISION — Clarifications Resolved + Security Upgrade — 2026-04-22T10:00Z
 
-- **Trigger**: user resolved all four Clarifications Needed with directional upgrades: (1) AC-53 → *"Real sandboxes, full robust, industry leading security model for agentic software"*; (2) AC-61 → HTMX+Pico confirmed; (3) AC-65 → *"i think we need to design the multitenant feature"* → upgrade from declaration to enforcement; (4) AC-59 → fixed three roles confirmed.
+- **Trigger**: user resolved all four Clarifications Needed with directional upgrades: (1) AC-53 → _"Real sandboxes, full robust, industry leading security model for agentic software"_; (2) AC-61 → HTMX+Pico confirmed; (3) AC-65 → _"i think we need to design the multitenant feature"_ → upgrade from declaration to enforcement; (4) AC-59 → fixed three roles confirmed.
 - **Gate**: post-expand PASS (revision, attempt 1).
 - **Evidence**: `scaffolding/scope.md` revised in place — (a) "Clarifications Needed" section renamed "Clarifications Resolved (2026-04-22, user directive)" with each decision locked and user verbatim recorded; (b) AC-53 rewritten from "3-payload Bubblewrap+seccomp" to a **6-layer industry-leading sandbox** (Bubblewrap process isolation + landlock LSM filesystem confinement + seccomp-bpf allowlist + `no_new_privs` + capability drop + per-call network namespace + cgroup v2 resource limits) with a **12-payload adversarial matrix across 4 categories** (FS escape, network exfil, privilege escalation, resource exhaustion) and a `sandbox_blocked` event contract; (c) AC-65 upgraded from doc-declaration to real workspace-scoped enforcement via `src/tenancy.rs` middleware + 5×5 cross-tenant isolation matrix + SQLi probe test + lint that blocks bare `sqlx::query` in handlers; (d) **AC-71 Secret Injection Proxy** added as a first-class AC — `src/runtime/secret_proxy.rs` isolates plaintext credentials from the agent process address space via unix-socket IPC, verified by `/proc/<pid>/maps` memory-sweep test; (e) **AC-72 Per-Agent Network Egress Allowlist** added — `agent_network_allowlist` table + slirp4netns namespace enforcement + `network_blocked` event + CLI `pcy agent network {allow,list,revoke}`.
 - **Scope growth**: 18 ACs → 20 ACs (added AC-71, AC-72). Build order reorganized: Phase A split into A1 (SECURITY.md), A2a (sandbox core), A2b (egress allowlist), A2c (secret proxy), A3 (sessions), A4 (roles), A5 (auth README). Multi-tenant enforcement promoted from one-day doc (old Phase E) to a full Phase E with 4 slices (schema, middleware, endpoint migration, isolation matrix test). Stack table gains `libseccomp`/`seccompiler`, `landlock` crate, `slirp4netns`, `cgroups-rs`. Data model gains `agent_network_allowlist` table, `workspace_id` columns on `sessions`/`credential_requests`/`agent_http_allowlist`/`agent_network_allowlist`, and `secret_injected` + `network_blocked` event types.

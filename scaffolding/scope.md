@@ -632,7 +632,6 @@ A v9.0 release where: (a) the binary ships with **industry-leading** Linux agent
 ### Acceptance Criteria
 
 - **AC-53** (Industry-Leading Agent Sandbox — Zerobox real): Every shell tool call on Linux runs inside a layered sandbox implemented in a new `src/runtime/sandbox/` module that the `ProcessExecutor` invokes via `SandboxedExecutor`. The sandbox composes ALL of the following layers; any layer missing causes the sandbox to refuse to start:
-
   1. **Process isolation**: Bubblewrap wrapper with a new user + PID + mount + UTS + IPC + cgroup namespace per tool call. `--unshare-all --die-with-parent`.
   2. **Filesystem isolation**: read-only root filesystem bind-mount, per-call tmpfs overlay for writable paths, explicit landlock LSM ruleset (`landlock_create_ruleset` + `landlock_restrict_self`) denying all paths except the per-call tmpfs and the tool's declared allowlist.
   3. **Syscall filter**: seccomp-bpf **allowlist** (not denylist) pinned to a vetted profile at `profiles/sandbox/seccomp.json`. Blocks `ptrace`, `mount`, `clone` with unsafe flags, `kexec_*`, `bpf`, `userfaultfd`, `unshare` with `CLONE_NEWUSER` post-entry, and the rest of the kernel attack surface.
@@ -690,18 +689,20 @@ A v9.0 release where: (a) the binary ships with **industry-leading** Linux agent
 
 No new core Rust runtime dependencies beyond what's in v8. The following system binaries and Rust crates are added and pinned:
 
-| Concern                          | Choice                                                                  | Why                                                             |
-| -------------------------------- | ----------------------------------------------------------------------- | --------------------------------------------------------------- |
-| Linux process sandbox (AC-53)    | `bubblewrap` system binary                                              | Battle-tested (Flatpak), zero new Rust deps                     |
-| Syscall filter (AC-53)           | `libseccomp` + Rust `seccompiler` crate                                 | Kernel-enforced allowlist, mature                               |
-| Filesystem LSM (AC-53)           | `landlock` crate (Rust bindings) — kernel ≥5.13                         | Unprivileged per-process FS confinement                         |
-| Network namespace proxy (AC-53/AC-72) | `slirp4netns` system binary                                        | Userspace TCP/UDP; enforces egress allowlist without root       |
-| Cgroup v2 limits (AC-53)         | Direct `/sys/fs/cgroup` writes via `cgroups-rs` crate                   | No new daemon required                                          |
-| Secret injection IPC (AC-71)     | Unix-domain socket, length-prefixed JSON                                | Zero new crates; simple, auditable                              |
-| UI framework (AC-61)             | HTMX 1.9 + Pico.css (vendored, no CDN)                                  | Zero-build; ships ~15KB; no npm                                 |
-| Retention archive (AC-64)        | gzipped JSONL, one file per day                                         | Greppable, resumable, schema-aligned                            |
-| Session cookie signing (AC-58)   | Existing vault key (reused)                                             | No new key-management surface                                   |
-| Tenancy enforcement (AC-65)      | New `src/tenancy.rs` scoped-query helper; lint blocks bypass            | Middleware pattern; auditable via grep                          |
+| Concern                               | Choice                                                       | Why                                                       |
+| ------------------------------------- | ------------------------------------------------------------ | --------------------------------------------------------- |
+| Linux process sandbox (AC-53)         | `bubblewrap` system binary                                   | Battle-tested (Flatpak), zero new Rust deps               |
+| Syscall filter (AC-53)                | `libseccomp` + Rust `seccompiler` crate                      | Kernel-enforced allowlist, mature                         |
+| Filesystem LSM (AC-53)                | `landlock` crate (Rust bindings) — kernel ≥5.13              | Unprivileged per-process FS confinement                   |
+| Network namespace proxy (AC-53/AC-72) | `slirp4netns` system binary                                  | Userspace TCP/UDP; enforces egress allowlist without root |
+| Cgroup v2 limits (AC-53)              | Direct `/sys/fs/cgroup` writes via `cgroups-rs` crate        | No new daemon required                                    |
+| Secret injection IPC (AC-71)          | Unix-domain socket, length-prefixed JSON                     | Zero new crates; simple, auditable                        |
+| Credential hygiene (AC-74)            | `zeroize` + `region` + `subtle` crates                       | Zeroization, `mlock`, constant-time compares              |
+| UI framework (AC-61)                  | HTMX 1.9 + Pico.css (vendored, no CDN)                       | Zero-build; ships ~15KB; no npm                           |
+| Retention archive (AC-64)             | gzipped JSONL, one file per day                              | Greppable, resumable, schema-aligned                      |
+| Session cookie signing (AC-58)        | Existing vault key (reused)                                  | No new key-management surface                             |
+| Tenancy enforcement (AC-65)           | New `src/tenancy.rs` scoped-query helper; lint blocks bypass | Middleware pattern; auditable via grep                    |
+| Cross-platform dev env (AC-75)        | `ghcr.io/open-pincery/devshell:v9` image                     | Reproducible sandbox-capable dev shell on Mac/Windows     |
 
 ### Deployment Target
 
@@ -726,7 +727,8 @@ New event types on `events.event_type`:
 
 - `credential_requested` (AC-55), `credential_deposited` (AC-56), `credential_request_rejected` (AC-57)
 - `rate_limit_exceeded` (AC-67)
-- `sandbox_blocked` (AC-53), `network_blocked` (AC-72), `secret_injected` (AC-71)
+- `sandbox_blocked` (AC-53), `sandbox_would_block` (AC-73), `sandbox_mode_changed` (AC-73), `sandbox_mode_default` (AC-73), `sandbox_self_test_failed` (AC-73)
+- `network_blocked` (AC-72), `secret_injected` (AC-71), `credential_plaintext_rejected` (AC-74), `deposit_attempt` (AC-56 hardening)
 
 No destructive schema changes. Every migration is forward-only and additive.
 
@@ -736,14 +738,14 @@ $0 incremental — no new infrastructure required beyond what v8 already uses. T
 
 ### Quality Tier
 
-**House** — production-facing trust gate. REVIEW and RECONCILE are mandatory on every AC. Every P0 AC (AC-53 through AC-61) requires an adversarial test, not just a happy-path test. v9 is the version that decides whether Pincery is a prototype or a product.
+**House** — production-facing trust gate. REVIEW and RECONCILE are mandatory on every AC. Every security- or auth-critical AC (AC-53 through AC-61, AC-73, AC-74) requires an adversarial test, not just a happy-path test. v9 is the version that decides whether Pincery is a prototype or a product.
 
 ### Clarifications Resolved (2026-04-22, user directive)
 
-1. **AC-53 — Industry-leading agent sandbox (locked).** User: *"Real sandboxes, full robust, industry leading security model for agentic software."* → Option A chosen and **strengthened** beyond baseline Bubblewrap. Final spec layers Bubblewrap + seccomp-bpf allowlist + landlock LSM + per-call network namespace + cgroup v2 limits + `no_new_privs` + `CAP_*=0`, plus AC-71 Secret Injection Proxy and AC-72 Per-Agent Network Egress Allowlist as first-class ACs. Adversarial test matrix expanded from 3 payloads to 12 across 4 categories.
-2. **AC-61 — HTMX + Pico (locked).** User: *"htmx+pico seems fine since its all one container."* → HTMX 1.9 + Pico.css, vendored (no CDN), zero build pipeline.
-3. **AC-65 — Real multi-tenant enforcement (locked, upgraded from declaration).** User: *"i think we need to design the multitenant feature."* → Upgraded from option (a) declaration to option (b) enforcement. Every API endpoint scoped by `workspace_id` via a mandatory `src/tenancy.rs` middleware; 5×5 cross-workspace isolation matrix test; SQLi probe test; lint blocks bypass. Adds ~2 weeks to v9 — user-approved.
-4. **AC-59 — Fixed three roles (locked).** User: *"fixed 3 is fine."* → `admin | operator | viewer` shipped in v9; custom roles / ABAC deferred to v11.
+1. **AC-53 — Industry-leading agent sandbox (locked).** User: _"Real sandboxes, full robust, industry leading security model for agentic software."_ → Option A chosen and **strengthened** beyond baseline Bubblewrap. Final spec layers Bubblewrap + seccomp-bpf allowlist + landlock LSM + per-call network namespace + cgroup v2 limits + `no_new_privs` + `CAP_*=0`, plus AC-71 Secret Injection Proxy and AC-72 Per-Agent Network Egress Allowlist as first-class ACs. Adversarial test matrix expanded from 3 payloads to 12 across 4 categories.
+2. **AC-61 — HTMX + Pico (locked).** User: _"htmx+pico seems fine since its all one container."_ → HTMX 1.9 + Pico.css, vendored (no CDN), zero build pipeline.
+3. **AC-65 — Real multi-tenant enforcement (locked, upgraded from declaration).** User: _"i think we need to design the multitenant feature."_ → Upgraded from option (a) declaration to option (b) enforcement. Every API endpoint scoped by `workspace_id` via a mandatory `src/tenancy.rs` middleware; 5×5 cross-workspace isolation matrix test; SQLi probe test; lint blocks bypass. Adds ~2 weeks to v9 — user-approved.
+4. **AC-59 — Fixed three roles (locked).** User: _"fixed 3 is fine."_ → `admin | operator | viewer` shipped in v9; custom roles / ABAC deferred to v11.
 
 ### Deferred to v10+
 
@@ -760,10 +762,10 @@ $0 incremental — no new infrastructure required beyond what v8 already uses. T
 
 The order is sequenced so each slice gates the next and every slice is independently committable + verifiable.
 
-**Phase A — Security Truth (P0, ~3-4 weeks — now the largest phase)**
+**Phase A — Security Truth (P0, ~4-5 weeks — now the largest phase)**
 
-1. **Slice A1 — AC-54 Threat Model + SECURITY.md**: writes the truth about what v8 actually protects. Ships first because every subsequent slice is scoped by this document. (1 day)
-2. **Slice A0 — AC-75 Developer Environment**: `scripts/devshell.sh` + Ubuntu 24.04 Docker image + Mac/Windows runbooks. Ships BEFORE A2a so cross-platform contributors can run the sandbox tests. (1-2 days)
+1. **Slice A0 — AC-75 Developer Environment**: `scripts/devshell.sh` + Ubuntu 24.04 Docker image + Mac/Windows runbooks. Ships BEFORE A2a so cross-platform contributors can run the sandbox tests. (1-2 days)
+2. **Slice A1 — AC-54 Threat Model + SECURITY.md**: writes the truth about what v8 actually protects. Ships first because every subsequent slice is scoped by this document. (1 day)
 3. **Slice A2a — AC-53 Sandbox core + AC-73 Mode flag**: Bubblewrap + seccomp-bpf allowlist + `no_new_privs` + capability drop + cgroup v2 limits + landlock FS confinement + `OPEN_PINCERY_SANDBOX_MODE={enforce,audit,disabled}` + startup self-test + perf budget (300ms p95). 4 adversarial payload categories (FS, privesc, resource) green. (6-8 days)
 4. **Slice A2b — AC-72 Per-agent network egress allowlist**: new table + network namespace wiring + slirp4netns proxy + `network_blocked` event + CLI `agent network {allow,list,revoke}`. Network-exfil payload category of AC-53's matrix goes green on this slice. (3-4 days)
 5. **Slice A2c — AC-71 Secret Injection Proxy + AC-74 Hygiene**: `src/runtime/secret_proxy.rs` with unix-socket IPC; `zeroize` on all plaintext buffers; `src/observability/redaction.rs` tracing layer + event-emit filter; agent process memory sweep test; `secret_injected` event. (4-5 days)
@@ -773,34 +775,34 @@ The order is sequenced so each slice gates the next and every slice is independe
 
 **Phase B — Credential Requests (P0, ~1 week)**
 
-6. **Slice B1 — AC-55 Credential Request Tool + schema**: backend only; agent can emit requests, API can list them. (2 days)
-7. **Slice B2 — AC-56 Deposit Page**: HTML form + POST handler + single-use token. (1-2 days)
-8. **Slice B3 — AC-57 CLI + UI Inbox**: operator surfaces — depends on B1 + B2. (2 days)
+9. **Slice B1 — AC-55 Credential Request Tool + schema**: backend only; agent can emit requests, API can list them. (2 days)
+10. **Slice B2 — AC-56 Deposit Page**: HTML form + POST handler + single-use token. (1-2 days)
+11. **Slice B3 — AC-57 CLI + UI Inbox**: operator surfaces — depends on B1 + B2. (2 days)
 
 **Phase C — UI Rebuild (P1, ~1 week)**
 
-9. **Slice C1 — AC-61 UI Rebuild on HTMX + Pico**: six views, dark mode, CSP header. (3-5 days)
+12. **Slice C1 — AC-61 UI Rebuild on HTMX + Pico**: six views, dark mode, CSP header. (3-5 days)
 
 **Phase D — Observability (P1, ~1 week)**
 
-10. **Slice D1 — AC-62 Event Search + Export**: query params + jsonl/csv streaming. (2 days)
-11. **Slice D2 — AC-63 Cost Reports**: grouping API + UI chart. (1-2 days)
-12. **Slice D3 — AC-64 Retention + Archive**: background job + CLI. (2 days)
+13. **Slice D1 — AC-62 Event Search + Export**: query params + jsonl/csv streaming. (2 days)
+14. **Slice D2 — AC-63 Cost Reports**: grouping API + UI chart. (1-2 days)
+15. **Slice D3 — AC-64 Retention + Archive**: background job + CLI. (2 days)
 
 **Phase E — Multi-Tenant Enforcement (P0 upgraded, ~2 weeks — now blocking v9.0)**
 
-13. **Slice E1a — AC-65 schema**: add `workspace_id` to `sessions`, `credential_requests`, `agent_http_allowlist`, `agent_network_allowlist`; backfill. (2 days)
-14. **Slice E1b — AC-65 middleware**: `src/tenancy.rs` scoped-pool helper; lint test blocks bare `sqlx::query` in handlers. (2 days)
-15. **Slice E1c — AC-65 endpoint migration**: every handler in `src/api/` refactored to use the scoped helper. (4-5 days)
-16. **Slice E1d — AC-65 isolation matrix test**: 5×5 cross-workspace test + SQLi probes + middleware lint. (2 days)
+16. **Slice E1a — AC-65 schema**: add `workspace_id` to `sessions`, `credential_requests`, `agent_http_allowlist`, `agent_network_allowlist`; backfill. (2 days)
+17. **Slice E1b — AC-65 middleware**: `src/tenancy.rs` scoped-pool helper; lint test blocks bare `sqlx::query` in handlers. (2 days)
+18. **Slice E1c — AC-65 endpoint migration**: every handler in `src/api/` refactored to use the scoped helper. (4-5 days)
+19. **Slice E1d — AC-65 isolation matrix test**: 5×5 cross-workspace test + SQLi probes + middleware lint. (2 days)
 
-**Phase F — Tool Catalog + Polish (P1/P2, ~1 week, ships as v9.1)**
+**Phase F — Tool Catalog + Polish (P1/P2, ~1 week, ships as v9.2)**
 
-17. **Slice F1 — AC-66 Tool Catalog Expansion**: http_get + file_read + db_query with scoping tests. (3 days)
-18. **Slice F2 — AC-67 Workspace Rate Limiting**: config + enforcement + event emission. (1 day)
-19. **Slice F3 — AC-68 Ollama Bullet**: README + test. (½ day)
-20. **Slice F4 — AC-69 Version Handshake**: `/api/version` + CLI mismatch warning. (1 day)
-21. **Slice F5 — AC-70 Terminology Lock**: README rewrite + lint test. (½ day)
+20. **Slice F1 — AC-66 Tool Catalog Expansion**: http_get + file_read + db_query with scoping tests. (3 days)
+21. **Slice F2 — AC-67 Workspace Rate Limiting**: config + enforcement + event emission. (1 day)
+22. **Slice F3 — AC-68 Ollama Bullet**: README + test. (½ day)
+23. **Slice F4 — AC-69 Version Handshake**: `/api/version` + CLI mismatch warning. (1 day)
+24. **Slice F5 — AC-70 Terminology Lock**: README rewrite + lint test. (½ day)
 
 **Total estimate: 8-10 weeks of focused engineering at one-slice-per-day cadence** (audit addendum adds ~1 week for AC-73/74/75 — sandbox mode flag + credential hygiene + cross-platform dev environment; these are safe-rollout and defense-in-depth, not optional). v9.0 ships only after Phases A + B + C + E are complete (security truth + credential requests + UI + tenancy = the full trust gate). Phase D (observability) ships as v9.1. Phase F (polish) ships as v9.2.
 
@@ -833,4 +835,4 @@ None broken.
 
 ### Why v9 Is Worth a Whole Version
 
-A product that says "sandboxed" in marketing but runs `sh` is not a security product. A product where the agent can leak a secret into the event log is not a secrets product. A product where sessions never expire is not an auth product. A product where "workspaces" are just a column with no enforcement is not a multi-tenant product. v9 is the version that lets the solo founder look their CTO / their board / their first enterprise customer in the eye and say: *yes, we sandbox agents at the kernel level with six independent layers; yes, plaintext credentials never enter the agent process; yes, every agent has a declared network egress allowlist enforced at the namespace layer; yes, sessions rotate with TTL and refresh; yes, we have RBAC; yes, workspaces are hard-isolated with a kernel-tested middleware and a 5×5 cross-tenant test matrix.* Every AC above is a specific claim with a specific adversarial test. If any P0 AC ships with placeholder behaviour, the version fails and does not release.
+A product that says "sandboxed" in marketing but runs `sh` is not a security product. A product where the agent can leak a secret into the event log is not a secrets product. A product where sessions never expire is not an auth product. A product where "workspaces" are just a column with no enforcement is not a multi-tenant product. v9 is the version that lets the solo founder look their CTO / their board / their first enterprise customer in the eye and say: _yes, we sandbox agents at the kernel level with six independent layers; yes, plaintext credentials never enter the agent process; yes, every agent has a declared network egress allowlist enforced at the namespace layer; yes, sessions rotate with TTL and refresh; yes, we have RBAC; yes, workspaces are hard-isolated with a kernel-tested middleware and a 5×5 cross-tenant test matrix._ Every AC above is a specific claim with a specific adversarial test. If any P0 AC ships with placeholder behaviour, the version fails and does not release.
