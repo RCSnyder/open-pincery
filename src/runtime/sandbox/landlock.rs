@@ -47,7 +47,14 @@ use landlock::{
 /// Fixed set of host paths that need read+execute access for stock
 /// glibc programs to load and run inside the sandbox. Ordered for
 /// review-diff readability; runtime order does not matter.
-const ROOTFS_RX_PATHS: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"];
+// Default read+execute allowlist. Includes:
+// - standard rootfs dirs sh + coreutils need to execute
+// - /sys: bwrap may stat /sys/fs/cgroup for delegated cgroup v2 setup
+//
+// NOTE: /proc is NOT here because bwrap writes /proc/self/uid_map,
+// /proc/self/gid_map, /proc/self/setgroups during user-namespace
+// setup. /proc must be in rwx_paths instead. See default_for_cwd.
+const ROOTFS_RX_PATHS: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/sys"];
 
 /// Profile describing which paths are allowed and at what access
 /// level. Built once per tool call by [`LandlockProfile::default_for_cwd`].
@@ -62,12 +69,14 @@ pub struct LandlockProfile {
 
 impl LandlockProfile {
     /// Production profile for a tool invocation pinned to `cwd`.
-    /// Includes the standard rootfs read+execute paths and the cwd
-    /// as read+write+execute.
+    /// Includes the standard rootfs read+execute paths, `/proc` as
+    /// read+write+execute (bwrap writes /proc/self/uid_map etc.
+    /// during user-namespace setup), and the cwd as read+write+
+    /// execute.
     pub fn default_for_cwd(cwd: &Path) -> Self {
         Self {
             rx_paths: ROOTFS_RX_PATHS.iter().map(PathBuf::from).collect(),
-            rwx_paths: vec![cwd.to_path_buf()],
+            rwx_paths: vec![PathBuf::from("/proc"), cwd.to_path_buf()],
         }
     }
 }
@@ -167,7 +176,17 @@ mod tests {
     fn default_profile_includes_cwd_as_rwx() {
         let cwd = PathBuf::from("/tmp/work-landlock-xyz");
         let p = LandlockProfile::default_for_cwd(&cwd);
-        assert_eq!(p.rwx_paths, vec![cwd]);
+        assert!(p.rwx_paths.iter().any(|x| x == &cwd));
+    }
+
+    #[test]
+    fn default_profile_includes_proc_as_rwx() {
+        // bwrap writes /proc/self/uid_map, /proc/self/gid_map,
+        // /proc/self/setgroups during user-namespace setup. If
+        // /proc is read-only or missing, bwrap fails with EPERM.
+        let cwd = PathBuf::from("/tmp/work-landlock-xyz");
+        let p = LandlockProfile::default_for_cwd(&cwd);
+        assert!(p.rwx_paths.iter().any(|x| x == Path::new("/proc")));
     }
 
     #[test]
