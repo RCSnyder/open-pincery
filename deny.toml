@@ -15,17 +15,19 @@ no-default-features = false
 version = 2
 yanked = "deny"
 ignore = [
-    # RUSTSEC-2023-0071 — Marvin attack on `rsa` 0.9.x (medium, 5.9).
-    # Pulled transitively through `sqlx-macros-core -> sqlx-mysql -> rsa`.
-    # The sqlx macro crate unconditionally compiles sqlx-mysql at
-    # macro-expand time regardless of which database features we enable,
-    # so this path is not reachable at runtime (we only connect to
-    # Postgres). No upstream `rsa` fix has shipped since the 2023-11-22
-    # advisory, and sqlx-macros does not offer a flag to exclude mysql.
-    # Revisit whenever: (a) `rsa` publishes a fixed release, (b) sqlx
-    # 0.9+ ships with a non-mysql-bearing macros crate, or (c) we move
-    # off the `sqlx::FromRow` derive entirely.
-    { id = "RUSTSEC-2023-0071", reason = "rsa via sqlx-macros-core->sqlx-mysql; no Postgres runtime exposure; no upstream fix. Revisit on rsa release or sqlx 0.9." },
+    # RUSTSEC-2024-0370 — `proc-macro-error` 1.0.4 is unmaintained.
+    # Pulled transitively through `tabled_derive v0.7 -> tabled v0.15`,
+    # which we use only in the CLI table renderer (`src/cli/output.rs`).
+    # `proc-macro-error` is a build-time proc-macro helper crate: it
+    # runs inside rustc during `cargo build` and contributes zero bytes
+    # to the runtime binary. No known exploit; the advisory is a
+    # maintenance flag, not a vulnerability. A safe upgrade requires
+    # bumping `tabled` to 0.20 (breaking API changes across Table /
+    # TableIteratorExt / settings), which is scoped out of the v9
+    # security push and tracked as a separate maintenance task.
+    # Revisit whenever: (a) `tabled` 0.20 migration lands, or
+    # (b) `proc-macro-error2` is adopted upstream by `tabled_derive`.
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error is build-time only (proc-macro expansion); no runtime exposure. Upgrade path = tabled 0.20 migration, tracked separately." },
 ]
 
 [bans]

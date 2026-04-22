@@ -59,7 +59,7 @@ fn advisories_ignore_list_only_contains_documented_exceptions() {
     // advisory in this set not in deny.toml also fails the test. To
     // add a new exception you must update BOTH this list and deny.toml
     // in the same PR — a STOP-and-raise event.
-    const ALLOWED_ADVISORIES: &[&str] = &["RUSTSEC-2023-0071"];
+    const ALLOWED_ADVISORIES: &[&str] = &["RUSTSEC-2024-0370"];
 
     let adv = advisories_table();
     let ignore = adv

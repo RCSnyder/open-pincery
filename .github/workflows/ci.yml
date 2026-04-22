@@ -63,6 +63,18 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             bubblewrap slirp4netns uidmap
           bwrap --version
+      # Ubuntu 24.04 ships with
+      # kernel.apparmor_restrict_unprivileged_userns=1, which blocks
+      # bwrap's `--unshare-user` for non-root callers. Production
+      # devshell sidesteps this by running the container as root with
+      # `--privileged`; on bare CI runners we flip the sysctl off so
+      # the sandbox tests can exercise real namespace isolation.
+      # This is safe on an ephemeral hosted runner.
+      - name: allow unprivileged user namespaces (AppArmor workaround)
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # Sanity-check: bwrap actually creates a user+pid ns on this runner.
+          bwrap --unshare-user --unshare-pid --dev-bind / / /bin/true
       - run: cargo test --all -- --test-threads=1
 
   # Dedicated gate for AC-53 RealSandbox evidence.  The smoke suite
@@ -81,6 +93,10 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             bubblewrap slirp4netns uidmap
           bwrap --version
+      - name: allow unprivileged user namespaces (AppArmor workaround)
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --unshare-user --unshare-pid --dev-bind / / /bin/true
       - name: cargo test --test sandbox_real_smoke (verbose, fail-on-skip)
         run: |
           set -euo pipefail
