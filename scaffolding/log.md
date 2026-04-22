@@ -1,5 +1,18 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — Slice A1 (AC-54 SECURITY.md) — 2026-04-21T20:30Z
+
+- **Gate**: post-build slice PASS (attempt 1).
+- **Evidence**:
+  - New `docs/SECURITY.md` with four required sections — Adversary Capabilities, In-Scope Attacks, Out-of-Scope, Disclosure — plus a Deployment Hardening Checklist. Covers all five spec-required in-scope attacks (prompt-injection exfil, sandbox escape, credential leak via event log, session hijack, webhook replay) and all three out-of-scope exclusions (compromised host, compromised Postgres, insider with DB credentials). Disclosure channel: GitHub Security Advisories link + `security@open-pincery.dev`.
+  - New `tests/security_doc_test.rs` with 5 assertions: file exists + linked from README, four required headings present, five required in-scope threats named, three required out-of-scope exclusions named, disclosure section exposes at least one contact channel.
+  - `README.md` Security Model section now links to `docs/SECURITY.md`.
+- **Verification ladder**: `cargo test --test security_doc_test` → 5/5 pass; `cargo test --test devshell_parity_test` → 6/6 (no regression from README edit).
+- **Commit**: `964b1cf feat(build): AC-54 SECURITY.md threat model (Slice A1)`.
+- **Retries**: 0.
+- **Concerns**: SECURITY.md mentions future v9.2 `docs/security-pgp.asc`; file will be added in F-phase hardening. Disclosure email is aspirational — DNS for `open-pincery.dev` needs to exist or the address must be migrated before public launch. Flagged as a pre-deploy checklist item.
+- **Next**: Slice A2a — AC-53 Zerobox real sandbox + AC-73 mode flag. This slice is Linux-only at runtime (bubblewrap + seccomp-bpf + landlock + cgroup v2); development and test execution must flow through `scripts/devshell.sh`. Before writing code, **STOP** to confirm: (a) Docker Desktop is available on the dev host, or (b) a Linux CI runner will be used. Raw sandbox crate additions (`seccompiler`, `landlock`, `cgroups-rs`, `nix`) go into `Cargo.toml` plus `deny.toml` allowlist + `cargo deny check` before the first code line.
+
 ## BUILD v9 — Slice A0 (AC-75 Devshell) — 2026-04-21T20:00Z
 
 - **Gate**: post-build slice PASS (attempt 1).
