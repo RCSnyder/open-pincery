@@ -18,16 +18,16 @@
 //! `kexec_file_load`, `bpf`, `ptrace`. Every other syscall is allowed.
 //!
 //! This:
-//!   1. **Proves the full pipeline end-to-end** — `SeccompFilter →
-//!      BpfProgram → memfd → bwrap --seccomp <fd> → kernel` — with a
-//!      kernel-visible adversarial signal (SIGSYS on `mount`).
-//!   2. **Delivers real security today** — every syscall in the denylist
-//!      is listed in readiness.md's 12-payload escape suite.
-//!   3. **Leaves a clean tightening path** — the next sub-slice
-//!      (A2b.4b-hardening, scheduled after the 12-payload escape test
-//!      suite lands in `tests/sandbox_escape_test.rs`) flips the default
-//!      to `KillProcess` and builds the real allowlist from an empirical
-//!      list of syscalls observed during the passing smoke tests.
+//! 1. **Proves the full pipeline end-to-end** — `SeccompFilter →
+//!    BpfProgram → memfd → bwrap --seccomp <fd> → kernel` — with a
+//!    kernel-visible adversarial signal (SIGSYS on `mount`).
+//! 2. **Delivers real security today** — every syscall in the denylist
+//!    is listed in readiness.md's 12-payload escape suite.
+//! 3. **Leaves a clean tightening path** — the next sub-slice
+//!    (A2b.4b-hardening, scheduled after the 12-payload escape test
+//!    suite lands in `tests/sandbox_escape_test.rs`) flips the default
+//!    to `KillProcess` and builds the real allowlist from an empirical
+//!    list of syscalls observed during the passing smoke tests.
 //!
 //! ## Mode semantics
 //!
@@ -52,7 +52,6 @@
 
 #![cfg(target_os = "linux")]
 
-use std::ffi::CStr;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
@@ -66,17 +65,16 @@ use crate::config::SandboxMode;
 /// number).
 ///
 /// Rationale for each:
-///   - `bpf`            — loading eBPF can open kernel kprobe/tracepoint paths.
-///   - `delete_module`  — kernel module unload.
-///   - `finit_module`   — kernel module load via fd.
-///   - `init_module`    — kernel module load.
-///   - `kexec_file_load`/`kexec_load` — reboot into a new kernel image.
-///   - `mount`          — remount fs, mount /proc with less-restricted opts.
-///   - `pivot_root`     — change root filesystem.
-///   - `ptrace`         — attach to arbitrary processes in same pid ns.
-///   - `reboot`         — reboot the host (blocked at kernel level but
-///                        still worth refusing).
-///   - `umount2`        — unmount filesystems.
+/// - `bpf` — loading eBPF can open kernel kprobe/tracepoint paths.
+/// - `delete_module` — kernel module unload.
+/// - `finit_module` — kernel module load via fd.
+/// - `init_module` — kernel module load.
+/// - `kexec_file_load` / `kexec_load` — reboot into a new kernel image.
+/// - `mount` — remount fs, mount /proc with less-restricted opts.
+/// - `pivot_root` — change root filesystem.
+/// - `ptrace` — attach to arbitrary processes in same pid ns.
+/// - `reboot` — reboot the host (blocked at kernel level but still worth refusing).
+/// - `umount2` — unmount filesystems.
 fn denied_syscalls() -> Vec<i64> {
     vec![
         libc::SYS_bpf,
@@ -128,15 +126,13 @@ pub fn build_bpf_program(mode: SandboxMode) -> Result<BpfProgram, String> {
 
 /// Write a compiled BPF program into a fresh in-memory file descriptor
 /// suitable for `bwrap --seccomp <fd>`. The returned fd:
-///   - is positioned at offset 0 (so `read(2)` starts at the first
-///     instruction),
-///   - has `FD_CLOEXEC` cleared (so it inherits across `execve`),
-///   - owns its lifetime via [`OwnedFd`] (dropping closes it).
+/// - is positioned at offset 0 (so `read(2)` starts at the first instruction),
+/// - has `FD_CLOEXEC` cleared (so it inherits across `execve`),
+/// - owns its lifetime via [`OwnedFd`] (dropping closes it).
 pub fn write_bpf_to_memfd(program: &BpfProgram) -> io::Result<OwnedFd> {
     // memfd_create with flags=0: no MFD_CLOEXEC, so the fd survives
     // execve by default. bwrap only reads from it; no seal needed.
-    let name = CStr::from_bytes_with_nul(b"pincery-seccomp-bpf\0")
-        .expect("name literal is NUL-terminated");
+    let name = c"pincery-seccomp-bpf";
     // SAFETY: libc::memfd_create is an FFI call with no pointer aliasing
     // concerns — we pass a static C string and constant flags.
     let raw = unsafe { libc::memfd_create(name.as_ptr(), 0) };
