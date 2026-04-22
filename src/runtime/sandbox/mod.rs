@@ -15,6 +15,25 @@
 //! `deny_net = true` for audit, but true namespace-level isolation is
 //! left to the host (seccomp/bwrap/namespaces). This trait allows a
 //! future `NamespacedExecutor` to be swapped in without touching callers.
+//!
+//! ## Module layout (Slice A2b.2)
+//!
+//! The runtime sandbox is split into per-layer submodules that will be
+//! populated across slices A2b.3 and A2b.4. Only the trait + default
+//! `ProcessExecutor` live here in `mod.rs`; namespace, cgroup, landlock,
+//! seccomp, and netns layers each own a file so the composed
+//! `RealSandbox` stays readable under the 400-line design budget.
+//!
+//! These submodules are Linux-only at the source level (files compile
+//! as empty modules on Windows/macOS; layer logic is `cfg(target_os =
+//! "linux")`-gated inside each file when A2b.3/A2b.4 lands).
+
+pub mod bwrap;
+pub mod cgroup;
+#[path = "landlock.rs"]
+pub mod landlock_layer;
+pub mod netns;
+pub mod seccomp;
 
 use async_trait::async_trait;
 use std::collections::HashMap;

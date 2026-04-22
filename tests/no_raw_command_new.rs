@@ -5,7 +5,11 @@
 //! site in (bypassing env scrub, timeout, and pre-flight rejection).
 //!
 //! We count occurrences across `src/runtime/**/*.rs`. The only match
-//! should be inside `sandbox.rs`.
+//! should be inside the sandbox module — either the legacy
+//! `sandbox.rs` single-file layout or the Slice A2b.2 `sandbox/`
+//! directory module (where `mod.rs` owns the spawn site and the
+//! layer submodules `bwrap.rs`, `seccomp.rs`, `landlock.rs`,
+//! `cgroup.rs`, `netns.rs` may also compose `Command` invocations).
 
 use std::fs;
 use std::path::Path;
@@ -48,8 +52,14 @@ fn only_sandbox_may_call_command_new() {
                 continue;
             }
             if line.contains("Command::new") {
-                let file_name = f.file_name().unwrap().to_string_lossy().into_owned();
-                if file_name != "sandbox.rs" {
+                // Allow the legacy single-file module `sandbox.rs`
+                // and every file inside the `sandbox/` directory
+                // module. Anything else in `src/runtime/` is a
+                // banned second spawn site.
+                let in_sandbox_module = f
+                    .components()
+                    .any(|c| c.as_os_str() == "sandbox" || c.as_os_str() == "sandbox.rs");
+                if !in_sandbox_module {
                     offenders.push((f.to_string_lossy().into_owned(), i + 1, line.to_string()));
                 }
             }
@@ -58,7 +68,8 @@ fn only_sandbox_may_call_command_new() {
 
     assert!(
         offenders.is_empty(),
-        "Command::new is only allowed in src/runtime/sandbox.rs; found outside:\n{}",
+        "Command::new is only allowed in src/runtime/sandbox/ (or legacy sandbox.rs); \
+         found outside:\n{}",
         offenders
             .iter()
             .map(|(f, l, c)| format!("  {}:{}: {}", f, l, c.trim()))
