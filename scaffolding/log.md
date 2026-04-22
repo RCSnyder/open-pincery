@@ -1,5 +1,22 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — Slice A0 (AC-75 Devshell) — 2026-04-21T20:00Z
+
+- **Gate**: post-build slice PASS (attempt 1).
+- **Trigger**: user approved the 23-AC / 8-10-week v9 plan; "lets start implementing".
+- **Baseline**: tagged `v8.0.1-pre-v9-baseline` at `036eed0` before first BUILD commit (local; push deferred to user).
+- **Evidence**:
+  - New `Dockerfile.devshell` pins `ubuntu:24.04` and installs bubblewrap + slirp4netns + uidmap + libseccomp-dev + rustup 1.88 + sqlx-cli ≥ 0.8.
+  - New `scripts/devshell.sh` and `scripts/devshell.ps1` pass `--privileged --cgroupns=host` to `ghcr.io/open-pincery/devshell:v9` with a `--version-check` smoke path.
+  - New `docs/runbooks/dev_setup_macos.md` and `docs/runbooks/dev_setup_windows.md` walk a contributor from clone to `devshell cargo test`.
+  - `README.md` gains a `## Development` section (native-Linux vs devshell paths) with a Zerobox-vs-`zeroize` glossary note.
+  - New `tests/devshell_parity_test.rs` adds 6 structural assertions (Dockerfile pins, script flags, runbook contents, README section) plus a gated `OPEN_PINCERY_DEVSHELL_PARITY=1` outer/inner parity stub for Linux CI.
+- **Verification ladder**: `cargo build --tests` clean; `cargo test --test devshell_parity_test` → 6/6 pass.
+- **Commit**: `15de1be feat(build): AC-75 cross-platform devshell (Slice A0)`.
+- **Retries**: 0.
+- **Concerns**: devshell image is not yet published to GHCR; parity test remains env-gated until A2a's `tests/sandbox_escape_test.rs` exists. CI publishing is part of AC-75's later-phase work.
+- **Next**: Slice A1 — AC-54 SECURITY.md threat model (no code, documentation only, ~1 day).
+
 ## AUDIT v9 FOLLOW-UP — Consistency Cleanup — 2026-04-22T11:15Z
 
 - **Gate**: post-audit consistency PASS (attempt 1).
