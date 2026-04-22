@@ -22,8 +22,9 @@
 use async_trait::async_trait;
 use std::process::Stdio;
 
-use crate::config::ResolvedSandboxMode;
+use crate::config::{ResolvedSandboxMode, SandboxMode};
 
+use super::cgroup::CgroupGuard;
 use super::{is_rejected_pattern, ExecResult, SandboxProfile, ShellCommand, ToolExecutor};
 
 /// Linux-only bubblewrap-backed executor.
@@ -113,6 +114,30 @@ impl RealSandbox {
         args.extend(["--".into(), "sh".into(), "-c".into(), command.into()]);
         args
     }
+
+    /// AC-53 / Slice A2b.4a helper: create a `pincery-<uuid>` cgroup,
+    /// apply `limits`, and attach the spawned bwrap child's PID. Split
+    /// out from `run` to keep the error branches readable and to make
+    /// both steps (create, attach) share a single error type.
+    ///
+    /// Returns the live [`CgroupGuard`] on success — caller must keep
+    /// it alive until after the child is reaped so `Drop`-time `rmdir`
+    /// fires on an empty cgroup.
+    fn attach_cgroup_to_child(
+        &self,
+        limits: &super::CgroupLimits,
+        child: &tokio::process::Child,
+    ) -> Result<CgroupGuard, String> {
+        let pid = child
+            .id()
+            .ok_or_else(|| "bwrap child has no pid (already exited?)".to_string())?;
+        let guard = CgroupGuard::new(limits)
+            .map_err(|e| format!("cgroup create failed: {e} (is /sys/fs/cgroup writable?)"))?;
+        guard
+            .attach_pid(pid)
+            .map_err(|e| format!("cgroup attach pid {pid} failed: {e}"))?;
+        Ok(guard)
+    }
 }
 
 #[async_trait]
@@ -182,6 +207,43 @@ impl ToolExecutor for RealSandbox {
                 // failure.
                 return ExecResult::Err(format!("bwrap spawn failed: {e}"));
             }
+        };
+
+        // AC-53 / Slice A2b.4a: cgroup v2 resource caps.
+        //
+        // Layer 2 of the six-layer sandbox. The guard lives through
+        // the entire wait so `Drop` cleanup fires AFTER the child is
+        // reaped (cgroup v2 refuses rmdir until cgroup.procs is empty).
+        //
+        // Fail-closed semantics: in Enforce mode any cgroup init or
+        // attach error terminates the already-spawned bwrap child and
+        // surfaces as `ExecResult::Err`. In Audit mode we log and
+        // continue without a cgroup, matching the seccomp LOG posture.
+        let _cgroup_guard: Option<CgroupGuard> = match &profile.cgroup {
+            None => None,
+            Some(limits) => match self.attach_cgroup_to_child(limits, &child) {
+                Ok(guard) => Some(guard),
+                Err(reason) => match self.sandbox.mode {
+                    SandboxMode::Enforce => {
+                        // `kill_on_drop(true)` on the Command + the
+                        // end-of-scope drop of `child` terminates the
+                        // bwrap process before we return. No explicit
+                        // kill() needed.
+                        return ExecResult::Err(format!(
+                            "cgroup layer failed (enforce mode, failing closed): {reason}"
+                        ));
+                    }
+                    SandboxMode::Audit | SandboxMode::Disabled => {
+                        tracing::warn!(
+                            target = "sandbox.cgroup",
+                            reason = %reason,
+                            mode = ?self.sandbox.mode,
+                            "cgroup layer failed; proceeding without it (audit mode)"
+                        );
+                        None
+                    }
+                },
+            },
         };
 
         match tokio::time::timeout(profile.timeout, child.wait_with_output()).await {

@@ -1,5 +1,48 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — Slice A2b.4a cgroup v2 resource caps (layer 2 of 6) — 2026-04-22T22:45Z
+
+- **Gate**: post-build slice **pre-CI** — cross-platform compile + clippy clean on Windows, Linux validation deferred to CI (no local Docker volume cache survived the Desktop restart; cold compile ~26 min). Evidence closure will mirror A2b.3: CI green = primary channel, devshell re-run = second channel when cache exists.
+- **Trigger**: user: "so this really works? what else needs to be done? can you implement it". Confirmed A2b.3 reality (both channels), then began A2b.4.
+- **Scope decision**: A2b.4 as a whole = three independent kernel primitives (cgroup v2 + seccomp-bpf + landlock). Too large for one verified vertical slice. Split into three sub-slices:
+  - **A2b.4a** — cgroup v2 resource caps (THIS SLICE) — least invasive, highest kernel-visible test signal.
+  - A2b.4b — seccomp-bpf via `bwrap --seccomp <fd>` with a `seccompiler`-generated allowlist.
+  - A2b.4c — landlock LSM FS ruleset via a new `pcy-sandbox-exec` helper binary (landlock must be installed inside the bwrap child, not the parent).
+- **Changed** (~290 LoC new, 12 LoC modified):
+  - `src/runtime/sandbox/cgroup.rs` (+260): replaced 6-line stub with a real layer 2.
+    - `CgroupLimits { memory_max_bytes, pids_max, cpu_max_micros }` — pure data, compiles on every platform so `SandboxProfile` has one stable shape. `planned_writes()` is a pure mapping helper (3 unit tests cover ordering + Option skipping).
+    - `CgroupGuard` (Linux-only, `cfg(target_os = "linux")`) — owns a `pincery-<uuid_v4>` dir under `/sys/fs/cgroup/`, writes `memory.max` / `pids.max` / `cpu.max`, exposes `attach_pid(u32)`, `Drop` calls `rmdir` (ignores error — cleanup failures are reaped by `sweep_leaked_cgroups` at next boot, never panic a destructor).
+    - `cgroup_v2_writable() -> bool` — O(1) probe: `mkdir` a throwaway cgroup under `/sys/fs/cgroup`, `rmdir`. Used by runtime fail-closed logic and by tests to self-skip on unprivileged hosts (mirrors `bwrap_available()` pattern).
+    - `sweep_leaked_cgroups() -> io::Result<usize>` — startup sweep for risk-register item #10. Idempotent, swallows per-entry errors.
+    - Raw `std::fs` over `cgroups-rs` — cgroup v2 is a flat pseudo-filesystem interface; third-party crate adds surface area (cgroup v1, systemd D-Bus) for zero benefit. Rationale inlined in module doc-comment.
+  - `src/runtime/sandbox/mod.rs` (+14 / -0):
+    - Added `pub cgroup: Option<CgroupLimits>` field to `SandboxProfile` with doc-comment spelling out the fail-closed contract. `Default` = `None` → all existing call sites (12 via `..Default::default()` or `SandboxProfile::default()`) work unchanged.
+    - `pub use self::cgroup::CgroupLimits;` so the type is reachable from `open_pincery::runtime::sandbox::CgroupLimits` (tests + callers don't need to import the submodule path).
+  - `src/runtime/sandbox/bwrap.rs` (+54 / -1):
+    - New helper `RealSandbox::attach_cgroup_to_child(&self, limits, &child) -> Result<CgroupGuard, String>` — pure composition of `CgroupGuard::new` + `attach_pid`, with error messages that name the cgroup-writability failure mode by name so operators don't chase generic spawn errors.
+    - `run()` now inspects `profile.cgroup` after `spawn()`: in `SandboxMode::Enforce` any cgroup init/attach error returns `ExecResult::Err` (fail closed — `kill_on_drop(true)` reaps the just-spawned bwrap child); in `SandboxMode::Audit` / `Disabled` it logs `tracing::warn!(target="sandbox.cgroup", reason, mode)` and proceeds without the layer (mirrors the seccomp `RET_LOG` posture planned for A2b.4b).
+    - Guard held in `_cgroup_guard: Option<CgroupGuard>` across the full `wait_with_output().await` so `Drop`-time `rmdir` always fires on an empty cgroup.
+  - `tests/sandbox_real_smoke.rs` (+1): added `cgroup: None` to the one literal `SandboxProfile { ... }` constructor. No behavior change — pre-existing A2b.3 tests still assert the bwrap-only path.
+  - `tests/sandbox_cgroup_test.rs` (NEW, +230) — real-kernel smoke suite, self-skips when `!bwrap_available() || !cgroup_v2_writable()`:
+    - `cgroup_permits_command_under_caps` — positive control: 256 MiB memory + 64 pids cap, `echo` runs and Drop cleans up.
+    - `cgroup_pids_max_limits_fork_count` — adversarial: `pids_max=8`, spawn 20 concurrent `sleep 2 &` — assert either stderr shows EAGAIN-style fork failure OR `jobs -p | wc -l` reports < 20. Either signal = kernel-enforced cap.
+    - `cgroup_init_failure_fails_closed_in_enforce` — provoke cgroup write failure via `cpu_max_micros=(50_000, 0)` (EINVAL from zero period), assert `ExecResult::Err(msg)` containing both `"cgroup"` and `"enforce"`.
+    - `cgroup_init_failure_proceeds_in_audit` — same provocation in `SandboxMode::Audit`, assert command still runs (`ExecResult::Ok`).
+- **Verification ladder**:
+  - `cargo check --tests` (Windows) → `Finished in 1.80s` ✓ (cross-platform code compiles; Linux-only bits cfg-gated out)
+  - `cargo clippy --tests` (Windows) → `Finished in 1.66s`, zero warnings ✓
+  - `cargo test` on Linux → **deferred to CI** (push triggers the `sandbox-smoke` workflow which already has `bwrap`, the AppArmor sysctl flip from slice A2b.3, and `--privileged` runner context sufficient for `/sys/fs/cgroup` writes).
+- **Not touched**:
+  - `src/runtime/sandbox/{seccomp,landlock,netns}.rs` — empty stubs remain, earmarked for A2b.4b/c.
+  - `src/runtime/tools.rs::dispatch_tool` — still passes `SandboxProfile::default()` (no cgroup). Wiring per-tool-budget cgroup limits into the dispatcher is part of AC-65 (resource-budget enforcement), a separate slice under Phase A2.
+  - Existing 5 A2b.3 smoke tests — unchanged semantics, just the `cgroup: None` field added to the profile builder.
+- **Concerns**:
+  - The `pids_max=8` test assumes bwrap + sh occupy ≤ 2 tasks at the moment user-level `sleep &` invocations run. If on some distros bwrap fires additional internal tasks, 20 sleeps might only bump against the cap partially. Test is tolerant: it accepts EITHER stderr EAGAIN OR survivor-count < 20, which holds in any bwrap implementation where the cap is enforced at all.
+  - `sweep_leaked_cgroups()` is defined but not yet wired into server startup. That wire-up lands in the next commit touching `src/main.rs` or the background supervisor — unblocks AC-65 but isn't required for A2b.4a's adversarial tests (they create + drop per-test, never leak).
+  - `cgroups-rs` dep remains in `Cargo.toml` unused. Removing it requires a `deny.toml` / `Cargo.lock` touch; deferring to the A2b.4b commit where we'll reassess whether any layer actually wants it.
+- **Retries**: 0 (single-pass design, single-pass compile).
+- **Next**: push and watch CI. If green → move to Slice A2b.4b (seccomp-bpf). If any Linux-specific issue surfaces (e.g., `tokio::process::Child::id()` behavior, `fs::write` to `cgroup.procs` semantics), fix and re-run.
+
 ## BUILD v9 — Slice A2b.3 evidence gate RECONFIRMED (local devshell bwrap smoke green) — 2026-04-22T21:15Z
 
 - **Gate**: post-build slice **PASS (attempt 1, second-channel evidence)**. Independent confirmation of AC-53 on Windows/Docker Desktop via the canonical `scripts/devshell.sh` path, alongside the CI green from run 24795066180.

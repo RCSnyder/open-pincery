@@ -46,6 +46,7 @@ fn profile() -> SandboxProfile {
         deny_net: true,
         timeout: Duration::from_secs(15),
         cwd: None,
+        cgroup: None,
     }
 }
 

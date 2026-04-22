@@ -44,6 +44,8 @@ use std::time::Duration;
 
 use crate::config::{ResolvedSandboxMode, SandboxMode};
 
+pub use self::cgroup::CgroupLimits;
+
 #[derive(Debug, Clone, Default)]
 pub struct ShellCommand {
     pub command: String,
@@ -79,6 +81,13 @@ pub struct SandboxProfile {
     pub timeout: Duration,
     /// Working directory. `None` means "create a fresh tempdir".
     pub cwd: Option<PathBuf>,
+    /// AC-53 / Slice A2b.4a: cgroup v2 resource caps applied to the
+    /// spawned child. `None` means "no cgroup layer" — the same posture
+    /// as pre-A2b.4a. When `Some`, [`bwrap::RealSandbox`] creates a
+    /// `pincery-<uuid>` cgroup, applies the caps, and attaches the
+    /// bwrap child's PID immediately after spawn. If cgroup creation
+    /// fails and the mode is `Enforce`, the executor fails closed.
+    pub cgroup: Option<CgroupLimits>,
 }
 
 impl Default for SandboxProfile {
@@ -88,6 +97,7 @@ impl Default for SandboxProfile {
             deny_net: true,
             timeout: Duration::from_secs(30),
             cwd: None,
+            cgroup: None,
         }
     }
 }
