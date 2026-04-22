@@ -146,6 +146,54 @@ Start with:
 - [docs/input/security-architecture.md](docs/input/security-architecture.md) — six-layer security model
 - [docs/input/best-practices.md](docs/input/best-practices.md) — practices mapped to academic research
 
+## Development
+
+Open Pincery v9 introduces a Linux-only agent sandbox (AC-53 **Zerobox**,
+AC-71 secret injection proxy, AC-72 per-agent egress allowlist) that
+relies on kernel primitives unavailable on macOS or Windows hosts
+(bubblewrap, slirp4netns, landlock LSM, cgroup v2). AC-75 ships a
+pinned Ubuntu 24.04 Docker "devshell" so every contributor runs the
+identical toolchain against the identical kernel surface.
+
+> **Terminology.** _Zerobox_ is the Linux sandbox architecture that
+> isolates each tool invocation. [`zeroize`](https://docs.rs/zeroize)
+> is an unrelated Rust crate used under AC-74 for memory hygiene inside
+> the secret-handling path. They coexist; neither replaces the other.
+
+### On Linux
+
+Native toolchain is supported directly:
+
+```bash
+cargo test
+cargo clippy --all-targets -- -D warnings
+```
+
+### On macOS or Windows
+
+Use the devshell wrapper to run the same commands inside the pinned
+container. See the full walkthroughs in
+[docs/runbooks/dev_setup_macos.md](docs/runbooks/dev_setup_macos.md) and
+[docs/runbooks/dev_setup_windows.md](docs/runbooks/dev_setup_windows.md).
+
+```bash
+# macOS / Linux
+./scripts/devshell.sh cargo test
+
+# Windows (PowerShell)
+.\scripts\devshell.ps1 cargo test
+```
+
+The wrapper invokes
+`docker run --privileged --cgroupns=host ghcr.io/open-pincery/devshell:v9`
+with the repo bind-mounted at `/work`, so edits on the host flow through
+to the container immediately. Build artifacts are written to
+`target/devshell/` to avoid colliding with any host Rust toolchain used
+for editor integration.
+
+CI runs `tests/devshell_parity_test.rs` to confirm the wrapper,
+`Dockerfile.devshell`, and runbooks stay in sync.
+
 ## References
 
 The Continuous Agent Architecture that Open Pincery implements is described in detail in an upcoming publication by the original author, to be released under MIT license.
