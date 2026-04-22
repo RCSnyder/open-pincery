@@ -1,5 +1,37 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — Slice A2b.4b seccomp-bpf denylist (layer 3 of 6) — 2026-04-22T20:38Z
+
+- **Gate**: PASS (attempt 2 — clippy fix cycle).
+- **CI evidence**: Run `24801274092` at HEAD `e5e893c` — **all 5 jobs green** (cargo deny, rustfmt, clippy, sandbox real-bwrap smoke, cargo test). 72/72 lib tests pass. 6 new seccomp unit tests + 4 new seccomp integration tests all green:
+  - `runtime::sandbox::seccomp::tests::denylist_contains_expected_escape_primitives` ✓
+  - `runtime::sandbox::seccomp::tests::build_program_enforce_produces_nonempty_bpf` ✓
+  - `runtime::sandbox::seccomp::tests::build_program_audit_produces_nonempty_bpf` ✓
+  - `runtime::sandbox::seccomp::tests::memfd_roundtrip_matches_program_bytes` ✓
+  - `runtime::sandbox::bwrap::tests::bwrap_args_emit_seccomp_flag_when_fd_provided` ✓
+  - `runtime::sandbox::bwrap::tests::bwrap_args_omit_seccomp_flag_when_fd_absent` ✓
+  - `sandbox_seccomp_test::seccomp_permits_normal_commands` ✓
+  - `sandbox_seccomp_test::seccomp_enforce_kills_mount_syscall` ✓
+  - `sandbox_seccomp_test::seccomp_audit_does_not_kill_process` ✓
+  - `sandbox_seccomp_test::seccomp_disabled_via_profile_still_runs` ✓
+- **Design decision — denylist, not allowlist (for this slice)**: A true default-deny allowlist for stock glibc `sh -c echo` needs dozens of syscalls (ld.so dynamic linking, rseq, clone3, etc.). One missing syscall SIGSYS-kills the sandbox before `echo` runs. Shipping an incomplete allowlist would either break the existing bwrap smoke tests or paper over real policy errors with an `Allow` fall-through. Instead, this slice ships a **targeted denylist** blocking 11 escape primitives: `mount`, `umount2`, `pivot_root`, `reboot`, `init_module`, `finit_module`, `delete_module`, `kexec_load`, `kexec_file_load`, `bpf`, `ptrace`. Proves the full pipeline (`SeccompFilter → BpfProgram → memfd → bwrap --seccomp <fd> → kernel`) with kernel-visible adversarial signal (SIGSYS on `mount`). Tightening to a true allowlist is a follow-up slice (A2b.4b-hardening) after the 12-payload escape suite gives empirical data on what syscalls real tools actually need.
+- **Mechanism**: `seccompiler::SeccompFilter` with `mismatch_action=Allow`, `match_action=KillProcess` (Enforce) or `Log` (Audit). Each denied syscall maps to an empty `SeccompRule` vec (matches by syscall number alone). `BpfProgram::try_from(filter)` → write raw `sock_filter[]` bytes into `libc::memfd_create(c"pincery-seccomp-bpf", 0)` (flags=0 → NOT CLOEXEC → inherits through fork/exec) → `--seccomp <fd>` in bwrap argv. `OwnedFd` held alive in `RealSandbox::run` through `wait_with_output` so bwrap's read-then-exec path has a live fd.
+- **Files shipped**:
+  - `src/runtime/sandbox/seccomp.rs` — replaced 6-line stub with 249-line impl: `denied_syscalls()`, `build_bpf_program(mode)`, `write_bpf_to_memfd(&BpfProgram)`, `compose_seccomp_fd(mode)`, 4 unit tests.
+  - `src/runtime/sandbox/bwrap.rs` — `build_bwrap_args` gains `seccomp_fd: Option<RawFd>` param; `run()` composes the memfd before spawn with fail-closed Enforce / log-proceed Audit posture; 2 new unit tests.
+  - `src/runtime/sandbox/mod.rs` — `SandboxProfile.seccomp: bool` (default `true`) with doc-comment.
+  - `tests/sandbox_seccomp_test.rs` — NEW, 4 adversarial integration tests.
+  - `tests/sandbox_cgroup_test.rs` — 4 profiles set `seccomp: false` to isolate the cgroup layer under test.
+  - `tests/sandbox_real_smoke.rs` — `seccomp: true` in the smoke profile so existing smoke implicitly verifies seccomp doesn't break `echo`.
+  - `tests/sandbox_deps_test.rs` — `"libc"` added to `SANDBOX_CRATES`.
+  - `Cargo.toml` — `libc = "0.2"` added as explicit `[target.'cfg(target_os = "linux")'.dependencies]` entry (was transitive via seccompiler/nix).
+- **Commits**:
+  - `7040c34` feat(sandbox): Slice A2b.4b seccomp-bpf denylist (layer 3 of 6) — initial implementation.
+  - `e5e893c` fix(sandbox): clippy doc-list-overindent + manual-c-str-literal — CI clippy fix cycle (two new Rust 1.95 lints: `doc_overindented_list_items` on 3-space indented doc lists, `manual_c_str_literals` on `CStr::from_bytes_with_nul(b"..\0")`).
+- **AC-53 layer status after this slice**: ✓ bwrap (A2b.3) + ✓ cgroup v2 (A2b.4a) + ✓ seccomp-bpf (A2b.4b). Remaining: ⏳ landlock (A2b.4c), ⏳ uid/cap drop hardening, ⏳ slirp4netns + egress allowlist, ⏳ 12-payload escape suite in `tests/sandbox_escape_test.rs`.
+- **Retries**: 1 (clippy fix cycle). Attempt 1 = `7040c34` failed on two clippy lints that don't fire on Windows (Linux-cfg-gated code isn't linted locally). Attempt 2 = `e5e893c` green across all 5 jobs.
+- **Next**: Slice A2b.4c (landlock filesystem layer) — or, per operator preference, pivot to hardening A2b.4b into a true allowlist after landing the 12-payload escape suite. Recommendation: land A2b.4c first to complete the three kernel-primitive layers, then build the escape suite against the full stack, then use empirical data from the passing suite to drive the allowlist-tightening slice.
+
 ## BUILD v9 — Slice A2b.4a cgroup v2 resource caps (layer 2 of 6) — 2026-04-22T22:45Z
 
 - **Gate**: post-build slice **pre-CI** — cross-platform compile + clippy clean on Windows, Linux validation deferred to CI (no local Docker volume cache survived the Desktop restart; cold compile ~26 min). Evidence closure will mirror A2b.3: CI green = primary channel, devshell re-run = second channel when cache exists.
