@@ -86,6 +86,8 @@ Six defense layers, from innermost to outermost:
 5. **Database security** — Postgres RLS, compile-time checked queries, append-only audit
 6. **Webhook/API security** — HMAC-SHA256 verification, SHA-256 dedup, rate limiting, TLS
 
+See [docs/SECURITY.md](docs/SECURITY.md) for the v9 threat model — adversary capabilities, in-scope vs out-of-scope attacks, and the vulnerability disclosure process.
+
 ## Deployment Modes
 
 Open Pincery is designed for four deployment modes. Self-hosting is first-class — the runtime functions without any proprietary control plane.
