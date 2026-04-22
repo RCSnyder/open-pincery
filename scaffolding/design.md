@@ -2273,3 +2273,190 @@ None broken.
 - v5 `.env.example` / smoke script (AC-29/AC-30): smoke updated to invoke `pcy login` + assert `/openapi.json` 200; no new env vars.
 - v6 capability gate (AC-35): server-side — unchanged. MCP tool calls traverse the same authenticated HTTP path as the CLI; capability decisions still happen in `tools::dispatch_tool`.
 - v7 vault + CLI (AC-38..AC-43): credentials endpoints gain annotations; `pcy credential` commands live unchanged under the noun tree (verbs semantic-identical to v7).
+
+---
+
+## v9 DESIGN — Trust Gate (2026-04-22)
+
+v9 adds 20 acceptance criteria (AC-53..AC-72) across security, auth, credential workflows, UI, observability, and multi-tenant enforcement. This section specifies the architecture for every AC; per-slice implementation detail lives in each build-slice commit.
+
+### Architecture Overview
+
+Three new subsystems join the existing runtime:
+
+1. **`src/runtime/sandbox/`** — layered Linux sandbox (AC-53 + AC-72). `SandboxedExecutor` wraps v6's `ProcessExecutor`. Every tool exec composes six layers in a fixed order: Bubblewrap namespaces → cgroup v2 setup → landlock ruleset → seccomp-bpf allowlist → uid/cap drop → slirp4netns egress proxy with allowlist. Each layer is a sub-module with its own failure mode and unit test; the `compose` entry point fails closed — any layer refusing to initialize aborts the exec with a `sandbox_unavailable` error before any user code runs.
+2. **`src/runtime/secret_proxy.rs`** — out-of-process credential resolver (AC-71). Agent process has zero read access to the vault key; it forwards tool requests with `PLACEHOLDER:<name>` tokens intact to a unix-socket endpoint (`$XDG_RUNTIME_DIR/pincery-secret.sock` by default). The proxy resolves placeholders and delivers plaintext to the sandboxed child via one of three injection modes (env, stdin, header). The `http_get` tool proxies the outbound HTTP call itself rather than exposing the credential to the agent at all.
+3. **`src/tenancy.rs`** — workspace-scoped query middleware (AC-65). Every API handler resolves the session's `workspace_id` and passes it to a new `ScopedPool::query(workspace_id, sql, params)` helper; every query injects `AND workspace_id = $1` at the binding site. A lint test greps `src/api/` for bare `sqlx::query*!?` invocations and fails the build on any hit.
+
+The existing request path remains: HTTP handler → capability gate → tool dispatch → executor. v9 inserts `ScopedPool` at the handler layer, `SecretProxy` between dispatch and executor, and `SandboxedExecutor` replacing the raw `ProcessExecutor`.
+
+### Directory Structure (additions)
+
+```
+src/
+  tenancy.rs                      # AC-65 scoped-pool middleware + helper
+  api/
+    deposit.rs                    # AC-56 public deposit page (GET/POST /deposit/:token)
+    credential_requests.rs        # AC-55, AC-57 (list/approve/reject)
+    sessions.rs                   # AC-58 (refresh/revoke/list)
+    users.rs                      # AC-59 (add/list/set-role/delete)
+    cost.rs                       # AC-63 cost rollup endpoint
+    version.rs                    # AC-69 /api/version
+    events_export.rs              # AC-62 jsonl/csv streaming
+    agent_network.rs              # AC-72 allowlist CRUD
+  runtime/
+    sandbox/
+      mod.rs                      # SandboxedExecutor entry + compose()
+      bwrap.rs                    # Bubblewrap wrapper (--unshare-all, bind mounts)
+      seccomp.rs                  # seccompiler allowlist loader
+      landlock.rs                 # landlock ruleset builder
+      cgroup.rs                   # cgroup v2 write helpers (cgroups-rs)
+      netns.rs                    # slirp4netns proxy + egress allowlist plumbing
+      profiles/
+        seccomp.json              # vetted syscall allowlist
+        bwrap_args.toml           # default bind-mount / env layout
+    secret_proxy.rs               # AC-71 unix-socket server + client stub
+    tools/
+      http_get.rs                 # AC-66 with agent_http_allowlist check
+      file_read.rs                # AC-66 per-agent tempdir scope
+      db_query.rs                 # AC-66 stored-credential + read-only regex
+  background/
+    retention.rs                  # AC-64 archive + prune job
+    rate_limit.rs                 # AC-67 rolling 60s window (token bucket)
+  cli/commands/
+    credential_request.rs         # AC-57 list/approve/reject
+    session.rs                    # AC-58 list/revoke/refresh
+    user.rs                       # AC-59 add/list/set-role/delete
+    cost.rs                       # AC-63 CLI rollup
+    events_archive.rs             # AC-64 archive subcommand
+    agent_network.rs              # AC-72 allow/list/revoke
+static/
+  js/htmx.min.js                  # AC-61 vendored 1.9.x (no CDN)
+  css/pico.min.css                # AC-61 vendored 2.0.x
+  views/                          # AC-61 six server-rendered partials
+    login.html | agents.html | agent_detail.html | events.html | budget.html | credential_inbox.html
+docs/SECURITY.md                  # AC-54 threat model
+tests/
+  sandbox_escape_test.rs          # AC-53 12-payload matrix
+  secret_proxy_test.rs            # AC-71 memory sweep
+  network_egress_test.rs          # AC-72 allow/block
+  credential_request_tool_test.rs # AC-55
+  credential_deposit_test.rs      # AC-56
+  cli_credential_request_test.rs  # AC-57
+  session_ttl_test.rs             # AC-58
+  rbac_test.rs                    # AC-59
+  readme_auth_section_test.rs     # AC-60
+  ui_smoke_test_v9.rs             # AC-61
+  event_search_export_test.rs    # AC-62
+  cost_report_test.rs             # AC-63
+  event_retention_test.rs         # AC-64
+  multi_tenant_isolation_test.rs  # AC-65 5x5 + SQLi probes
+  tenancy_middleware_test.rs      # AC-65 lint
+  tool_catalog_test.rs            # AC-66
+  workspace_rate_limit_test.rs    # AC-67
+  ollama_config_test.rs           # AC-68
+  version_handshake_test.rs       # AC-69
+  terminology_test.rs             # AC-70
+migrations/
+  20260501000001_add_workspace_id_to_sessions.sql
+  20260501000002_create_credential_requests.sql
+  20260501000003_add_users_role.sql
+  20260501000004_add_sessions_expires_at.sql
+  20260501000005_create_agent_http_allowlist.sql
+  20260501000006_create_agent_network_allowlist.sql
+```
+
+### Interfaces
+
+**Secret Proxy IPC (AC-71)** — length-prefixed JSON over unix socket:
+
+```rust
+// Request: agent process -> secret proxy
+struct ResolveRequest {
+    tool_call_id: Uuid,
+    agent_id: Uuid,
+    workspace_id: Uuid,
+    placeholders: Vec<String>,        // e.g. ["OPENAI_API_KEY"]
+    injection_mode: InjectionMode,    // Env | Stdin | HttpHeader { name }
+    child_stdin_fd: Option<RawFd>,    // SCM_RIGHTS passed fd for stdin mode
+}
+
+enum ResolveResponse {
+    Ready { env: HashMap<String, OsString> },  // proxy wrote stdin if requested
+    Missing { name: String },                  // emits credential_unresolved
+    Denied { reason: String },                 // capability gate refused
+}
+```
+
+**Scoped Pool (AC-65)**:
+
+```rust
+pub struct ScopedPool<'a> { pool: &'a PgPool, workspace_id: Uuid }
+impl ScopedPool<'_> {
+    pub async fn fetch_one<T>(&self, sql: &str, binds: Binds) -> Result<T>;
+    pub async fn fetch_all<T>(&self, sql: &str, binds: Binds) -> Result<Vec<T>>;
+    pub async fn execute(&self, sql: &str, binds: Binds) -> Result<u64>;
+    // SELECT/UPDATE/DELETE auto-append `AND workspace_id = $1`;
+    // INSERT auto-fills workspace_id from the scope.
+}
+```
+
+**Credential Request Surface (AC-55/56/57)**:
+
+```
+POST /api/agents/:id/tools/request_credential
+  body: { name, reason, doc_url? }
+  -> 201 { request_id }   (emits credential_requested; deposit_token NEVER returned)
+GET  /api/credential-requests?status=pending
+POST /api/credential-requests/:id/approve  -> 200 { deposit_url }  (admin/operator)
+POST /api/credential-requests/:id/reject   -> 200 { status: "rejected" }
+GET  /deposit/:deposit_token   -> 200 text/html (no auth, single-use)
+POST /deposit/:deposit_token   -> 303 /deposit/success  (24h TTL)
+```
+
+**Sandbox Events (AC-53 / AC-71 / AC-72)**:
+
+```
+sandbox_blocked   { tool_call_id, payload_category, denied_by_layer, syscall?, path? }
+secret_injected   { tool_call_id, name, tool_name, injection_mode }
+network_blocked   { tool_call_id, destination_host, destination_port, protocol }
+```
+
+### External Integrations & Test Strategy
+
+| Integration                          | Purpose                  | Failure mode                                              | Test strategy                                            |
+| ------------------------------------ | ------------------------ | --------------------------------------------------------- | -------------------------------------------------------- |
+| `bubblewrap` binary                  | Namespace isolation      | Missing / ns disabled → exec refuses, `sandbox_unavailable` | Live on ubuntu-24.04 CI; ignored on non-Linux            |
+| `libseccomp` / `seccompiler` crate   | Syscall allowlist        | Profile load fails → exec refuses                         | Unit: load profile + assert denied syscalls error        |
+| `landlock` crate                     | FS confinement           | Kernel <5.13 → warn + fall-back, emit `landlock_unavailable` | Live; skip if unsupported; CI enforces supported kernel |
+| `slirp4netns`                        | Egress proxy + allowlist | Missing → exec refuses                                    | Live: allowed host succeeds, denied host blocks          |
+| `cgroups-rs`                         | Resource limits          | cgroup v2 not mounted → exec refuses                      | Live: small OOM / PID thresholds                         |
+| Postgres                             | Tenancy enforcement      | Middleware bypass → lint fails CI                         | Live: 5×5 isolation matrix + SQLi probes                 |
+| HTMX + Pico                          | UI                       | Static asset 404 → UI smoke red                           | Live: curl each route + check CSP header                 |
+
+### Observability
+
+- **Logs**: every sandbox layer failure → structured `error!` with `layer`, `kind`, `tool_call_id`. No plaintext credentials are ever logged (secret proxy scrubs at IPC boundary).
+- **New event types**: `sandbox_blocked`, `network_blocked`, `secret_injected`, `credential_requested`, `credential_deposited`, `credential_request_rejected`, `rate_limit_exceeded`.
+- **Counters (stdout / structured)**: `sandbox_exec_total{outcome}`, `egress_attempts_total{decision}`, `secret_resolutions_total{mode}`, `tenancy_queries_total{workspace_id}`.
+- **CLI verbs added**: `pcy session {list,revoke,refresh}`, `pcy user {add,list,set-role,delete}`, `pcy credential request {list,approve,reject}`, `pcy agent network {allow,list,revoke}`, `pcy events archive`, `pcy cost`.
+
+### Complexity Exceptions
+
+1. **`src/runtime/sandbox/mod.rs` may exceed 300 lines.** Each layer lives in its own sub-module, but `compose()` must orchestrate all six with partial-failure cleanup. File budget 400 lines; split further only if REVIEW flags it.
+2. **`tests/sandbox_escape_test.rs` at ~500 lines.** 12 payloads × 4 categories × assertion+event check. Splitting by category is permitted; single-file is also acceptable given the shared harness cost.
+3. **AC-65 endpoint-migration slice touches ~25 files in `src/api/` at once.** Necessary — the middleware lint disallows partial migration. One slice + one large test; REVIEW must sign off.
+4. **`src/tenancy.rs::Binds` is a bespoke subset of `sqlx` binds, not a drop-in alias.** Trade-off accepted: the API surface stays small (three methods) and every call site is auditable.
+
+### Open Questions
+
+- **Landlock kernel floor.** ubuntu-24.04 runner ships kernel 6.8+ (landlock v3 available). `SECURITY.md` documents a self-hoster minimum of 5.13; older kernels fall back to bwrap-only with a warning event.
+- **slirp4netns vs nftables.** v9 uses slirp4netns (unprivileged, userspace). nftables is a v10 opt-in for performance at scale. No BUILD impact.
+- **Session refresh vs rotation.** v9 uses sliding expiration + an explicit `POST /api/sessions/refresh`. Refresh-token rotation (separate short access + long refresh) deferred to v11 with OAuth integration.
+
+### v9 Dependencies on Prior Versions
+
+- v6 AC-36 `ProcessExecutor`: wrapped by `SandboxedExecutor`. Existing `tests/sandbox_test.rs` (process-isolation smoke, misnamed) continues to pass.
+- v7 AC-40 credential vault: extended via `credential_requests` table; existing `credentials` table untouched. Secret proxy (AC-71) reuses the vault decrypt path.
+- v8 AC-45 idempotent login, AC-47 `--output`: every new list endpoint (requests, sessions, users, cost, network allowlist) honours `--output` and the noun-verb tree.
+- v8 AC-52b naming lint: extended to allowlist new subcommands (`credential request`, `session`, `user`, `cost`, `agent network`).

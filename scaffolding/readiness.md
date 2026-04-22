@@ -678,3 +678,83 @@ exceptions, each with a hard ceiling and a predefined split plan.
 
 No other complexity exceptions beyond the v1–v7 exceptions already
 recorded. No new soft-ceiling extensions. No deferred file budgets.
+
+---
+
+## v9 ANALYZE — Trust Gate Readiness (2026-04-22)
+
+**Verdict: READY.** Scope v9 (AC-53..AC-72, 20 ACs) and design.md v9 DESIGN section are consistent. All four scope clarifications are resolved in writing. Every AC has a named test file and a runtime proof path. Build order is sequenced so each slice gates the next.
+
+### Truths (non-negotiable statements that must be true in shipped v9.0)
+
+1. **No tool call on Linux reaches `execve` without passing through all six sandbox layers** (bwrap, cgroup v2, landlock, seccomp allowlist, cap/uid drop, netns+slirp4netns). Any layer missing → `sandbox_unavailable` error, no execution.
+2. **Plaintext credentials never reside in the agent process address space.** The secret proxy (`src/runtime/secret_proxy.rs`) is the sole component with vault-key read access.
+3. **Every `sqlx` query in `src/api/` flows through `ScopedPool`.** The tenancy lint fails CI on any direct `sqlx::query*` call in handler code.
+4. **Cross-workspace reads return HTTP 404, never 403.** Presence leaks are a tenancy bug.
+5. **Session tokens expire.** No session survives past `expires_at`; `/api/sessions/refresh` is the only extension path.
+6. **Deposit tokens are single-use and expire in 24h.** No reuse, no long-lived secret URLs.
+7. **Every P0 AC has an adversarial test.** Happy-path tests alone do not close a P0.
+
+### Key Links (AC → design component → test → runtime proof)
+
+| AC     | Title                           | Design component                                  | Test file                                  | Runtime proof                                                    |
+| ------ | ------------------------------- | ------------------------------------------------- | ------------------------------------------ | ---------------------------------------------------------------- |
+| AC-53  | Industry-leading sandbox        | `src/runtime/sandbox/{mod,bwrap,seccomp,landlock,cgroup,netns}.rs` | `tests/sandbox_escape_test.rs` | 12 adversarial payloads executed live; every failure emits `sandbox_blocked` event visible via `pcy events <agent>` |
+| AC-54  | SECURITY.md threat model        | `docs/SECURITY.md` + README link                  | `tests/security_doc_test.rs`               | `curl http://localhost:8080/docs/SECURITY.md` or repo view       |
+| AC-55  | Credential request tool         | `src/runtime/tools.rs` + `src/api/credential_requests.rs` + migration | `tests/credential_request_tool_test.rs` | Agent emits `credential_requested` event; `pcy credential request list` shows row; `deposit_token` absent from event payload |
+| AC-56  | Deposit page                    | `src/api/deposit.rs` + HTML template              | `tests/credential_deposit_test.rs`         | Open `/deposit/<token>` in browser → form renders; POST → 303; second POST → 410 |
+| AC-57  | Credential inbox (CLI + UI)     | `src/cli/commands/credential_request.rs` + `static/views/credential_inbox.html` | `tests/cli_credential_request_test.rs` | `pcy credential request {list,approve,reject}` verbs work against live DB |
+| AC-58  | Session TTL + refresh + revoke  | `src/api/sessions.rs` + migration                 | `tests/session_ttl_test.rs`                | `curl` with expired token → 401; `POST /api/sessions/refresh` extends; `pcy session revoke` invalidates |
+| AC-59  | Users + roles                   | `src/api/users.rs` + `src/cli/commands/user.rs` + migration | `tests/rbac_test.rs`             | 3 roles × endpoint matrix: viewer blocked from POST; operator blocked from user-mgmt; admin open |
+| AC-60  | Auth README rewrite             | `README.md` Authentication section                | `tests/readme_auth_section_test.rs`        | README grep asserts three-box diagram + token table             |
+| AC-61  | UI rebuild (HTMX + Pico)        | `static/{js,css,views}/`                          | `tests/ui_smoke_test_v9.rs`                | `curl /login`, `/agents`, `/agents/:id`, `/events`, `/budget`, `/credentials/requests` return 200 with CSP header |
+| AC-62  | Event search + export           | `src/api/events_export.rs`                        | `tests/event_search_export_test.rs`        | `curl /api/agents/:id/events.jsonl?q=foo&type=tool_call` streams NDJSON |
+| AC-63  | Cost reports                    | `src/api/cost.rs` + `src/cli/commands/cost.rs`    | `tests/cost_report_test.rs`                | `pcy cost <agent> --group-by model` renders table; matches `llm_calls` sum |
+| AC-64  | Retention + archive             | `src/background/retention.rs` + `src/cli/commands/events_archive.rs` | `tests/event_retention_test.rs` | Seed old events; `pcy events archive --older-than 90d`; rows pruned, gzipped JSONL on disk |
+| AC-65  | Multi-tenant enforcement        | `src/tenancy.rs` + every `src/api/*.rs` handler  | `tests/multi_tenant_isolation_test.rs` + `tests/tenancy_middleware_test.rs` | 5×5 matrix: alpha token on beta IDs returns 404; SQLi probes return 404; lint fails on bare query |
+| AC-66  | Tool catalog expansion          | `src/runtime/tools/{http_get,file_read,db_query}.rs` | `tests/tool_catalog_test.rs`            | Each tool registered; scoping test asserts host/path/SQL enforcement |
+| AC-67  | Workspace rate limiting         | `src/background/rate_limit.rs`                    | `tests/workspace_rate_limit_test.rs`       | 601 calls in 60s → 601st delayed 1s + `rate_limit_exceeded` event |
+| AC-68  | Ollama bullet                   | `README.md` + config loader                       | `tests/ollama_config_test.rs`              | README grep asserts bullet; config loader parses `host.docker.internal:11434` URL |
+| AC-69  | Version handshake               | `src/api/version.rs` + CLI version check          | `tests/version_handshake_test.rs`          | Stubbed v0.8 server vs v0.9 CLI → warning; v0 server vs v1 CLI → exit 3 |
+| AC-70  | Terminology lock                | README opening paragraph                          | `tests/terminology_test.rs`                | Regex assertion over README/DELIVERY/docs asserts no `bot|assistant|worker` synonyms |
+| AC-71  | Secret injection proxy          | `src/runtime/secret_proxy.rs` + IPC contract     | `tests/secret_proxy_test.rs`               | Agent memory via `/proc/<pid>/maps` sweep shows no credential bytes; sandboxed child sees value; `secret_injected` event emitted |
+| AC-72  | Per-agent network egress allowlist | `src/runtime/sandbox/netns.rs` + migration + CLI | `tests/network_egress_test.rs`             | Allowed host `curl` succeeds; denied host blocked + `network_blocked` event in log |
+
+### Acceptance Criteria Coverage
+
+Every AC in scope v9 appears in the table above with a planned test and a planned runtime proof. No AC is closed by a unit test alone; every P0 AC is closed by adversarial test + observable event.
+
+### Scope Reduction Risks
+
+1. **AC-53 landlock may be skipped if kernel < 5.13.** Mitigation: CI runs on ubuntu-24.04 (kernel 6.8+); docs document a minimum kernel floor for self-hosters. Scope reduction risk: ZERO on CI; self-hoster risk mitigated by explicit warning event.
+2. **AC-65 middleware migration is one large slice.** Temptation: migrate half the endpoints, leave the rest. Guardrail: lint test blocks merge with any unscoped query remaining. REVIEW must confirm lint is active before slice merges.
+3. **AC-71 injection-mode `HttpHeader` requires changes in `http_get` tool at the same time.** Risk: shipping secret proxy without the `http_get` integration leaves a half-feature. Slice A2c MUST include `http_get` cutover.
+4. **AC-61 UI rebuild temptation to keep hand-rolled hash-routing as a fallback.** Guardrail: `static/js/` is wholesale replaced, not layered.
+5. **AC-66 `db_query` read-only enforcement via server-side regex.** Risk: regex is bypassable via `;` stacking or comment-terminated statements. Mitigation: use a read-only role at the Postgres level (`SET TRANSACTION READ ONLY`) as defense-in-depth, regex is belt-and-suspenders.
+
+### Clarifications Needed
+
+None. All four original clarifications were resolved by user on 2026-04-22 and recorded verbatim in `scope.md` under "Clarifications Resolved."
+
+### Build Order
+
+Sequenced per scope.md Build Order. Summary:
+
+- **Phase A** (Security Truth, ~3-4 weeks): A1 SECURITY.md → A2a sandbox core → A2b egress allowlist → A2c secret proxy → A3 session TTL → A4 users+roles → A5 auth README
+- **Phase B** (Credential Requests, ~1 week): B1 tool+schema → B2 deposit page → B3 CLI+UI inbox
+- **Phase C** (UI Rebuild, ~1 week): C1 HTMX+Pico six views
+- **Phase E** (Multi-tenant Enforcement, ~2 weeks — blocking v9.0): E1a schema → E1b middleware → E1c endpoint migration → E1d isolation matrix test
+- **v9.0 ships here** (Phases A+B+C+E complete = full trust gate)
+- **Phase D** (Observability, ~1 week, ships as v9.1): D1 search+export → D2 cost reports → D3 retention+archive
+- **Phase F** (Polish, ~1 week, ships as v9.2): F1 tool catalog → F2 rate limit → F3 Ollama → F4 version handshake → F5 terminology lock
+
+Total engineering budget: 7-9 weeks.
+
+### Complexity Exceptions (carried from DESIGN)
+
+1. `src/runtime/sandbox/mod.rs` budget 400 lines (compose + partial-failure cleanup).
+2. `tests/sandbox_escape_test.rs` ~500 lines acceptable.
+3. AC-65 endpoint-migration slice touches ~25 files at once — required, not optional.
+4. `src/tenancy.rs::Binds` is a bespoke subset of `sqlx` binds.
+
+All four are explicit and REVIEW-gated; none is a placeholder waiver.

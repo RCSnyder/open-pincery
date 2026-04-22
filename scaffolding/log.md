@@ -1,5 +1,19 @@
 # Open Pincery — Experiment Log
 
+## ANALYZE v9 — Readiness READY — 2026-04-22T10:30Z
+
+- **Gate**: post-analyze PASS (attempt 1). Verdict: READY.
+- **Evidence**: `scaffolding/readiness.md` appended with a v9 ANALYZE section containing seven Truths (sandbox layer composition, plaintext isolation, scoped-pool mandatory, 404-not-403 tenancy, session TTL, deposit-token single-use, adversarial-per-P0), a complete Key Links table mapping every AC (AC-53..AC-72) to a design component + a named test file + a runtime proof path, a Scope Reduction Risks enumeration (5 items with guardrails), Clarifications Needed = none (all four resolved in scope.md), Build Order summary (Phases A+B+C+E = v9.0; D = v9.1; F = v9.2; 7-9 weeks total), and the four Complexity Exceptions carried from DESIGN.
+- **Retries**: 0.
+- **Next**: STOP for user review of the 7-9-week v9 plan before BUILD Slice A1 begins.
+
+## DESIGN v9 — Trust Gate Architecture — 2026-04-22T10:15Z
+
+- **Gate**: post-design PASS (attempt 1).
+- **Evidence**: `scaffolding/design.md` appended with a v9 DESIGN section covering: Architecture Overview (three new subsystems — `src/runtime/sandbox/`, `src/runtime/secret_proxy.rs`, `src/tenancy.rs`); Directory Structure additions (new `src/api/{deposit,credential_requests,sessions,users,cost,version,events_export,agent_network}.rs`, `src/runtime/sandbox/{mod,bwrap,seccomp,landlock,cgroup,netns}.rs`, `src/runtime/tools/{http_get,file_read,db_query}.rs`, `src/background/{retention,rate_limit}.rs`, `src/cli/commands/{credential_request,session,user,cost,events_archive,agent_network}.rs`, 6 HTML views, 6 new migrations, 20 new test files); Interfaces (Secret Proxy IPC `ResolveRequest`/`ResolveResponse`, `ScopedPool` helper, Credential Request HTTP surface, three new event shapes); External Integrations matrix with test strategy for bubblewrap/seccomp/landlock/slirp4netns/cgroups-rs/Postgres/HTMX; Observability (logs, 7 new event types, 4 counter families, CLI verbs); 4 Complexity Exceptions (sandbox/mod.rs 400-line budget, sandbox_escape_test.rs 500-line budget, AC-65 25-file slice, bespoke Binds type); 3 Open Questions all resolved-by-documentation (landlock kernel floor 5.13, slirp4netns vs nftables, refresh vs rotation). Design review traced two scenarios: (1) a tool call with a placeholder credential flows HTTP handler → ScopedPool → capability gate → SecretProxy → SandboxedExecutor → child, with plaintext never crossing the agent process boundary; (2) a cross-workspace attack via forged session cookie flows through ScopedPool and returns 404 before any row is read. Both scenarios map cleanly.
+- **Retries**: 0.
+- **Next**: ANALYZE v9 → readiness.md, then STOP for user review.
+
 ## EXPAND v9 REVISION — Clarifications Resolved + Security Upgrade — 2026-04-22T10:00Z
 
 - **Trigger**: user resolved all four Clarifications Needed with directional upgrades: (1) AC-53 → *"Real sandboxes, full robust, industry leading security model for agentic software"*; (2) AC-61 → HTMX+Pico confirmed; (3) AC-65 → *"i think we need to design the multitenant feature"* → upgrade from declaration to enforcement; (4) AC-59 → fixed three roles confirmed.
