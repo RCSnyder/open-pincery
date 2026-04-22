@@ -82,6 +82,13 @@ cgroups-rs = "0.3"
 # Direct syscall bindings for unshare/clone/setns/mount. Used by the
 # bwrap wrapper for namespace composition.
 nix = { version = "0.29", features = ["sched", "mount", "user", "fs", "process"] }
+# Raw libc bindings — we use `libc::memfd_create` + `libc::SYS_*`
+# constants when serializing the seccomp BPF program into a memfd
+# for bwrap's `--seccomp <fd>` flag (A2b.4b). Already a transitive
+# dep via seccompiler/nix; pinning it explicitly documents the
+# intentional direct use and keeps `tests/sandbox_deps_test.rs`
+# happy.
+libc = "0.2"
 
 [dev-dependencies]
 wiremock = "0.6"

@@ -50,7 +50,19 @@ impl RealSandbox {
     /// for unit-testability — the flag list is large and order-
     /// sensitive, so a pure function keeps the per-flag rationale
     /// close to the test that pins it.
-    fn build_bwrap_args(cwd: &str, command: &str, deny_net: bool) -> Vec<String> {
+    ///
+    /// `seccomp_fd` is the raw fd number of a memfd containing a
+    /// compiled `sock_filter[]` BPF program, if the seccomp layer is
+    /// active for this invocation (Slice A2b.4b). When `Some`, we
+    /// insert `--seccomp <fd>` into bwrap's argv; bwrap reads the
+    /// program from that fd and installs it via `seccomp(2)` right
+    /// before `execve`-ing the user shell.
+    fn build_bwrap_args(
+        cwd: &str,
+        command: &str,
+        deny_net: bool,
+        seccomp_fd: Option<std::os::fd::RawFd>,
+    ) -> Vec<String> {
         let mut args: Vec<String> = vec![
             // Clean up if the parent dies mid-execution.
             "--die-with-parent".into(),
@@ -110,6 +122,16 @@ impl RealSandbox {
             // Blunt network kill — no loopback, no DNS, no egress.
             // Slice A2b.4 swaps this for slirp4netns + allowlist.
             args.push("--unshare-net".into());
+        }
+        if let Some(fd) = seccomp_fd {
+            // bwrap reads a raw `sock_filter[]` program from this fd
+            // and installs it via seccomp(SECCOMP_SET_MODE_FILTER, ...)
+            // right before execve. Must come before `--` so bwrap
+            // parses it as its own flag. The fd must be inheritable
+            // (not CLOEXEC) and alive when bwrap execs — we hold the
+            // OwnedFd in `run()` through `wait_with_output`.
+            args.push("--seccomp".into());
+            args.push(fd.to_string());
         }
         args.extend(["--".into(), "sh".into(), "-c".into(), command.into()]);
         args
@@ -174,7 +196,46 @@ impl ToolExecutor for RealSandbox {
             }
         };
 
-        let bwrap_args = Self::build_bwrap_args(&cwd_str, &cmd.command, profile.deny_net);
+        // AC-53 / Slice A2b.4b: seccomp-bpf layer.
+        //
+        // Built BEFORE spawn because the fd number must land in the
+        // bwrap argv. The OwnedFd is bound to `_seccomp_fd_guard` and
+        // kept alive until after `wait_with_output` — bwrap reads the
+        // program from the memfd during its setup phase, but we don't
+        // have a signal for "bwrap is done reading", so the safe
+        // upper bound is "child has exited".
+        //
+        // Fail-closed in Enforce; log-and-proceed in Audit. Mirrors
+        // the cgroup layer's posture.
+        let (_seccomp_fd_guard, seccomp_fd_arg): (
+            Option<std::os::fd::OwnedFd>,
+            Option<std::os::fd::RawFd>,
+        ) = if profile.seccomp {
+            match super::seccomp::compose_seccomp_fd(self.sandbox.mode) {
+                Ok((fd, raw)) => (Some(fd), Some(raw)),
+                Err(reason) => match self.sandbox.mode {
+                    SandboxMode::Enforce => {
+                        return ExecResult::Err(format!(
+                            "seccomp layer failed (enforce mode, failing closed): {reason}"
+                        ));
+                    }
+                    SandboxMode::Audit | SandboxMode::Disabled => {
+                        tracing::warn!(
+                            target = "sandbox.seccomp",
+                            reason = %reason,
+                            mode = ?self.sandbox.mode,
+                            "seccomp layer failed; proceeding without it (audit mode)"
+                        );
+                        (None, None)
+                    }
+                },
+            }
+        } else {
+            (None, None)
+        };
+
+        let bwrap_args =
+            Self::build_bwrap_args(&cwd_str, &cmd.command, profile.deny_net, seccomp_fd_arg);
 
         let mut command = tokio::process::Command::new("bwrap");
         command
@@ -264,7 +325,7 @@ mod tests {
 
     #[test]
     fn bwrap_args_include_each_required_namespace_flag() {
-        let args = RealSandbox::build_bwrap_args("/tmp/work", "echo hi", true);
+        let args = RealSandbox::build_bwrap_args("/tmp/work", "echo hi", true, None);
         // The order matters less than the presence — bwrap processes
         // flags in sequence, but each namespace flag is independent.
         for flag in [
@@ -286,7 +347,7 @@ mod tests {
 
     #[test]
     fn bwrap_args_keep_net_namespace_inherited_when_deny_net_is_false() {
-        let args = RealSandbox::build_bwrap_args("/tmp/work", "echo hi", false);
+        let args = RealSandbox::build_bwrap_args("/tmp/work", "echo hi", false, None);
         assert!(
             !args.iter().any(|a| a == "--unshare-net"),
             "deny_net=false must not emit --unshare-net: {args:?}"
@@ -295,7 +356,7 @@ mod tests {
 
     #[test]
     fn bwrap_args_bind_and_chdir_cwd() {
-        let args = RealSandbox::build_bwrap_args("/tmp/work", "echo hi", true);
+        let args = RealSandbox::build_bwrap_args("/tmp/work", "echo hi", true, None);
         let bind_idx = args
             .iter()
             .position(|a| a == "--bind")
@@ -311,14 +372,40 @@ mod tests {
 
     #[test]
     fn bwrap_args_terminate_with_shell_invocation() {
-        let args = RealSandbox::build_bwrap_args("/tmp/work", "echo hello && exit 0", true);
+        let args = RealSandbox::build_bwrap_args("/tmp/work", "echo hello && exit 0", true, None);
         let tail = &args[args.len() - 4..];
         assert_eq!(tail, &["--", "sh", "-c", "echo hello && exit 0"]);
     }
 
     #[test]
+    fn bwrap_args_emit_seccomp_flag_when_fd_provided() {
+        let args = RealSandbox::build_bwrap_args("/tmp/work", "true", true, Some(7));
+        let idx = args
+            .iter()
+            .position(|a| a == "--seccomp")
+            .expect("--seccomp must be present when fd provided");
+        assert_eq!(args[idx + 1], "7");
+        // Must come BEFORE the `--` separator so bwrap parses it as
+        // its own flag rather than forwarding it to sh.
+        let sep = args.iter().position(|a| a == "--").expect("-- separator");
+        assert!(
+            idx < sep,
+            "--seccomp must precede `--`: idx={idx} sep={sep} args={args:?}"
+        );
+    }
+
+    #[test]
+    fn bwrap_args_omit_seccomp_flag_when_fd_absent() {
+        let args = RealSandbox::build_bwrap_args("/tmp/work", "true", true, None);
+        assert!(
+            !args.iter().any(|a| a == "--seccomp"),
+            "seccomp_fd=None must not emit --seccomp: {args:?}"
+        );
+    }
+
+    #[test]
     fn bwrap_args_mount_tmpfs_and_proc_and_dev() {
-        let args = RealSandbox::build_bwrap_args("/tmp/work", "true", true);
+        let args = RealSandbox::build_bwrap_args("/tmp/work", "true", true, None);
         assert!(
             args.windows(2).any(|w| w == ["--tmpfs", "/tmp"]),
             "tmpfs on /tmp missing"

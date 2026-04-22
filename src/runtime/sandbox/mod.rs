@@ -88,6 +88,15 @@ pub struct SandboxProfile {
     /// bwrap child's PID immediately after spawn. If cgroup creation
     /// fails and the mode is `Enforce`, the executor fails closed.
     pub cgroup: Option<CgroupLimits>,
+    /// AC-53 / Slice A2b.4b: seccomp-bpf syscall filter. When `true`,
+    /// [`bwrap::RealSandbox`] compiles a denylist BPF program with
+    /// [`seccomp::build_bpf_program`], packages it into a memfd, and
+    /// passes `--seccomp <fd>` to bwrap. Denied syscalls (mount,
+    /// umount2, pivot_root, reboot, init_module, finit_module,
+    /// delete_module, kexec_load, kexec_file_load, bpf, ptrace) are
+    /// killed (Enforce) or logged (Audit). Ignored on non-Linux and
+    /// by `ProcessExecutor`.
+    pub seccomp: bool,
 }
 
 impl Default for SandboxProfile {
@@ -98,6 +107,7 @@ impl Default for SandboxProfile {
             timeout: Duration::from_secs(30),
             cwd: None,
             cgroup: None,
+            seccomp: true,
         }
     }
 }

@@ -47,6 +47,7 @@ fn profile() -> SandboxProfile {
         timeout: Duration::from_secs(15),
         cwd: None,
         cgroup: None,
+        seccomp: true,
     }
 }
 

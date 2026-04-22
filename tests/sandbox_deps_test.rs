@@ -24,7 +24,7 @@
 
 use std::fs;
 
-const SANDBOX_CRATES: &[&str] = &["seccompiler", "landlock", "cgroups-rs", "nix"];
+const SANDBOX_CRATES: &[&str] = &["seccompiler", "landlock", "cgroups-rs", "nix", "libc"];
 
 fn cargo_toml() -> toml::Table {
     let s = fs::read_to_string("Cargo.toml").expect("Cargo.toml must exist");

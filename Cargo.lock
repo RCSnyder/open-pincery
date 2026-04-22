@@ -1895,6 +1895,7 @@ dependencies = [
  "http-body-util",
  "jsonpath-rust",
  "landlock",
+ "libc",
  "metrics",
  "metrics-exporter-prometheus",
  "nix 0.29.0",
