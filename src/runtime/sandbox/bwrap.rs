@@ -299,7 +299,8 @@ impl ToolExecutor for RealSandbox {
             } else {
                 let landlock_profile =
                     super::landlock_layer::LandlockProfile::default_for_cwd(&cwd);
-                use std::os::unix::process::CommandExt;
+                // Note: tokio::process::Command::pre_exec is an inherent method,
+                // so no trait import is required.
                 // SAFETY: pre_exec runs in the forked child between
                 // fork and execve. The closure must be async-signal
                 // safe in principle. install_landlock performs
