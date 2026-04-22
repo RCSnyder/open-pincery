@@ -52,6 +52,7 @@ fn seccomp_profile() -> SandboxProfile {
         cwd: None,
         cgroup: None,
         seccomp: true,
+        landlock: false,
     }
 }
 

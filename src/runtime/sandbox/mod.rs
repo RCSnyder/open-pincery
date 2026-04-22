@@ -97,6 +97,15 @@ pub struct SandboxProfile {
     /// killed (Enforce) or logged (Audit). Ignored on non-Linux and
     /// by `ProcessExecutor`.
     pub seccomp: bool,
+    /// AC-53 / Slice A2b.4c: landlock LSM filesystem ruleset. When
+    /// `true`, [`bwrap::RealSandbox`] installs a path-based capability
+    /// ruleset via a `pre_exec` hook on the bwrap child, restricting
+    /// reads to standard rootfs paths (`/usr`, `/bin`, `/sbin`,
+    /// `/lib`, `/lib64`, `/etc`) and reads+writes to the cwd
+    /// workspace. On kernels < 5.13 (no landlock support), Enforce
+    /// mode fails closed; Audit and Disabled modes log + proceed.
+    /// Ignored on non-Linux and by `ProcessExecutor`.
+    pub landlock: bool,
 }
 
 impl Default for SandboxProfile {
@@ -108,6 +117,7 @@ impl Default for SandboxProfile {
             cwd: None,
             cgroup: None,
             seccomp: true,
+            landlock: true,
         }
     }
 }

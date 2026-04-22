@@ -87,6 +87,7 @@ async fn cgroup_permits_command_under_caps() {
             cpu_max_micros: None,
         }),
         seccomp: false,
+        landlock: false,
     };
     let result = enforce_sandbox()
         .run(&ShellCommand::new("echo cgroup-ok"), &profile)
@@ -130,6 +131,7 @@ async fn cgroup_pids_max_limits_fork_count() {
             cpu_max_micros: None,
         }),
         seccomp: false,
+        landlock: false,
     };
     // Try to spawn 20 concurrent sleeps. Under the 8-task cap, most
     // will fail with EAGAIN from fork(2) and sh will either print
@@ -198,6 +200,7 @@ async fn cgroup_init_failure_fails_closed_in_enforce() {
             cpu_max_micros: Some((50_000, 0)),
         }),
         seccomp: false,
+        landlock: false,
     };
     let result = enforce_sandbox()
         .run(&ShellCommand::new("echo should-not-run"), &profile)
@@ -236,6 +239,7 @@ async fn cgroup_init_failure_proceeds_in_audit() {
             cpu_max_micros: Some((50_000, 0)),
         }),
         seccomp: false,
+        landlock: false,
     };
     let result = audit_sandbox()
         .run(&ShellCommand::new("echo audit-fallback"), &profile)

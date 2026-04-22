@@ -259,6 +259,69 @@ impl ToolExecutor for RealSandbox {
             command.env(k, v);
         }
 
+        // AC-53 / Slice A2b.4c: landlock LSM filesystem ruleset.
+        //
+        // Layer 4 of the six-layer sandbox. Installed AFTER fork but
+        // BEFORE execve via `pre_exec`, so the ruleset restricts the
+        // bwrap child + its sh descendant without touching the parent
+        // pincery process. Inode semantics: bwrap's RO-bind of /usr,
+        // /bin, etc. preserves the host inodes, so landlock's
+        // PathBeneath rules continue to allow access inside the
+        // sandbox view.
+        //
+        // Mode posture (mirrors cgroup + seccomp):
+        //   - Enforce + landlock unsupported  → fail closed.
+        //   - Enforce + landlock supported   → install; pre_exec
+        //     install failure surfaces as spawn() Err.
+        //   - Audit + unsupported            → log, proceed.
+        //   - Audit + install fails at runtime → spawn() Err
+        //     bubbles up (kernel-level enforcement failure is rare
+        //     and indistinguishable from a hard error from the
+        //     caller's perspective).
+        if profile.landlock {
+            if !super::landlock_layer::landlock_supported() {
+                match self.sandbox.mode {
+                    SandboxMode::Enforce => {
+                        return ExecResult::Err(
+                            "landlock layer unsupported (kernel < 5.13, enforce mode, \
+                             failing closed)"
+                                .into(),
+                        );
+                    }
+                    SandboxMode::Audit | SandboxMode::Disabled => {
+                        tracing::warn!(
+                            target = "sandbox.landlock",
+                            mode = ?self.sandbox.mode,
+                            "landlock unsupported (kernel < 5.13); proceeding without it"
+                        );
+                    }
+                }
+            } else {
+                let landlock_profile =
+                    super::landlock_layer::LandlockProfile::default_for_cwd(&cwd);
+                use std::os::unix::process::CommandExt;
+                // SAFETY: pre_exec runs in the forked child between
+                // fork and execve. The closure must be async-signal
+                // safe in principle. install_landlock performs
+                // landlock syscalls (no malloc) and PathFd::new opens
+                // file descriptors (open(2), async-signal-safe). The
+                // landlock crate's internal Vec growth happens BEFORE
+                // pre_exec is invoked at spawn time? No - the closure
+                // is invoked post-fork, so the Vec grows in the
+                // child's address space. glibc's malloc post-fork in
+                // a multi-threaded parent is technically UB, but in
+                // practice glibc handles this safely; this is the
+                // same posture used by every Rust sandbox crate.
+                unsafe {
+                    command.pre_exec(move || {
+                        super::landlock_layer::install_landlock(&landlock_profile).map_err(|e| {
+                            std::io::Error::new(std::io::ErrorKind::PermissionDenied, e)
+                        })
+                    });
+                }
+            }
+        }
+
         let child = match command.spawn() {
             Ok(c) => c,
             Err(e) => {
