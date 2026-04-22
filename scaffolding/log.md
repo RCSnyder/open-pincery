@@ -1,5 +1,34 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — Slice A2b.3 evidence gate RECONFIRMED (local devshell bwrap smoke green) — 2026-04-22T21:15Z
+
+- **Gate**: post-build slice **PASS (attempt 1, second-channel evidence)**. Independent confirmation of AC-53 on Windows/Docker Desktop via the canonical `scripts/devshell.sh` path, alongside the CI green from run 24795066180.
+- **Trigger**: user: "try docer desktop now" — Docker Desktop came back online (29.4.0). Ran the full local suite to close the evidence story with two independent channels.
+- **Environment**:
+  - Host: Windows 11 + Docker Desktop 29.4.0 / Docker Desktop (WSL2 backend)
+  - Image: `open-pincery-devshell:v9-local` (built locally from `Dockerfile.devshell`, 416 MB) — Ubuntu 24.04 + Rust 1.88.0 + `bubblewrap 0.9.0` + `slirp4netns` + `uidmap` + `sqlx-cli`
+  - Wrapper flags: `--privileged --cgroupns=host --network host -v $REPO:/work -w /work` — `--privileged` + WSL2 sidesteps the hosted-runner AppArmor issue entirely (no sysctl tweak needed).
+- **Wrapper portability fix (captured in the same slice)**: On Windows git-bash / MSYS2, `docker.exe` rewrites unix-style args before dispatch, so `-w /work` was becoming `C:/Program Files/Git/work` and `docker run -it` failed without a TTY (piped `cargo test`). Fixed in `scripts/devshell.sh`:
+  - `export MSYS_NO_PATHCONV=1` + `export MSYS2_ARG_CONV_EXCL='*'` — disables MSYS path translation for this one docker invocation. No-op on Linux/macOS.
+  - `DOCKER_TTY_FLAGS=(-i)` with conditional `+=(-t)` only when `[[ -t 1 ]]`. Non-interactive callers no longer fail with "the input device is not a TTY".
+- **Verification ladder (local devshell)**:
+  - `./scripts/devshell.sh --version-check` → `Docker version 29.4.0, build 9d7ad9f / devshell image: open-pincery-devshell:v9-local` ✓
+  - `./scripts/devshell.sh bwrap --version` → `bubblewrap 0.9.0` ✓
+  - `./scripts/devshell.sh cargo test --test sandbox_real_smoke -- --nocapture --test-threads=1` → **5 passed; 0 failed; 0 ignored** in `0.35s` (compile phase `26m 13s` cold-cache inside WSL2):
+    - `real_sandbox_denies_network_when_deny_net_is_true ... ok`
+    - `real_sandbox_echoes_expected_stdout ... ok`
+    - `real_sandbox_rejects_sudo_preflight ... ok`
+    - `real_sandbox_runs_trivial_true ... ok`
+    - `real_sandbox_sees_fresh_uts_hostname ... ok`
+- **Commits**:
+  - `aafee74 fix(devshell): MSYS path + TTY auto-detect for Windows git-bash; log A2b.3 evidence closure`
+- **Retries**: 0 (one-shot pass on the test suite itself; one iteration on the wrapper to unblock Docker invocation).
+- **Concerns**:
+  - Cold-cache compile inside WSL2 is ~26 min. Not a correctness concern, but a dev-experience one — the `target_cache_host` volume means subsequent runs should be seconds. Track if it ever matters.
+  - Devshell uses `--privileged` — wider than strictly needed for bwrap-alone, but required for the future landlock/seccomp/cgroup layers in Slice A2b.4. Documented as intentional in `Dockerfile.devshell` comments.
+- **Evidence status**: AC-53 now has **two independent green channels** (CI + local Docker Desktop). Scope-Reduction-Risk line from readiness.md closed.
+- **Next**: Slice A2b.4 — landlock + seccomp + cgroup v2 layers on top of the bwrap base.
+
 ## BUILD v9 — Slice A2b.3 evidence gate CLOSED (CI bwrap smoke green) — 2026-04-22T18:30Z
 
 - **Gate**: post-build slice **PASS (attempt 2)**. Evidence deferred in the 2026-04-22T02:15Z entry is now obtained on a real Linux kernel via GitHub Actions.
