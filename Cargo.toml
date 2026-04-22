@@ -55,6 +55,34 @@ serde_yaml = "0.9"
 jsonpath-rust = "0.7"
 tabled = "0.15"
 
+# AC-53 / Slice A2b.1: Linux-only sandbox crates.
+#
+# These crates provide the six-layer fail-closed sandbox (bwrap
+# namespaces + cgroup v2 + landlock + seccomp-bpf + uid/cap drop +
+# slirp4netns egress) described in scaffolding/design.md. They are
+# Linux-only because the kernel surface they bind to (LSM landlock,
+# seccomp-bpf, cgroup v2, user+pid+net namespaces) does not exist on
+# Windows or macOS. Gating them behind `cfg(target_os = "linux")`
+# keeps Windows/macOS `cargo build` green for contributors while
+# production workloads run under a Linux devshell or container.
+#
+# Version pins are concrete (no wildcards) and enforced by
+# `tests/sandbox_deps_test.rs`. Licenses (MIT / Apache-2.0) are
+# already covered by `deny.toml`'s [licenses].allow list.
+[target.'cfg(target_os = "linux")'.dependencies]
+# AWS Firecracker's seccomp-bpf filter compiler. Used to build the
+# default-deny syscall allowlist that wraps every agent tool invocation.
+seccompiler = "0.5"
+# Safe Rust bindings to the landlock LSM (kernel >= 5.13). Used to
+# restrict filesystem reads/writes to the workspace scratch directory.
+landlock = "0.4"
+# cgroup v2 interface for CPU/memory/pids caps. Used to bound tool
+# runtime resource consumption (AC-65 budget enforcement layer).
+cgroups-rs = "0.3"
+# Direct syscall bindings for unshare/clone/setns/mount. Used by the
+# bwrap wrapper for namespace composition.
+nix = { version = "0.29", features = ["sched", "mount", "user", "fs", "process"] }
+
 [dev-dependencies]
 wiremock = "0.6"
 tower = { version = "0.5", features = ["util"] }
