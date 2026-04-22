@@ -39,7 +39,10 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
+
+use crate::config::{ResolvedSandboxMode, SandboxMode};
 
 #[derive(Debug, Clone, Default)]
 pub struct ShellCommand {
@@ -205,4 +208,65 @@ fn is_rejected_pattern(command: &str) -> bool {
     normalised
         .split(|c: char| WORD_BOUNDARIES.contains(&c))
         .any(|tok| tok == "sudo")
+}
+
+// ---------------------------------------------------------------------------
+// AC-53 / Slice A2b.3 — executor factory
+// ---------------------------------------------------------------------------
+
+/// Discriminant describing which concrete `ToolExecutor` the factory
+/// chose. Exported so tests can assert the selection logic without
+/// `Any`-downcasting the trait object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutorKind {
+    /// The default pre-v9 `ProcessExecutor` — env_clear + tempdir +
+    /// timeout + sudo reject. Used on non-Linux targets, and on Linux
+    /// when `sandbox.mode = disabled`.
+    Process,
+    /// The Linux-only `RealSandbox` — wraps every spawn with `bwrap`
+    /// for user/pid/net/mount/uts/ipc namespace isolation. Seccomp,
+    /// landlock, cgroup v2, and slirp4netns layers land in Slice
+    /// A2b.4.
+    Real,
+}
+
+/// Pure selection function (no I/O, no global state). Drives the
+/// factory's decision tree and is also called directly by tests.
+pub fn executor_kind_for(sandbox: &ResolvedSandboxMode) -> ExecutorKind {
+    match sandbox.mode {
+        SandboxMode::Disabled => ExecutorKind::Process,
+        SandboxMode::Enforce | SandboxMode::Audit => {
+            if cfg!(target_os = "linux") {
+                ExecutorKind::Real
+            } else {
+                // On Windows/macOS the kernel surface simply doesn't
+                // exist. Degrade to `ProcessExecutor`; Slice A2b.4
+                // wires a startup warning so operators see this.
+                ExecutorKind::Process
+            }
+        }
+    }
+}
+
+/// Construct the `ToolExecutor` trait object that the application
+/// should use for every tool invocation, based on the resolved
+/// sandbox mode. This is the ONLY place the binary should mint an
+/// executor — `main.rs` calls it once at startup and clones the
+/// resulting `Arc` into every subsystem.
+pub fn build_executor(sandbox: &ResolvedSandboxMode) -> Arc<dyn ToolExecutor> {
+    match executor_kind_for(sandbox) {
+        ExecutorKind::Process => Arc::new(ProcessExecutor),
+        #[cfg(target_os = "linux")]
+        ExecutorKind::Real => Arc::new(bwrap::RealSandbox::new(*sandbox)),
+        // Non-Linux builds can never reach `Real` — `executor_kind_for`
+        // returns `Process` on those platforms. The match is still
+        // total because `ExecutorKind` has two variants; the arm is
+        // a compile-time dead branch on Windows/macOS that Rust's
+        // exhaustiveness check requires.
+        #[cfg(not(target_os = "linux"))]
+        ExecutorKind::Real => unreachable!(
+            "executor_kind_for returned Real on a non-Linux target; \
+             this is a bug in the factory decision tree"
+        ),
+    }
 }

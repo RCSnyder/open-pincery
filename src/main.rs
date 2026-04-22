@@ -56,11 +56,15 @@ async fn main() {
     let config = Arc::new(config);
     let shutdown = CancellationToken::new();
 
-    // AC-36: single ProcessExecutor instance shared by all wake loops.
-    // This is the ONLY place the runtime's child-process executor is
-    // constructed; everything else receives `Arc<dyn ToolExecutor>`.
-    let executor: Arc<dyn runtime::sandbox::ToolExecutor> =
-        Arc::new(runtime::sandbox::ProcessExecutor);
+    // AC-36 / AC-53 (Slice A2b.3): single sandboxed executor shared by
+    // every wake loop. This is the ONLY place in the binary that mints
+    // a `ToolExecutor`; everything else receives `Arc<dyn ToolExecutor>`
+    // via AppState. The factory chooses `RealSandbox` (bwrap-wrapped)
+    // on Linux when `sandbox.mode` is `enforce` or `audit`, and falls
+    // back to `ProcessExecutor` on non-Linux hosts or when the mode is
+    // `disabled` (paired with `ALLOW_UNSAFE=true`, enforced at
+    // Config::from_env time per AC-73).
+    let executor = runtime::sandbox::build_executor(&config.sandbox);
 
     // Build API (holds the per-task alive flags used by /ready).
     // Share the single executor instance with the wake loop via AppState.
