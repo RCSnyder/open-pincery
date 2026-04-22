@@ -193,6 +193,23 @@ to the container immediately. Build artifacts are written to
 `target/devshell/` to avoid colliding with any host Rust toolchain used
 for editor integration.
 
+If you want native Rust artifacts off the system drive, set Cargo's
+standard target override before you build:
+
+```powershell
+$env:CARGO_TARGET_DIR = 'E:\open-pincery-target\native'
+cargo test
+```
+
+The devshell wrappers also support a separate host-side cache directory.
+On Windows, this keeps the container-backed cargo cache on `E:\` while
+leaving the repo checkout where it is:
+
+```powershell
+$env:OPEN_PINCERY_DEVSHELL_HOST_TARGET_DIR = 'E:\open-pincery-target\devshell'
+.\scripts\devshell.ps1 cargo test
+```
+
 CI runs `tests/devshell_parity_test.rs` to confirm the wrapper,
 `Dockerfile.devshell`, and runbooks stay in sync.
 
@@ -249,20 +266,23 @@ Then add it to your PATH:
 
 ```bash
 # Linux / macOS / Git Bash
-export PATH="$PWD/target/release:$PATH"
+RELEASE_DIR="${CARGO_TARGET_DIR:-$PWD/target}/release"
+export PATH="$RELEASE_DIR:$PATH"
 
 # Windows PowerShell
-$env:PATH = "$PWD\target\release;$env:PATH"
+$releaseDir = if ($env:CARGO_TARGET_DIR) { Join-Path $env:CARGO_TARGET_DIR 'release' } else { Join-Path $PWD 'target\release' }
+$env:PATH = "$releaseDir;$env:PATH"
 ```
 
 Or copy the binary to a directory already on your PATH:
 
 ```bash
 # Linux / macOS
-sudo cp target/release/pcy /usr/local/bin/
+sudo cp "${CARGO_TARGET_DIR:-target}/release/pcy" /usr/local/bin/
 
 # Windows PowerShell (admin)
-Copy-Item target\release\pcy.exe C:\Windows\System32\
+$releaseDir = if ($env:CARGO_TARGET_DIR) { Join-Path $env:CARGO_TARGET_DIR 'release' } else { Join-Path $PWD 'target\release' }
+Copy-Item (Join-Path $releaseDir 'pcy.exe') C:\Windows\System32\
 ```
 
 ### Web UI (fastest path)
@@ -348,6 +368,10 @@ On Windows PowerShell:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke.ps1
 ```
+
+Both smoke scripts check `CARGO_TARGET_DIR` before falling back to the
+repo-local `target/` directory, so they keep working if you relocate the
+native build cache to another drive.
 
 ### curl/HTTP appendix
 

@@ -38,6 +38,14 @@ if ($Args.Count -ge 1 -and $Args[0] -eq "--version-check") {
 }
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$TargetCacheHost = if ($env:OPEN_PINCERY_DEVSHELL_HOST_TARGET_DIR) {
+    $env:OPEN_PINCERY_DEVSHELL_HOST_TARGET_DIR
+} else {
+    Join-Path $RepoRoot "target\devshell"
+}
+$TargetCacheContainer = "/cargo-target"
+
+New-Item -ItemType Directory -Force -Path $TargetCacheHost | Out-Null
 
 # --privileged + --cgroupns=host are required so the inner sandbox can
 # create user namespaces, mount tmpfs, and bind cgroup v2 controllers.
@@ -49,8 +57,9 @@ $DockerArgs = @(
     "--cgroupns=host",
     "--network", "host",
     "-v", "${RepoRoot}:/work",
+    "-v", "${TargetCacheHost}:${TargetCacheContainer}",
     "-w", "/work",
-    "-e", "CARGO_TARGET_DIR=/work/target/devshell",
+    "-e", "CARGO_TARGET_DIR=$TargetCacheContainer",
     $Image
 ) + $Args
 

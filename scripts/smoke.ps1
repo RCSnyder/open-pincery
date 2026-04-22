@@ -21,14 +21,24 @@ function Read-EnvValue([string]$Key, [string]$Path) {
   return ($line -split "=", 2)[1].Trim('"')
 }
 
+function Get-TargetRoot {
+  if ($env:CARGO_TARGET_DIR) {
+    return $env:CARGO_TARGET_DIR
+  }
+
+  return (Join-Path $Root "target")
+}
+
 function Get-PcyCommand {
   $cmd = Get-Command pcy -ErrorAction SilentlyContinue
   if ($cmd) { return "pcy" }
 
-  $release = Join-Path $Root "target\release\pcy.exe"
+  $targetRoot = Get-TargetRoot
+
+  $release = Join-Path $targetRoot "release\pcy.exe"
   if (Test-Path $release) { return $release }
 
-  $debug = Join-Path $Root "target\debug\pcy.exe"
+  $debug = Join-Path $targetRoot "debug\pcy.exe"
   if (Test-Path $debug) { return $debug }
 
   Fail "pcy binary not found. Build it with 'cargo build --release --bin pcy'." "#from-signed-release-binary"

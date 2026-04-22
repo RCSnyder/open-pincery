@@ -22,17 +22,28 @@ read_env_value() {
   awk -F= -v k="$key" '$1==k {v=$0; sub(/^[^=]*=/, "", v); gsub(/^"|"$/, "", v); print v}' "$file" | tail -n1
 }
 
+target_root() {
+  if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
+    echo "$CARGO_TARGET_DIR"
+    return
+  fi
+  echo "$ROOT_DIR/target"
+}
+
 pick_pcy_cmd() {
+  local target_dir
+  target_dir="$(target_root)"
+
   if command -v pcy >/dev/null 2>&1; then
     echo "pcy"
     return
   fi
-  if [[ -x "$ROOT_DIR/target/release/pcy" ]]; then
-    echo "$ROOT_DIR/target/release/pcy"
+  if [[ -x "$target_dir/release/pcy" ]]; then
+    echo "$target_dir/release/pcy"
     return
   fi
-  if [[ -x "$ROOT_DIR/target/debug/pcy" ]]; then
-    echo "$ROOT_DIR/target/debug/pcy"
+  if [[ -x "$target_dir/debug/pcy" ]]; then
+    echo "$target_dir/debug/pcy"
     return
   fi
   fail "pcy binary not found. Build it with 'cargo build --release --bin pcy'." "#from-signed-release-binary"

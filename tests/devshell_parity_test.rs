@@ -99,6 +99,10 @@ fn devshell_sh_launches_pinned_image_with_required_flags() {
             "AC-75: scripts/devshell.sh must pass {flag}"
         );
     }
+    assert!(
+        body.contains("OPEN_PINCERY_DEVSHELL_HOST_TARGET_DIR"),
+        "AC-75: scripts/devshell.sh must allow moving the devshell target cache via OPEN_PINCERY_DEVSHELL_HOST_TARGET_DIR"
+    );
 }
 
 #[test]
@@ -120,6 +124,10 @@ fn devshell_ps1_mirrors_bash_wrapper() {
             "AC-75: scripts/devshell.ps1 must pass {flag}"
         );
     }
+    assert!(
+        body.contains("OPEN_PINCERY_DEVSHELL_HOST_TARGET_DIR"),
+        "AC-75: scripts/devshell.ps1 must allow moving the devshell target cache via OPEN_PINCERY_DEVSHELL_HOST_TARGET_DIR"
+    );
 }
 
 #[test]
@@ -138,6 +146,12 @@ fn runbooks_for_mac_and_windows_exist() {
             "AC-75: {name} must walk contributor from clone to `cargo test`"
         );
     }
+
+    let windows = read(&root.join("dev_setup_windows.md"));
+    assert!(
+        windows.contains("OPEN_PINCERY_DEVSHELL_HOST_TARGET_DIR"),
+        "AC-75: Windows dev setup must document OPEN_PINCERY_DEVSHELL_HOST_TARGET_DIR for moving devshell artifacts off the system drive"
+    );
 }
 
 #[test]
@@ -152,6 +166,10 @@ fn readme_documents_devshell_workflow() {
     assert!(
         body.contains("scripts/devshell"),
         "AC-75: README.md Development section must reference scripts/devshell"
+    );
+    assert!(
+        body.contains("CARGO_TARGET_DIR"),
+        "README.md must document how to relocate native Rust build artifacts with CARGO_TARGET_DIR"
     );
 }
 

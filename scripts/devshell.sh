@@ -35,6 +35,10 @@ if [[ "${1:-}" == "--version-check" ]]; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TARGET_CACHE_HOST="${OPEN_PINCERY_DEVSHELL_HOST_TARGET_DIR:-$REPO_ROOT/target/devshell}"
+TARGET_CACHE_CONTAINER="/cargo-target"
+
+mkdir -p "$TARGET_CACHE_HOST"
 
 # --privileged + --cgroupns=host are required so the inner sandbox can
 # create user namespaces, mount tmpfs, and bind cgroup v2 controllers.
@@ -45,7 +49,8 @@ exec docker run --rm -it \
   --cgroupns=host \
   --network host \
   -v "${REPO_ROOT}:/work" \
+  -v "${TARGET_CACHE_HOST}:${TARGET_CACHE_CONTAINER}" \
   -w /work \
-  -e CARGO_TARGET_DIR=/work/target/devshell \
+  -e CARGO_TARGET_DIR="${TARGET_CACHE_CONTAINER}" \
   "${IMAGE}" \
   "$@"
