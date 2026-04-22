@@ -1,5 +1,52 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — Slice A2b.2 (sandbox module restructure) — 2026-04-22T01:30Z
+
+- **Gate**: post-build slice PASS (attempt 1).
+- **Scope**: pure structural refactor, no behavior change.
+- **Evidence**:
+  - `git mv src/runtime/sandbox.rs src/runtime/sandbox/mod.rs` (git tracks rename; 90% similarity).
+  - Five empty submodule files created: `bwrap.rs`, `seccomp.rs`, `landlock.rs`, `cgroup.rs`, `netns.rs`. Each is a one-paragraph rustdoc stub declaring what A2b.3/A2b.4 will populate.
+  - `mod.rs` declares `pub mod bwrap; pub mod cgroup; #[path="landlock.rs"] pub mod landlock_layer; pub mod netns; pub mod seccomp;` — `landlock_layer` naming avoids clashing with the `landlock` crate on Linux.
+  - All public items (`ToolExecutor`, `ShellCommand`, `SandboxProfile`, `ExecResult`, `ProcessExecutor`, `is_rejected_pattern`) preserved verbatim — callers in `main.rs`, `api/`, `background/`, and tests import unchanged paths.
+  - `tests/no_raw_command_new.rs` updated: the "only sandbox may call `Command::new`" invariant now accepts any file under `src/runtime/sandbox/` (either layout — legacy single file or new directory).
+- **Verification ladder**:
+  - `cargo check --tests` green on Windows.
+  - `cargo test --lib` → 57/57.
+  - `cargo test --test sandbox_mode_test --test sandbox_deps_test --test no_raw_command_new --test no_raw_status_literals --test devshell_parity_test --test security_doc_test --test deny_config_test` → 32/32 across 7 binaries.
+  - `cargo clippy --lib --tests -- -D warnings` → green.
+- **Commit**: `b93c527 refactor(runtime): split sandbox.rs into sandbox/ module (Slice A2b.2)`.
+- **Retries**: 1 (the `no_raw_command_new` invariant initially triggered because it hardcoded `file_name() == "sandbox.rs"`; fixed to walk path components for `sandbox` dir or `sandbox.rs` file).
+- **Changed**: `src/runtime/sandbox.rs → src/runtime/sandbox/mod.rs` (renamed, +17), `src/runtime/sandbox/{bwrap,seccomp,landlock,cgroup,netns}.rs` (5 new stubs, ~6 lines each), `tests/no_raw_command_new.rs` (+14 / -6).
+- **Not touched**: `ProcessExecutor` spawn logic, `SandboxProfile` defaults, AC-36 semantics.
+- **Next**: Slice A2b.3 — `RealSandbox` struct in `bwrap.rs`, `build_executor(&Config) -> Arc<dyn ToolExecutor>` factory wired into `main.rs`, Linux-gated smoke test in `tests/sandbox_real_smoke.rs`. Session pause: A2b.3 changes runtime behavior and must be verified with actual `bwrap` inside WSL2/devshell before it ships — running it blind on Windows would violate the evidence rule. Pick up inside the devshell.
+
+## BUILD v9 — Slice A2b.1 (AC-53 Prep: Linux sandbox crate gate) — 2026-04-22T00:40Z
+
+- **Gate**: post-build slice PASS (attempt 1).
+- **Trigger**: user authorized full autonomous push after audit showed 5% progress on v9 security plan. Four Linux-only sandbox crates needed before module restructure + real sandbox implementation.
+- **Evidence**:
+  - `Cargo.toml` now declares `[target.'cfg(target_os = "linux")'.dependencies]` with four concrete version pins:
+    - `seccompiler = "0.5"` (Apache-2.0, AWS Firecracker's seccomp-bpf)
+    - `landlock = "0.4"` (Apache-2.0 OR MIT, landlock LSM bindings; kernel >= 5.13)
+    - `cgroups-rs = "0.3"` (Apache-2.0 OR MIT, cgroup v2)
+    - `nix = { version = "0.29", features = ["sched", "mount", "user", "fs", "process"] }` (MIT, unshare/clone/setns)
+  - Each entry carries a rustdoc comment justifying the layer it owns.
+  - Non-Linux `cargo check --tests` stays green — no top-level `[dependencies]` changes.
+  - New `tests/sandbox_deps_test.rs` (5 assertions): (1) all four crates present under the Linux-target table, (2) none leak into top-level `[dependencies]`, (3) version specs are concrete pins (no wildcards, no git refs), (4) `deny.toml` `[bans].deny` does not name any of them, (5) `deny.toml` `[licenses].allow` covers MIT + Apache-2.0.
+- **Verification ladder**:
+  - `cargo check --tests` green on Windows (Linux crates not linked).
+  - RED→GREEN: test initially failed 2/5 before `Cargo.toml` edit; all 5/5 green after.
+  - `cargo test --test sandbox_mode_test --test sandbox_deps_test --test devshell_parity_test --test security_doc_test --test deny_config_test --test no_raw_command_new --test no_raw_status_literals` → 32/32 across 7 binaries.
+  - `cargo clippy --lib --tests -- -D warnings` → green.
+- **Commit**: `d71dc0d feat(build): AC-53 prep -- Linux sandbox crate gate (Slice A2b.1)`.
+- **Retries**: 0.
+- **Concerns**:
+  - `cargo deny check` not run on Windows (no binary installed); deferred to devshell verification in A2b.3. The admission test enforces the contract symbolically.
+- **Changed**: `Cargo.toml` (+29), `Cargo.lock` (automatic resolver updates), `tests/sandbox_deps_test.rs` (new, 151 lines).
+- **Not touched**: `src/runtime/sandbox.rs` (next slice), `deny.toml` (no edits needed — existing `[licenses].allow` already covers all four crates).
+- **Next**: Slice A2b.2 (pure module refactor).
+
 ## BUILD v9 — Slice A2a (AC-73 Sandbox Mode Flag) — 2026-04-21T22:00Z
 
 - **Gate**: post-build slice PASS (attempt 1).
