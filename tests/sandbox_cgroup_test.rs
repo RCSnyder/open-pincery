@@ -165,7 +165,7 @@ async fn cgroup_pids_max_limits_fork_count() {
                 .parse()
                 .unwrap_or(-1);
             assert!(
-                saw_eagain || (survivors >= 0 && survivors < 20),
+                saw_eagain || (0..20).contains(&survivors),
                 "pids.max cap not enforced: stderr={stderr:?} stdout={stdout:?}"
             );
         }
