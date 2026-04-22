@@ -1,5 +1,28 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — Slice A2b.3 (RealSandbox + bwrap factory) — 2026-04-22T02:15Z
+
+- **Gate**: post-build slice **PARTIAL** — Windows-side ladder PASS (attempt 1); devshell runtime evidence **DEFERRED** to CI.
+- **Scope**: first real isolation layer. Adds bwrap-wrapped `ToolExecutor` with per-axis namespace unshare, read-only rootfs, isolated `/proc /dev /tmp`, bind+chdir on cwd, and conditional `--unshare-net`.
+- **Changed**:
+  - `src/runtime/sandbox/mod.rs` (+66 / -1): `ExecutorKind` enum, pure `executor_kind_for()` selector, `build_executor()` factory with `#[cfg(target_os="linux")]` Real arm + non-Linux dead branch.
+  - `src/runtime/sandbox/bwrap.rs` (stub → 273 lines, Linux-only via `#![cfg(target_os="linux")]`): `RealSandbox` struct, pure `build_bwrap_args()` (testable argv composer), `impl ToolExecutor` with sudo pre-flight + tempdir + env allowlist + timeout wrap, plus 5 argv unit tests.
+  - `src/main.rs` (1 line): single trait-object minting site now calls `runtime::sandbox::build_executor(&config.sandbox)`.
+  - `tests/sandbox_factory_test.rs` (new, 53 lines): 5 tests covering Disabled/Enforce/Audit × Linux/non-Linux selection.
+  - `tests/sandbox_real_smoke.rs` (new, 167 lines, Linux-gated): 5 smoke tests that actually spawn bwrap — `/bin/true`, `echo`, sudo reject preflight, UTS hostname is `sandbox`, deny_net removes host interfaces. Self-skips when `bwrap` absent.
+- **Verification ladder (Windows host)**:
+  - `cargo check --tests` GREEN.
+  - `cargo clippy --lib --tests --bins -- -D warnings` GREEN.
+  - `cargo test --lib` → **57/57**.
+  - Cross-suite (`sandbox_factory_test`, `sandbox_mode_test`, `sandbox_deps_test`, `no_raw_command_new`, `no_raw_status_literals`, `devshell_parity_test`, `security_doc_test`, `deny_config_test`) → **35/35 across 8 binaries**.
+- **Deferred evidence**: `tests/sandbox_real_smoke.rs` requires a real `bwrap` binary. Tried Docker Desktop → engine returned `Bad response from Docker engine` on every call after distros started; no general-purpose WSL2 distro available on host. Branch pushed so GitHub Actions can exercise the smoke test in CI.
+- **Commit**: `b145b0e feat(runtime): AC-53 RealSandbox via bwrap + build_executor factory (Slice A2b.3)` (5 files, +571 / -9).
+- **Retries**: 2 — (1) `create_file` appended to existing files instead of overwriting, fixed by heredoc via shell; (2) initial `cargo fmt` hook rejected commit, fixed by `cargo fmt --all` and re-stage.
+- **Concerns**:
+  - Bwrap runtime behavior not yet confirmed on actual Linux. Landlock/seccomp layers (A2b.4) must NOT ship until this evidence gate closes — building on unvalidated isolation is building on sand.
+  - Docker Desktop daemon unresponsive on this host; may require a full restart or reinstall for future devshell validation.
+- **Next**: pause v9 security push until bwrap smoke test shows green (CI or devshell). Then Slice A2b.4 (landlock + seccomp + cgroup layers).
+
 ## BUILD v9 — Slice A2b.2 (sandbox module restructure) — 2026-04-22T01:30Z
 
 - **Gate**: post-build slice PASS (attempt 1).
