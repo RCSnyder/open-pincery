@@ -104,6 +104,17 @@ walkdir = "2"
 name = "pcy"
 path = "src/bin/pcy.rs"
 
+# AC-83 / Slice G0a.2: in-sandbox exec wrapper. Runs inside the bwrap
+# mount namespace after setup completes, reads a SandboxInitPolicy from
+# an inherited memfd (fd 3), and execvps the user argv. G0a.3 adds the
+# fail-closed policy-application pipeline (prctl/seccomp/landlock).
+# Main body is `cfg(target_os = "linux")`-gated; on other platforms the
+# binary compiles as a stub that exits with a clear message so Windows/
+# macOS `cargo build` stays green for contributors.
+[[bin]]
+name = "pincery-init"
+path = "src/bin/pincery_init.rs"
+
 # AC-20: Release profile — small, stripped, single codegen unit for reproducibility.
 # Leaves panic = "unwind" (default) so a panic in one background task does not
 # terminate the whole multi-agent service.

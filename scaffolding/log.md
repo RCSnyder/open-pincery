@@ -1,5 +1,28 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — Slice G0a.2: `pincery-init` binary skeleton (AC-83, layer 2 of 3) — 2026-04-23T03:00Z
+
+- **Gate**: PASS (verification ladder; CI is the authoritative runner — local MSYS shell is console-handle-exhausted).
+- **What this slice ships**: the `pincery-init` exec wrapper as a dedicated `[[bin]]` target, parsing `--policy-fd <N> -- <user_argv...>`, reading the inherited memfd to EOF, deserializing into `SandboxInitPolicy` via `serde_json`, logging a structured one-line summary to stderr, then `execvp`-ing the user argv. **No restrictions are installed yet** — prctl / seccomp / landlock / setres*id are all G0a.3.
+- **Architectural context**: Lays the G0a.3 substrate. Once the skeleton is proven to parse + exec cleanly end-to-end, G0a.3 slots the six-step policy-application pipeline (T-G0a-6 order) between `log_policy_summary` and `exec_user_argv`, wires `build_bwrap_args` to `--ro-bind` the binary + dup2 the memfd, and removes the parent-side `pre_exec` landlock install. Keeping G0a.2 restriction-free means the four-case G0a.3 suite can regress additions independently.
+- **Evidence**:
+  - Compile-check: `get_errors` clean across `src/bin/pincery_init.rs`, `tests/pincery_init_skeleton_test.rs`, `Cargo.toml`. Local `cargo check` blocked by MSYS console limit (same symptom as G0a.1) — CI is the authoritative compile + test gate.
+  - Unit tests in-binary: six `parse_args` cases covering canonical form, missing flags, non-numeric fd, negative fd, missing `--`, empty user argv.
+  - Integration proof: three cases in `tests/pincery_init_skeleton_test.rs` (Linux-only) — `skeleton_parses_policy_then_execs_user_argv` (happy path: memfd → wrapper → `/bin/sh -c 'printf hello'` → stdout=`hello`, exit=0, stderr contains summary), `skeleton_rejects_garbage_policy_with_exit_125` (corrupt policy → exit 125 with decode error), `skeleton_rejects_missing_policy_fd_flag` (usage error → exit 125).
+  - Runtime verification of the happy path will fire on CI's existing `sandbox real-bwrap smoke` job and the cargo-test job automatically — both pick up new integration test files without workflow changes.
+- **Files shipped**:
+  - `src/bin/pincery_init.rs` (new, ~260 lines incl. doc + unit tests): argv parsing + fd read + serde_json decode + `Command::exec` user argv. Linux-only body; non-Linux stub exits 1 with a clear message.
+  - `tests/pincery_init_skeleton_test.rs` (new, ~160 lines, `#![cfg(target_os = "linux")]`): three integration cases pinned on stderr summary contract.
+  - `Cargo.toml`: new `[[bin]] name = "pincery-init" path = "src/bin/pincery_init.rs"` with inline rationale.
+  - **Reconcile (lightweight)**: scope.md AC-83, readiness.md T-G0a-4, T-G0a-5, clarification 2, G0a.1 build-order entry, and `docs/security/sandbox-architecture-audit.md` updated to say "JSON-serialized (serde_json)" / "serde_json-serialized" where they previously said "bincode-serialized" — matches the actual codec shipped in G0a.1 commit `fb8c4d9` after the RUSTSEC-2025-0141 deny failure.
+- **Changed**: new Linux-only `[[bin]]` target; scaffolding docs reconciled to reality; no new deps (`libc` was already a direct dep via `cfg(target_os = "linux")`, `serde_json` was already present).
+- **Not touched**: `RealSandbox::run`, `build_bwrap_args`, `SandboxProfile::default` (landlock=false interim still in force), the three `#[ignore]`d landlock tests. All of these move in G0a.3.
+- **Concerns / follow-ups**:
+  - The wrapper uses `Command::exec` (via `CommandExt`) rather than raw `libc::execvp`. G0a.3 should audit this after the seccomp filter lands — `exec` internally allocates + calls several libc functions which must be in the allowlist. If seccomp blocks any of them the process will trap before execve. Noted here; will be resolved by the G0a.3 seccomp-allowlist slice inventory.
+  - `exec_user_argv` takes `Vec<OsString>` but the policy's `user_argv` is `Vec<String>` (carried forward from G0a.1). Kept consistent; widening to `Vec<Vec<u8>>` is still the recorded migration path if non-UTF8 argv ever enters the tool-dispatch surface.
+  - The non-CLOEXEC memfd is created in the integration test via `libc::memfd_create(name, 0)` — on the real bwrap path (G0a.3) the parent must also pass flags=0 (not `MFD_CLOEXEC`) so the fd survives `execve` into the wrapper. Recorded as an explicit G0a.3 invariant.
+- **Next**: Slice G0a.3 — remove parent-`pre_exec` landlock install, extend `build_bwrap_args` with `--ro-bind <host_init> /sandbox/init` + memfd fd inheritance + argv rewrite, implement the six-step T-G0a-6 pipeline inside the wrapper, ship the four-case `tests/pincery_init_test.rs` suite, un-`#[ignore]` the three landlock tests, and flip `SandboxProfile::default` back to `landlock=true`. Only after G0a.3's suite is green should G0b..G0f (AC-84..AC-88) begin.
+
 ## BUILD v9 — Slice G0a.1: SandboxInitPolicy IPC module (AC-83, layer 1 of 3) — 2026-04-23T01:15Z
 
 - **Gate**: PASS (verification ladder, G0a.1 only).

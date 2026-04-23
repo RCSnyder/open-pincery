@@ -221,7 +221,7 @@ pincery-server
 
 A separate binary (`src/bin/pincery-init.rs`) compiled as `staticc` (musl + `panic=abort`) so it can be `--ro-bind`ed into any sandbox without dragging in glibc dependencies. Surface area:
 
-- **Input:** policy passed via `--policy-fd <N>` (a memfd with bincode/JSON-serialized `SandboxInitPolicy`) — this avoids env-variable smuggling and keeps the policy out of `/proc/self/environ`.
+- **Input:** policy passed via `--policy-fd <N>` (a memfd with a JSON-serialized `SandboxInitPolicy`, via `serde_json`) — this avoids env-variable smuggling and keeps the policy out of `/proc/self/environ`.
 - **Behavior:** apply prctl + landlock + seccomp + (optional) `setuid`/`setgid`/`setgroups([])` if not already done, verify enforcement, `execvp(args)`.
 - **Failure mode:** any error → write structured JSON to fd 3 (sync pipe owned by the parent) → `_exit(125)` (distinguishable from user-command exit codes).
 
@@ -316,7 +316,7 @@ When network is enabled, attach the sandbox to a `slirp4netns` instance that its
 ## 6. Migration plan
 
 1. **`pincery-init` binary** — new `src/bin/pincery-init.rs`, musl static build target, no_std-ish minimal deps (`libc`, `landlock`, `seccompiler`).
-2. **`SandboxInitPolicy` IPC** — bincode-serialized policy on memfd, fd passed via bwrap into the sandbox.
+2. **`SandboxInitPolicy` IPC** — serde_json-serialized policy on memfd, fd passed via bwrap into the sandbox.
 3. **`build_bwrap_args` rewrite** — add `--uid 65534 --gid 65534 --cap-drop ALL`, `--ro-bind <pincery-init-path> /sandbox/init`, `--ro-bind <policy-memfd> /sandbox/policy`. Replace user command with `["/sandbox/init", "--policy-fd", "3", "--", original...]`.
 4. **Remove `pre_exec` landlock install** — delete the failing path; landlock now installed inside `pincery-init`.
 5. **Seccomp rewrite** — replace `denied_syscalls()` with `allowed_syscalls()`. Add per-profile-class generation. Default mismatch action: `KillProcess`.

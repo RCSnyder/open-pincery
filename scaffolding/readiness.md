@@ -37,16 +37,21 @@ Non-negotiable statements that must be true in the shipped Slice G0a:
   via `std::env::current_exe()`-adjacent lookup (Cargo test binary dir in
   tests; `$CARGO_TARGET_DIR/debug|release/pincery-init` in dev; installed
   location in prod; override via `OPEN_PINCERY_INIT_PATH` for CI/test).
-- **T-G0a-4** A bincode-serializable `SandboxInitPolicy` struct lives in
+- **T-G0a-4** A serde-serializable `SandboxInitPolicy` struct lives in
   a new shared module (`src/runtime/sandbox/init_policy.rs`) and is the
-  only type used to cross the parent→wrapper IPC boundary. Shape:
-  `{ landlock_rules: LandlockProfile, seccomp_bpf: Vec<u8>, target_uid: u32,
-target_gid: u32, require_fully_enforced: bool, user_argv: Vec<OsString> }`.
+  only type used to cross the parent→wrapper IPC boundary. Wire format
+  is JSON via `serde_json` (already a transitive dep; bincode was
+  rejected in Slice G0a.1 after `cargo deny` flagged RUSTSEC-2025-0141
+  marking bincode v1 unmaintained, and v2 is a breaking API rewrite
+  that would add a new direct dep for one IPC boundary). Shape:
+  `{ landlock_rx_paths: Vec<PathBuf>, landlock_rwx_paths: Vec<PathBuf>,
+  seccomp_bpf: Vec<u8>, target_uid: u32, target_gid: u32,
+  require_fully_enforced: bool, user_argv: Vec<String> }`.
 - **T-G0a-5** Policy IPC uses a memfd (`memfd_create("pincery-init-policy", 0)`,
-  **not** CLOEXEC). Parent writes the bincode bytes, `lseek(0)`, passes the
-  fd as `--policy-fd 3` in the user argv via bwrap fd inheritance. Wrapper
-  reads the entire fd to EOF then closes it. Rejected alternatives
-  documented in the slice summary.
+  **not** CLOEXEC). Parent writes the serde_json-serialized policy
+  bytes, `lseek(0)`, passes the fd as `--policy-fd 3` in the user argv
+  via bwrap fd inheritance. Wrapper reads the entire fd to EOF then
+  closes it. Rejected alternatives documented in the slice summary.
 - **T-G0a-6** `pincery-init`'s policy application order is exactly:
   prctl(NO_NEW_PRIVS) → setresgid/setgroups/setresuid → (seccomp BPF)
   → (landlock_restrict_self with LANDLOCK_RESTRICT_SELF_TSYNC) →
@@ -92,7 +97,7 @@ target_gid: u32, require_fully_enforced: bool, user_argv: Vec<OsString> }`.
 The five open decisions from the audit doc resolve as follows for G0a:
 
 1. **Separate binary vs. argv[0] dispatch**: Separate `[[bin]]` target. Simpler build + clearer in `ps`.
-2. **IPC transport**: memfd (T-G0a-5). Rejected pipe (inherits awkwardly), rejected env (bincode in env is ugly and size-limited).
+2. **IPC transport**: memfd (T-G0a-5). Rejected pipe (inherits awkwardly), rejected env (policy bytes in env are ugly and size-limited).
 3. **Static-musl build infra**: deferred to G0a-followup per Scope Reduction Risks above.
 4. **Audit netlink**: deferred to AC-88 / Slice G0f. G0a emits no `landlock_denied` events.
 5. **Floor advisory vs. hard**: hard in prod per AC-84 when that slice ships; G0a is floor-agnostic.
@@ -101,7 +106,7 @@ The five open decisions from the audit doc resolve as follows for G0a:
 
 G0a is itself broken into three sub-slices, verified in order:
 
-- **G0a.1** — `SandboxInitPolicy` module + bincode round-trip unit test. No bwrap integration yet. Proof: `cargo test --lib init_policy`.
+- **G0a.1** — `SandboxInitPolicy` module + serde_json round-trip unit test. No bwrap integration yet. Proof: `cargo test --lib init_policy`.
 - **G0a.2** — `pincery_init` binary that reads a policy fd, logs the parsed policy to stderr, and `execvp`s argv without applying any restrictions yet. Proof: host-level run with a hand-crafted policy fd; observe the user binary runs and the policy bytes were parsed.
 - **G0a.3** — Wire `RealSandbox::run` to `--ro-bind` the binary + pass `--policy-fd 3`, and implement the full policy-application pipeline in the wrapper. Remove parent `pre_exec` landlock install. Proof: four-case `tests/pincery_init_test.rs` green; `sandbox_real_smoke` still green.
 
