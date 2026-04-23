@@ -1,19 +1,15 @@
-//! AC-83 / Slice G0a.2 integration proof: the `pincery-init` wrapper
-//! parses an inherited policy fd, logs a summary to stderr, and
-//! `execvp`s the user argv without applying any restrictions.
+//! AC-83 integration proof: the `pincery-init` wrapper parses an
+//! inherited policy fd, applies restrictions, and `execvp`s the user
+//! argv.
 //!
-//! This is the **host-level** proof called for by readiness.md's G0a.2
-//! build-order entry:
+//! Coverage by slice:
 //!
-//! > "host-level run with a hand-crafted policy fd; observe the user
-//! > binary runs and the policy bytes were parsed."
-//!
-//! The full four-case suite (`wrapper_execs_user_binary_cleanly`,
-//! `wrapper_surfaces_policy_apply_failure_as_125`,
-//! `wrapper_rejects_partial_enforcement`,
-//! `wrapper_is_invisible_to_user_argv`) arrives in Slice G0a.3 once
-//! the policy-application pipeline is implemented. G0a.2 proves the
-//! skeleton works end-to-end so G0a.3 has a known-good baseline.
+//! - G0a.2 (shipped): parse + log + exec, no restrictions.
+//! - G0a.3a (this slice): `prctl(PR_SET_NO_NEW_PRIVS, 1)` before exec
+//!   — proved via `/proc/self/status`.
+//! - G0a.3b..e (pending): setres*id → seccomp → landlock →
+//!   FullyEnforced verification. Each sub-slice adds one more case
+//!   alongside the three below.
 //!
 //! Linux-only: relies on `memfd_create(2)` + fd inheritance via
 //! `pre_exec(dup2)`. Windows/macOS compile this file as empty.
@@ -191,6 +187,84 @@ fn skeleton_rejects_garbage_policy_with_exit_125() {
     assert!(
         stderr.contains("decoding policy") || stderr.contains("codec"),
         "stderr should name the decode failure, got:\n{stderr}",
+    );
+}
+
+/// Slice G0a.3a proof: before exec, the wrapper must apply
+/// `prctl(PR_SET_NO_NEW_PRIVS, 1)`. This is step 1 of the T-G0a-6
+/// pipeline and the prerequisite for the unprivileged seccomp filter
+/// load that lands in G0a.3c. The user program observes the flag via
+/// `/proc/self/status`'s `NoNewPrivs:` line (always present on any
+/// kernel the wrapper targets).
+///
+/// Why this works as a proof: `/proc/self/status` reads are populated
+/// by the kernel from the task's thread_info at the moment of the
+/// open, so there is no way to fake this from userspace. If
+/// `NoNewPrivs:\t1` appears, `PR_SET_NO_NEW_PRIVS` was honored before
+/// `execvp`.
+#[test]
+fn skeleton_applies_no_new_privs_before_exec() {
+    if !PathBuf::from("/bin/sh").exists() {
+        eprintln!("skipping: /bin/sh not present on this host");
+        return;
+    }
+
+    // The user argv reads its own no_new_privs bit out of /proc and
+    // echoes the matching status line to stdout. `grep` exits 0 if it
+    // matched, 1 otherwise — we assert on exit 0 AND the stdout
+    // content so we catch both "flag missing entirely" and "flag
+    // present but 0".
+    let user_argv = vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        "grep ^NoNewPrivs: /proc/self/status".to_string(),
+    ];
+    let policy = sample_policy(user_argv);
+    let bytes = policy.to_bytes().expect("serialize policy");
+
+    let policy_fd = make_policy_memfd(&bytes);
+
+    let mut cmd = Command::new(pincery_init_bin());
+    cmd.args([
+        "--policy-fd",
+        "3",
+        "--",
+        "/bin/sh",
+        "-c",
+        "grep ^NoNewPrivs: /proc/self/status",
+    ])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::dup2(policy_fd, 3) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    let output = cmd.output().expect("spawn pincery-init");
+    assert!(
+        output.status.success(),
+        "pincery-init failed: status={:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // `/proc/self/status` uses a tab between the label and value:
+    // `NoNewPrivs:\t1\n`. Match both the `1` suffix and the prefix so
+    // a stray `NoNewPrivs: 0` can't sneak through on mismatched
+    // whitespace.
+    assert!(
+        stdout.contains("NoNewPrivs:\t1") || stdout.contains("NoNewPrivs: 1"),
+        "expected NoNewPrivs=1 in /proc/self/status after wrapper apply; got:\n{stdout}",
+    );
+    assert!(
+        !stdout.contains("NoNewPrivs:\t0") && !stdout.contains("NoNewPrivs: 0"),
+        "NoNewPrivs is 0 — prctl(PR_SET_NO_NEW_PRIVS) did not take effect before exec; \
+         stdout:\n{stdout}",
     );
 }
 

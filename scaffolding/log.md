@@ -1,5 +1,25 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — Slice G0a.3a: apply `prctl(PR_SET_NO_NEW_PRIVS)` inside `pincery-init` (AC-83, T-G0a-6 step 1 of 6) — 2026-04-23T04:15Z
+
+- **Gate**: PASS (verification ladder; `get_errors` clean; CI is the authoritative runner).
+- **Why sub-slice G0a.3 at all**: readiness.md's Slice G0a.3 entry packs six pipeline steps, RealSandbox rewiring, a parent `pre_exec` removal, a default flip, and three `#[ignore]` un-pins into one ticket — ~400 lines across 5+ files. That violates build-discipline's ≤5-files / ≤100-lines-before-verify rule. Splitting into eight sub-slices (G0a.3a..h) keeps each addition individually testable with direct runtime observability, and leaves the PR reviewable. G0a.3a is the first step — one syscall, one verify, one test — before the harder landlock/seccomp slices land.
+- **What this slice ships**: the `apply_policy(&SandboxInitPolicy)` scaffold inside the wrapper, with step 1 filled in — `prctl(PR_SET_NO_NEW_PRIVS, 1)` plus a post-hoc `prctl(PR_GET_NO_NEW_PRIVS)` verify. `run()` now calls `apply_policy(&policy)?` between the summary log and `exec_user_argv`, exactly where readiness T-G0a-6 says the pipeline must live. Failures surface as `InitError::ApplyPolicy` / `InitError::VerifyPolicy` (exit 125, stderr message — JSON fd-3 channel is still G0a.3f). Every remaining pipeline step is a single TODO line in `apply_policy`, preserving load-bearing order.
+- **Evidence**:
+  - `get_errors` clean across `src/bin/pincery_init.rs` and `tests/pincery_init_skeleton_test.rs`.
+  - New integration case `skeleton_applies_no_new_privs_before_exec` runs `/bin/sh -c 'grep ^NoNewPrivs: /proc/self/status'` inside the wrapper and asserts stdout contains `NoNewPrivs:\t1` (and explicitly rules out the `0` variant). This is an unforgeable proof — `/proc/self/status` is populated from the kernel task struct at open time.
+  - The two existing G0a.2 cases (parse+exec happy path, garbage-policy → 125, missing-fd → 125) keep passing unchanged, which proves `apply_policy` is transparent when its only currently-active step succeeds.
+- **Files shipped**:
+  - `src/bin/pincery_init.rs`: +`InitError::ApplyPolicy`/`VerifyPolicy` variants; +`apply_no_new_privs`, `verify_no_new_privs`, `apply_policy` functions; `run()` now calls `apply_policy(&policy)?`; module doc scope updated to name G0a.3a's step.
+  - `tests/pincery_init_skeleton_test.rs`: +`skeleton_applies_no_new_privs_before_exec` case; module doc rewritten to list coverage by slice instead of the G0a.2-specific preamble.
+- **Changed**: one syscall now fires inside the wrapper before exec; one new integration test; no dep changes.
+- **Not touched**: `RealSandbox::run`, `build_bwrap_args`, `SandboxProfile::default` (still `landlock=false` interim), the three `#[ignore]`d landlock tests, the parent-side `pre_exec` landlock install. Those move in G0a.3g/h. No seccomp, setres*id, or landlock logic exists yet in the wrapper — only the TODO anchors that fix the load-bearing order.
+- **Concerns / follow-ups**:
+  - `libc::prctl` is called via varargs (`c_ulong` on x86_64 = `u64`); if we ever build the wrapper on a 32-bit target the `1u64` literals will need narrowing. Recorded; no action this slice — CI and readiness T-G0a-1 both pin to x86_64 Linux.
+  - The verify step is belt-and-braces (kernels ≥ 3.5 always honor this), but it establishes the "apply → verify" symmetry G0a.3e reuses for `FullyEnforced`. Keeping the pattern early avoids an asymmetric pipeline later.
+  - `exec_user_argv` still uses `Command::exec`, which allocates + calls several libc functions. Once seccomp lands (G0a.3c) the allowlist inventory must include everything `CommandExt::exec` touches; tracked in the G0a.2 carry-forward.
+- **Next sub-slices**: G0a.3b (setresgid → setgroups → setresuid, gated on target_uid != current uid so the test suite keeps working under a non-root runner), G0a.3c (seccomp install), G0a.3d (landlock with `LANDLOCK_RESTRICT_SELF_TSYNC`), G0a.3e (FullyEnforced verification), G0a.3f (JSON error channel on fd 3), G0a.3g (RealSandbox wiring + parent `pre_exec` removal), G0a.3h (flip default + un-ignore three tests).
+
 ## BUILD v9 — Slice G0a.2: `pincery-init` binary skeleton (AC-83, layer 2 of 3) — 2026-04-23T03:00Z
 
 - **Gate**: PASS (verification ladder; CI is the authoritative runner — local MSYS shell is console-handle-exhausted).

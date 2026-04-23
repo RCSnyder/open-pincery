@@ -82,6 +82,14 @@ mod linux {
         BadPolicyFd(String),
         ReadPolicy(std::io::Error),
         DecodePolicy(String),
+        /// Applying a kernel restriction (prctl / seccomp / landlock
+        /// / setres*id) failed. Message carries the stage + errno.
+        ApplyPolicy(String),
+        /// Post-apply verification failed (e.g. `no_new_privs` is 0
+        /// after `PR_SET_NO_NEW_PRIVS`, or landlock is only
+        /// `PartiallyEnforced` under a policy that required
+        /// `FullyEnforced`).
+        VerifyPolicy(String),
         /// `execvp` returned — which only happens on failure (success
         /// replaces the process image and never returns).
         Exec(std::io::Error),
@@ -94,12 +102,94 @@ mod linux {
                 Self::BadPolicyFd(msg) => write!(f, "invalid --policy-fd: {msg}"),
                 Self::ReadPolicy(e) => write!(f, "reading policy fd: {e}"),
                 Self::DecodePolicy(msg) => write!(f, "decoding policy: {msg}"),
+                Self::ApplyPolicy(msg) => write!(f, "applying policy: {msg}"),
+                Self::VerifyPolicy(msg) => write!(f, "verifying policy: {msg}"),
                 Self::Exec(e) => write!(f, "execvp user argv: {e}"),
             }
         }
     }
 
     impl std::error::Error for InitError {}
+
+    /// Apply `prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)` to the current
+    /// thread (and by inheritance all threads of this process — the
+    /// wrapper is single-threaded at this point). After this call,
+    /// `execve` will not grant setuid/setgid/file-capability bits,
+    /// which is the prerequisite for loading a seccomp filter as an
+    /// unprivileged user (AC-85 / Slice G0a.3b-c) and for any
+    /// hardened LSM that uses no_new_privs as an anti-escalation
+    /// signal.
+    ///
+    /// Slice G0a.3a only: this is the first kernel restriction
+    /// ever applied from inside the wrapper. It is idempotent, never
+    /// fails on a supported kernel (≥ 3.5), and is observable via
+    /// `/proc/self/status`'s `NoNewPrivs:` line — which the
+    /// integration test in `tests/pincery_init_skeleton_test.rs`
+    /// pins on.
+    fn apply_no_new_privs() -> Result<(), InitError> {
+        // SAFETY: `prctl` with these arguments has no memory effects;
+        // the return value is checked below. `PR_SET_NO_NEW_PRIVS`
+        // accepts only (1, 0, 0, 0) per prctl(2).
+        let rc = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1u64, 0u64, 0u64, 0u64) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(InitError::ApplyPolicy(format!(
+                "prctl(PR_SET_NO_NEW_PRIVS, 1): {}",
+                std::io::Error::last_os_error()
+            )))
+        }
+    }
+
+    /// Verify after the fact that `no_new_privs` is set to 1 via
+    /// `prctl(PR_GET_NO_NEW_PRIVS)`. This is a belt-and-braces check
+    /// that `apply_no_new_privs` was actually honored by the kernel
+    /// (it always is on ≥ 3.5, but future verify steps — FullyEnforced
+    /// landlock (G0a.3e) — follow the same pattern, so keep the
+    /// symmetry early).
+    fn verify_no_new_privs() -> Result<(), InitError> {
+        // SAFETY: pure getter; return value is 0 or 1 on success,
+        // negative on error.
+        let rc = unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0u64, 0u64, 0u64, 0u64) };
+        match rc {
+            1 => Ok(()),
+            0 => Err(InitError::VerifyPolicy(
+                "no_new_privs is 0 after apply (kernel did not honor prctl)".into(),
+            )),
+            _ => Err(InitError::VerifyPolicy(format!(
+                "prctl(PR_GET_NO_NEW_PRIVS): {}",
+                std::io::Error::last_os_error()
+            ))),
+        }
+    }
+
+    /// Apply every restriction in the order mandated by readiness
+    /// T-G0a-6. Slice G0a.3a ships only step 1 (`prctl(NO_NEW_PRIVS)`)
+    /// and the matching verify. Subsequent sub-slices fill in:
+    ///
+    /// - G0a.3b: setresgid → setgroups → setresuid (steps 2).
+    /// - G0a.3c: seccomp BPF (step 3).
+    /// - G0a.3d: landlock_restrict_self with TSYNC (step 4).
+    /// - G0a.3e: FullyEnforced verification (step 5).
+    ///
+    /// Order is load-bearing: seccomp MUST come after NO_NEW_PRIVS
+    /// (unprivileged filter load), and FullyEnforced verification
+    /// MUST come after both landlock and seccomp. Callers must not
+    /// permute this function's body.
+    fn apply_policy(_policy: &SandboxInitPolicy) -> Result<(), InitError> {
+        apply_no_new_privs()?;
+        // TODO(G0a.3b): setresgid / setgroups / setresuid using
+        //   policy.target_uid / policy.target_gid.
+        // TODO(G0a.3c): seccomp install when !policy.seccomp_bpf.is_empty().
+        // TODO(G0a.3d): landlock_restrict_self when either rx_paths
+        //   or rwx_paths is non-empty, using the existing
+        //   `runtime::sandbox::landlock_layer::install_landlock` once
+        //   it gains a TSYNC flag.
+        verify_no_new_privs()?;
+        // TODO(G0a.3e): if policy.require_fully_enforced, confirm
+        //   the landlock RulesetStatus is FullyEnforced.
+        Ok(())
+    }
 
     /// Parsed argv after stripping the wrapper's own flags.
     ///
@@ -236,15 +326,17 @@ mod linux {
             .map_err(|e| InitError::DecodePolicy(e.to_string()))?;
         log_policy_summary(&policy);
 
-        // Slice G0a.2: no restrictions applied. Slice G0a.3 installs
-        // prctl -> setres*id -> seccomp -> landlock -> verify here,
-        // between the summary log and the exec.
-        //
+        // Slice G0a.3a: apply step 1 of the T-G0a-6 pipeline
+        // (prctl(NO_NEW_PRIVS)) and verify it stuck. Subsequent
+        // sub-slices add setres*id → seccomp → landlock → FullyEnforced
+        // in this exact spot, before the exec.
+        apply_policy(&policy)?;
+
         // We intentionally use `policy.user_argv` (not the raw argv
         // after `--`) so the single source of truth for what gets
         // executed is the parent-signed policy struct. The parent
         // writes argv into both the bwrap argv AND the policy; they
-        // MUST match and G0a.3 will assert this.
+        // MUST match and G0a.3g will assert this.
         Err(exec_user_argv(
             policy.user_argv.into_iter().map(OsString::from).collect(),
         ))
