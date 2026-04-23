@@ -32,6 +32,12 @@ const INTERNAL_ONLY: &[&str] = &[
     // operators use XDG defaults; integration tests use this to point
     // at a tempfile.
     "PCY_CONFIG_PATH",
+    // AC-83 (G0a.3e): test-only knob read by pincery-init to simulate a
+    // PartiallyEnforced landlock status after a real successful install,
+    // so the require_fully_enforced rejection path can be exercised in
+    // integration tests. Only honoured when OPEN_PINCERY_ALLOW_UNSAFE=true;
+    // never set by operators.
+    "OPEN_PINCERY_INIT_FORCE_PARTIAL",
 ];
 
 fn scan_source_for_env_vars() -> HashSet<String> {
