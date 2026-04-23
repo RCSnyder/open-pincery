@@ -544,11 +544,11 @@ fn skeleton_rejects_missing_policy_fd_flag() {
 }
 
 /// Slice G0a.3d proof: before exec, the wrapper must install a
-/// landlock filesystem ruleset derived from `policy.landlock_rx_paths`
-/// + `policy.landlock_rwx_paths`. After install, the forked user
-/// program inherits the landlock domain (kernel
-/// `userspace-api/landlock.html` §"Inheritance"), so writes to paths
-/// OUTSIDE the rwx list must EACCES.
+/// landlock filesystem ruleset derived from the policy's rx + rwx
+/// path lists. After install, the forked user program inherits the
+/// landlock domain (per the kernel's landlock userspace API docs,
+/// section on inheritance), so writes to paths outside the rwx list
+/// must fail with `EACCES`.
 ///
 /// We assert both sides of the ruleset:
 /// 1. `touch <workspace>/allowed` succeeds (workspace is in rwx).
