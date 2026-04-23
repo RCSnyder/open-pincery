@@ -1,3 +1,117 @@
+# Readiness: Open Pincery — v9 Phase G0a (AC-83 `pincery-init` Exec Wrapper)
+
+> This addendum supersedes per-slice readiness for Phase G0a only. It was
+> produced at the 2026-04-23 EXPAND-addendum checkpoint (commit `4f82cc9`)
+> after the distinguished-engineer sandbox audit. The v7 readiness block
+> below is preserved verbatim as historical context.
+
+## Verdict
+
+READY for Slice G0a.
+
+All five open decisions from the audit doc are resolvable in-slice without
+blocking (see Clarifications below); none change the pass/fail meaning of
+AC-83. The interim landlock disable (commit `4cf7bc9`) has already turned
+PR #4 CI green, so G0a lands on a known-good baseline. AC-83 has a single
+unambiguous invariant — `pincery-init` runs inside the sandbox after bwrap
+mount setup and either installs every restriction and execs the user
+binary, or fails closed with `_exit(125)` and a structured JSON error.
+
+## Truths (G0a)
+
+Non-negotiable statements that must be true in the shipped Slice G0a:
+
+- **T-G0a-1** A new binary `pincery-init` exists at `src/bin/pincery_init.rs`
+  with a `[[bin]]` entry in `Cargo.toml`. It compiles `panic = "abort"`.
+  (Musl static-linking infra is deferred to Slice G0a-followup; G0a ships
+  a dynamically-linked binary sufficient to validate the architecture
+  inside the devshell image, with musl cross-compile tracked as a follow-up
+  before v9.0 release.)
+- **T-G0a-2** `RealSandbox::run` in `src/runtime/sandbox/bwrap.rs` no
+  longer installs Landlock via a parent-side `pre_exec` hook. The
+  `landlock` module's `install_landlock` function is removed from the
+  parent-spawn path entirely.
+- **T-G0a-3** `build_bwrap_args` adds `--ro-bind <host_init_path> /sandbox/init`
+  and rewrites the user argv to `["/sandbox/init", "--policy-fd", "3", "--", original_argv...]`.
+  The host init path resolves to the workspace's `pincery-init` binary
+  via `std::env::current_exe()`-adjacent lookup (Cargo test binary dir in
+  tests; `$CARGO_TARGET_DIR/debug|release/pincery-init` in dev; installed
+  location in prod; override via `OPEN_PINCERY_INIT_PATH` for CI/test).
+- **T-G0a-4** A bincode-serializable `SandboxInitPolicy` struct lives in
+  a new shared module (`src/runtime/sandbox/init_policy.rs`) and is the
+  only type used to cross the parent→wrapper IPC boundary. Shape:
+  `{ landlock_rules: LandlockProfile, seccomp_bpf: Vec<u8>, target_uid: u32,
+  target_gid: u32, require_fully_enforced: bool, user_argv: Vec<OsString> }`.
+- **T-G0a-5** Policy IPC uses a memfd (`memfd_create("pincery-init-policy", 0)`,
+  **not** CLOEXEC). Parent writes the bincode bytes, `lseek(0)`, passes the
+  fd as `--policy-fd 3` in the user argv via bwrap fd inheritance. Wrapper
+  reads the entire fd to EOF then closes it. Rejected alternatives
+  documented in the slice summary.
+- **T-G0a-6** `pincery-init`'s policy application order is exactly:
+  prctl(NO_NEW_PRIVS) → setresgid/setgroups/setresuid → (seccomp BPF)
+  → (landlock_restrict_self with LANDLOCK_RESTRICT_SELF_TSYNC) →
+  verify `RestrictionStatus::FullyEnforced && no_new_privs == 1` → execvp.
+  Any non-zero return from any step: write JSON `{"stage":"...", "errno":N,
+  "message":"..."}` to fd 3, `_exit(125)`.
+- **T-G0a-7** When AC-84's preflight lands, the wrapper also asserts the
+  kernel ABI floor at startup. In G0a the wrapper accepts any ABI ≥ 1
+  (because the interim production default is `landlock=false`, and the
+  positive landlock-on tests are `#[ignore]`d until AC-84 ships). Once
+  AC-84 lands the floor becomes ABI ≥ 6.
+- **T-G0a-8** Slice G0a does **not** implement AC-84, AC-85, AC-86, AC-87,
+  AC-88, or the seccomp allowlist rewrite. Each is its own slice. G0a only
+  proves the architectural substrate (wrapper + IPC + in-sandbox install
+  + fail-closed exit 125) is sound.
+
+## Key Links — AC → Design → Test → Proof
+
+- **AC-83** (`pincery-init` exec wrapper):
+  - Design components: `src/bin/pincery_init.rs` (new); `src/runtime/sandbox/init_policy.rs` (new); `src/runtime/sandbox/bwrap.rs::build_bwrap_args` (amended); `src/runtime/sandbox/bwrap.rs::RealSandbox::run` (remove `pre_exec` landlock); `Cargo.toml` `[[bin]]` entry.
+  - Planned tests: `tests/pincery_init_test.rs` with four cases:
+    1. `wrapper_execs_user_binary_cleanly` — bwrap → pincery-init → `echo hello` returns stdout="hello\n", exit=0.
+    2. `wrapper_surfaces_policy_apply_failure_as_125` — feed a malformed `LandlockProfile` (e.g. nonexistent path with `HardRequirement`), assert exit code 125 and a parseable JSON error on fd 3.
+    3. `wrapper_rejects_partial_enforcement` — stub/feature-flag path that forces `RestrictionStatus::PartiallyEnforced`; assert exit 125 + `not_fully_enforced` stage.
+    4. `wrapper_is_invisible_to_user_argv` — run `sh -c 'echo $0 && cat /proc/self/comm && printf %s\\n "$@"' arg1 arg2`; assert `$0` == sh/sandbox, argv has no `pincery-init`, `/proc/self/comm` == `sh`.
+  - Runtime proof: `cargo test --test pincery_init_test -- --test-threads=1` green on Linux devshell; `cargo test --test sandbox_real_smoke -- --nocapture` still green (regression guard on the interim fix); `journalctl --user` or stderr capture shows the policy-apply failure path emits JSON when induced.
+
+## Acceptance Criteria Coverage (G0a only)
+
+| AC      | Planned Test                                          | Planned Runtime Proof                                                        |
+| ------- | ----------------------------------------------------- | ---------------------------------------------------------------------------- |
+| AC-83   | `tests/pincery_init_test.rs` (4 cases above)          | Devshell: bwrap → pincery-init → user cmd, with induced failure showing 125. |
+
+## Scope Reduction Risks
+
+- **Musl static-linking deferred**: G0a ships a dynamically-linked wrapper. Before v9.0 release, the wrapper must be musl-static so it runs inside distroless/minimal sandbox rootfs. Tracked as Slice G0a-followup; marked in `DELIVERY.md` "Known Limitations" on merge. This is an explicit deferral, not a silent drop — the wrapper is still installed via `--ro-bind` from the host, so for G0a the host's dynamic linker reachability into the bwrap rootfs is what matters, and bwrap's default `--ro-bind` of `/usr` + `/lib*` already covers that for the target runners.
+- **`RestrictionStatus::PartiallyEnforced` rejection**: T-G0a-6 step 5 requires a stubbable feature flag or environment override to make the test case reproducible without a kernel that actually returns `PartiallyEnforced`. Risk: the implementation fakes this with `#[cfg(test)]` and ships untested in production. Mitigation: the stub is an environment variable (`OPEN_PINCERY_INIT_FORCE_PARTIAL=1`) honored only when `OPEN_PINCERY_ALLOW_UNSAFE=true`; same pattern as the existing `ResolvedSandboxMode` gate. Cited in the test and in the audit doc.
+- **Don't re-implement AC-85 inside G0a**: The `FullyEnforced`-or-refuse check is AC-85 territory. G0a should **structure** the check so AC-85 only has to flip a constant, but must not promise `HardRequirement` behavior in G0a itself.
+- **Don't re-implement AC-86 inside G0a**: bwrap flags `--uid 65534 --gid 65534 --cap-drop ALL` are AC-86. G0a's wrapper calls `setresuid/setresgid` as defense-in-depth only, and it must not fail if the inherited UID is already 65534.
+
+## Clarifications Needed (in-slice, do not block)
+
+The five open decisions from the audit doc resolve as follows for G0a:
+
+1. **Separate binary vs. argv[0] dispatch**: Separate `[[bin]]` target. Simpler build + clearer in `ps`.
+2. **IPC transport**: memfd (T-G0a-5). Rejected pipe (inherits awkwardly), rejected env (bincode in env is ugly and size-limited).
+3. **Static-musl build infra**: deferred to G0a-followup per Scope Reduction Risks above.
+4. **Audit netlink**: deferred to AC-88 / Slice G0f. G0a emits no `landlock_denied` events.
+5. **Floor advisory vs. hard**: hard in prod per AC-84 when that slice ships; G0a is floor-agnostic.
+
+## Build Order (G0a internal slicing)
+
+G0a is itself broken into three sub-slices, verified in order:
+
+- **G0a.1** — `SandboxInitPolicy` module + bincode round-trip unit test. No bwrap integration yet. Proof: `cargo test --lib init_policy`.
+- **G0a.2** — `pincery_init` binary that reads a policy fd, logs the parsed policy to stderr, and `execvp`s argv without applying any restrictions yet. Proof: host-level run with a hand-crafted policy fd; observe the user binary runs and the policy bytes were parsed.
+- **G0a.3** — Wire `RealSandbox::run` to `--ro-bind` the binary + pass `--policy-fd 3`, and implement the full policy-application pipeline in the wrapper. Remove parent `pre_exec` landlock install. Proof: four-case `tests/pincery_init_test.rs` green; `sandbox_real_smoke` still green.
+
+## Complexity Exceptions
+
+- `src/bin/pincery_init.rs` is permitted to exceed 300 lines if the policy-apply pipeline requires it; the wrapper is a kernel-interface layer where clarity of ordering outweighs file-size discipline. Current target: ≤ 250 lines including doc comments.
+- The wrapper may use `libc` directly (as `landlock` and `seccompiler` already do); no new abstraction layer is needed for G0a.
+
+---
+
 # Readiness: Open Pincery — v7 (Credential Vault & Reasoner-Secret Refusal)
 
 > This file supersedes the prior v6 readiness record. v6 is shipped; its
