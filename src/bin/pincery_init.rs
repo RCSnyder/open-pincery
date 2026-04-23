@@ -102,8 +102,19 @@ mod linux {
     impl std::error::Error for InitError {}
 
     /// Parsed argv after stripping the wrapper's own flags.
+    ///
+    /// `user_argv` is captured but not yet consumed in G0a.2 — the
+    /// wrapper execs `policy.user_argv` (from the parent-signed IPC
+    /// payload) as the single source of truth. G0a.3 will cross-check
+    /// `parsed.user_argv == policy.user_argv` as an integrity guard
+    /// per readiness T-G0a-3 ("parent writes argv into both the
+    /// bwrap argv AND the policy; they MUST match"). Allowing dead
+    /// code here keeps the field + parser shape stable so that
+    /// integrity check is a one-line addition rather than a parser
+    /// rewrite.
     struct ParsedArgs {
         policy_fd: i32,
+        #[allow(dead_code)]
         user_argv: Vec<OsString>,
     }
 
