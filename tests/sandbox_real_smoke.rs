@@ -33,11 +33,21 @@ fn bwrap_available() -> bool {
     if std::env::var_os("OPEN_PINCERY_SKIP_REAL_BWRAP").is_some() {
         return false;
     }
-    std::process::Command::new("bwrap")
+    let ok = std::process::Command::new("bwrap")
         .arg("--version")
         .output()
         .map(|o| o.status.success())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if ok {
+        // AC-83 / Slice G0a.3h: with `landlock=true` in `profile()`,
+        // RealSandbox routes through the `pincery-init` wrapper and
+        // needs the host path of the binary. `CARGO_BIN_EXE_pincery-init`
+        // is set by cargo for integration tests of crates with
+        // `[[bin]] pincery-init`. --test-threads=1 (enforced by the
+        // sandbox smoke CI job) makes `set_var` safe here.
+        std::env::set_var("PINCERY_INIT_BIN_PATH", env!("CARGO_BIN_EXE_pincery-init"));
+    }
+    ok
 }
 
 fn sandbox() -> RealSandbox {
