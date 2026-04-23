@@ -61,7 +61,14 @@ async fn real_sandbox_runs_trivial_true() {
     let executor = sandbox();
     let result = executor.run(&ShellCommand::new("true"), &profile()).await;
     match result {
-        ExecResult::Ok { exit_code, .. } => assert_eq!(exit_code, 0),
+        ExecResult::Ok {
+            exit_code,
+            stdout,
+            stderr,
+        } => assert_eq!(
+            exit_code, 0,
+            "bwrap exited non-zero; stdout={stdout:?} stderr={stderr:?}"
+        ),
         other => panic!("expected Ok, got {other:?}"),
     }
 }
@@ -78,12 +85,17 @@ async fn real_sandbox_echoes_expected_stdout() {
         .await;
     match result {
         ExecResult::Ok {
-            stdout, exit_code, ..
+            stdout,
+            exit_code,
+            stderr,
         } => {
-            assert_eq!(exit_code, 0);
+            assert_eq!(
+                exit_code, 0,
+                "bwrap exited non-zero; stdout={stdout:?} stderr={stderr:?}"
+            );
             assert!(
                 stdout.contains("hello-sandbox"),
-                "stdout missing expected output: {stdout:?}"
+                "stdout missing expected output: stdout={stdout:?} stderr={stderr:?}"
             );
         }
         other => panic!("expected Ok, got {other:?}"),
@@ -126,10 +138,10 @@ async fn real_sandbox_sees_fresh_uts_hostname() {
         )
         .await;
     match result {
-        ExecResult::Ok { stdout, .. } => {
+        ExecResult::Ok { stdout, stderr, .. } => {
             assert!(
                 stdout.trim() == "sandbox",
-                "expected UTS hostname 'sandbox', got {stdout:?}"
+                "expected UTS hostname 'sandbox', got stdout={stdout:?} stderr={stderr:?}"
             );
         }
         other => panic!("expected Ok, got {other:?}"),
@@ -155,16 +167,21 @@ async fn real_sandbox_denies_network_when_deny_net_is_true() {
         .await;
     match result {
         ExecResult::Ok {
-            stdout, exit_code, ..
+            stdout,
+            exit_code,
+            stderr,
         } => {
-            assert_eq!(exit_code, 0);
+            assert_eq!(
+                exit_code, 0,
+                "bwrap exited non-zero; stdout={stdout:?} stderr={stderr:?}"
+            );
             // Only `lo` should remain; eth0/wlan0 would indicate
             // the host's netns leaked through.
             let ifaces: Vec<&str> = stdout.split_whitespace().collect();
             for bad in ["eth0", "wlan0", "ens3", "ens33", "enp0s3", "docker0"] {
                 assert!(
                     !ifaces.contains(&bad),
-                    "host interface {bad} visible inside sandbox: {stdout:?}"
+                    "host interface {bad} visible inside sandbox: stdout={stdout:?} stderr={stderr:?}"
                 );
             }
         }
