@@ -143,8 +143,6 @@ jobs:
             dist/*-${{ github.ref_name }}-${{ matrix.suffix }}*
           if-no-files-found: error
           retention-days: 7
-          if-no-files-found: error
-          retention-days: 7
 
   sbom:
     name: generate-sbom
