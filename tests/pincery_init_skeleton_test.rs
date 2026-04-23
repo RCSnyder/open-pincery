@@ -106,13 +106,40 @@ fn allow_all_seccomp_bytes() -> Vec<u8> {
 /// byte stream (multiple of 8). `allow_all_seccomp_bytes()` gives us
 /// a one-instruction allow filter that verifies cleanly via
 /// `/proc/self/status` without blocking the user program.
+///
+/// Starting in G0a.3d the wrapper actively installs a landlock
+/// filesystem ruleset derived from the path vectors, so the lists
+/// here MUST be sufficient for every downstream operation:
+///
+/// - Rootfs rx: `/usr`, `/bin`, `/lib`, `/lib64`, `/etc`, `/sys` so
+///   `/bin/sh`, `/bin/true`, `grep`, `id`, etc. can load shared
+///   libraries and read locale / nsswitch config.
+/// - `/proc` as rwx: `apply_seccomp` reads `/proc/self/status` to
+///   verify the filter, and test user programs read `/proc` too.
+///   /proc needs write access for things like
+///   `/proc/self/oom_score_adj`; keeping it rwx is defense-in-depth.
+/// - `/tmp` as rwx: a handful of standard unix tools touch /tmp
+///   during startup; keeping it writable avoids flaky failures on
+///   the runner without adding relevant surface (no untrusted code
+///   runs under these tests).
+///
+/// The dedicated landlock test (G0a.3d) uses a narrower list to
+/// actually prove enforcement. `sample_policy` is the "everything
+/// the tests need to run" list.
 fn sample_policy(user_argv: Vec<String>) -> SandboxInitPolicy {
     // SAFETY: pure getters.
     let cur_uid = unsafe { libc::geteuid() };
     let cur_gid = unsafe { libc::getegid() };
     SandboxInitPolicy {
-        landlock_rx_paths: vec![PathBuf::from("/usr"), PathBuf::from("/bin")],
-        landlock_rwx_paths: vec![PathBuf::from("/tmp")],
+        landlock_rx_paths: vec![
+            PathBuf::from("/usr"),
+            PathBuf::from("/bin"),
+            PathBuf::from("/lib"),
+            PathBuf::from("/lib64"),
+            PathBuf::from("/etc"),
+            PathBuf::from("/sys"),
+        ],
+        landlock_rwx_paths: vec![PathBuf::from("/proc"), PathBuf::from("/tmp")],
         seccomp_bpf: allow_all_seccomp_bytes(),
         target_uid: cur_uid,
         target_gid: cur_gid,
@@ -186,8 +213,8 @@ fn skeleton_parses_policy_then_execs_user_argv() {
         "expected policy-summary line on stderr, got:\n{stderr}",
     );
     assert!(
-        stderr.contains("rx_paths=2"),
-        "summary should reflect the 2 rx paths we supplied, got:\n{stderr}",
+        stderr.contains("rx_paths=6"),
+        "summary should reflect the 6 rx paths `sample_policy` supplies, got:\n{stderr}",
     );
     // SAFETY: pure getter.
     let cur_uid = unsafe { libc::geteuid() };
