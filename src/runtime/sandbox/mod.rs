@@ -117,7 +117,17 @@ impl Default for SandboxProfile {
             cwd: None,
             cgroup: None,
             seccomp: true,
-            landlock: true,
+            // AC-53 amendment (2026-04-22 audit): production default is
+            // `landlock=false` until Slice G0a (AC-83 — pincery-init exec
+            // wrapper) lands. The current parent-side `pre_exec` Landlock
+            // install is architecturally broken because Landlock V1+
+            // unconditionally denies `mount(2)` (kernel.org
+            // userspace-api/landlock §"Current limitations") and Landlock
+            // domains are inherited via `clone(2)`, so bwrap EPERMs on its
+            // first `mount(NULL, "/", MS_SLAVE | MS_REC, NULL)` call.
+            // See docs/security/sandbox-architecture-audit.md and AC-83..
+            // AC-88 / Phase G0 in scaffolding/scope.md.
+            landlock: false,
         }
     }
 }

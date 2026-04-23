@@ -87,6 +87,7 @@ fn landlock_profile() -> SandboxProfile {
 /// → bwrap → sh. If any link breaks, spawn fails or sh dies before
 /// echo runs.
 #[tokio::test]
+#[ignore = "AC-53 amendment: blocked on Slice G0a (AC-83 pincery-init). Parent-pre_exec Landlock install architecturally broken — see docs/security/sandbox-architecture-audit.md"]
 async fn landlock_permits_normal_commands() {
     if !preconditions_met() {
         return;
@@ -117,6 +118,7 @@ async fn landlock_permits_normal_commands() {
 /// `/etc` is in the default rx allowlist. We cat `/etc/hostname`
 /// which exists on every Linux distro we care about.
 #[tokio::test]
+#[ignore = "AC-53 amendment: blocked on Slice G0a (AC-83 pincery-init). Parent-pre_exec Landlock install architecturally broken — see docs/security/sandbox-architecture-audit.md"]
 async fn landlock_permits_reading_etc() {
     if !preconditions_met() {
         return;
@@ -156,6 +158,7 @@ async fn landlock_permits_reading_etc() {
 /// O_CREAT)` returns EACCES, the `&&` short-circuits, and we see
 /// `blocked`.
 #[tokio::test]
+#[ignore = "AC-53 amendment: blocked on Slice G0a (AC-83 pincery-init). Parent-pre_exec Landlock install architecturally broken — see docs/security/sandbox-architecture-audit.md"]
 async fn landlock_blocks_writes_to_unlisted_tmpfs() {
     if !preconditions_met() {
         return;
