@@ -162,6 +162,9 @@ async fn cgroup_pids_max_limits_fork_count() {
             // the cap bit.
             let saw_eagain = stderr.contains("Resource temporarily unavailable")
                 || stderr.contains("cannot fork")
+                // dash (Ubuntu's /bin/sh) reports "sh: <n>: Cannot fork"
+                // with a capital C when hitting pids.max.
+                || stderr.contains("Cannot fork")
                 || stderr.contains("fork:");
             let survivors_line = stdout
                 .lines()
