@@ -71,32 +71,33 @@ jobs:
       # the sandbox tests can exercise real namespace isolation.
       # This is safe on an ephemeral hosted runner.
       #
-      # We also have to change `/` to MS_PRIVATE propagation on the
-      # host. Hosted runners inherit systemd's default shared mount
-      # propagation, and an unprivileged user namespace cannot alter
-      # mount propagation on LOCKED mounts inherited from the host.
-      # Bwrap's internal `mount("none", "/", NULL, MS_SLAVE|MS_REC, NULL)`
-      # then fails with EPERM ("Failed to make / slave"). Making /
-      # private on the host means bwrap's child ns inherits it as
-      # private, and the MS_SLAVE flip becomes a no-op that succeeds.
-      # This only affects the ephemeral runner, not our sandbox posture.
-      #
-      # Additionally we grant bwrap CAP_SYS_ADMIN + CAP_SYS_CHROOT file
-      # capabilities. This matches the legacy setuid-bwrap behavior
-      # that Debian/Ubuntu dropped in favor of unprivileged userns;
-      # on hosted runners the inherited mounts are LOCKED, meaning a
-      # child user-ns cannot change propagation on them even if the
-      # host root is already private. Granting file caps lets bwrap
-      # perform the mount-propagation flip at exec time without being
-      # setuid. Scope is limited to the ephemeral runner.
+      # Inherited mounts from systemd on hosted runners are LOCKED
+      # under an unprivileged user-ns: bwrap's internal
+      # `mount("none", "/", NULL, MS_SLAVE|MS_REC, NULL)` returns
+      # EPERM ("Failed to make / slave"). Workarounds tried:
+      #   - `mount --make-rprivate /` on host:      insufficient,
+      #     locked-mount check is on the ownership of the mount.
+      #   - `setcap cap_sys_admin+ep bwrap`:       modern bwrap
+      #     refuses ("Unexpected capabilities but not setuid").
+      # What actually works: invoke bwrap from a caller that has
+      # CAP_SYS_ADMIN in the init user namespace (i.e. root). Inside
+      # the init userns, locked-mount propagation rules don't apply,
+      # and bwrap's `--unshare-user` still creates an unprivileged
+      # child userns exactly as the non-CI path does. This affects
+      # ONLY where bwrap is launched from, never the isolation
+      # posture of the sandboxed process.
       - name: allow unprivileged user namespaces (AppArmor workaround)
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          sudo mount --make-rprivate /
-          sudo setcap cap_sys_admin,cap_sys_chroot+ep "$(command -v bwrap)"
           # Sanity-check: bwrap actually creates a user+pid ns on this runner.
           bwrap --unshare-user --unshare-pid --dev-bind / / /bin/true
-      - run: cargo test --all -- --test-threads=1
+      # `cargo test --all` stays unprivileged so postgres/sqlx and
+      # socket tests behave like the real devshell. The dedicated
+      # sandbox-smoke job below owns AC-53 evidence and runs the
+      # smoke binary under sudo. We skip sandbox_real_smoke here via
+      # env gate so the unprivileged runner doesn't fail on the
+      # locked-mount issue the other job is designed to work around.
+      - run: cargo test --all -- --test-threads=1 --skip real_sandbox_
 
   # Dedicated gate for AC-53 RealSandbox evidence.  The smoke suite
   # self-skips if `bwrap` is absent; this job fails loudly if it ever
@@ -117,15 +118,27 @@ jobs:
       - name: allow unprivileged user namespaces (AppArmor workaround)
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          sudo mount --make-rprivate /
-          sudo setcap cap_sys_admin,cap_sys_chroot+ep "$(command -v bwrap)"
           bwrap --unshare-user --unshare-pid --dev-bind / / /bin/true
       - name: cargo test --test sandbox_real_smoke (verbose, fail-on-skip)
         run: |
           set -euo pipefail
           OUT=$(mktemp)
-          cargo test --test sandbox_real_smoke -- --nocapture --test-threads=1 \
-            | tee "$OUT"
+          # Build the test binary first (unprivileged — cargo + rust-cache
+          # own the target dir).
+          cargo test --no-run --test sandbox_real_smoke
+          # Locate the compiled test binary.
+          TEST_BIN=$(find target/debug/deps -maxdepth 1 -type f -name 'sandbox_real_smoke-*' -executable | head -1)
+          if [ -z "$TEST_BIN" ]; then
+            echo "::error::could not locate compiled sandbox_real_smoke test binary" >&2
+            exit 1
+          fi
+          # Run as root so bwrap inherits CAP_SYS_ADMIN in the init
+          # user namespace. Required to bypass the locked-inherited-mount
+          # propagation check on hosted runners (see comments in the
+          # `test` job). Bwrap still unshares into an unprivileged
+          # child userns for the actual sandboxed command — isolation
+          # posture is unchanged.
+          sudo -E "$TEST_BIN" --nocapture --test-threads=1 | tee "$OUT"
           # Fail if the suite ran zero tests -- that would mean the
           # Linux gate or bwrap probe silently disabled our evidence.
           if grep -qE '^test result:.*0 passed' "$OUT"; then
