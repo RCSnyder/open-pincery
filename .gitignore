@@ -23,3 +23,11 @@ __pycache__/
 
 # sqlx offline query data
 .sqlx/
+
+# TLC model-checker artifacts
+docs/input/states/
+**/*.toolbox/
+**/MC.tla
+**/MC.cfg
+**/MC.out
+tla2tools.jar

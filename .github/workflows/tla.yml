@@ -1,0 +1,70 @@
+name: TLA+ model check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/input/OpenPinceryCanonical.tla"
+      - "docs/input/OpenPinceryCanonical.cfg"
+      - "docs/input/OpenPinceryCanonical.small.cfg"
+      - "scripts/tlc_check.sh"
+      - ".github/workflows/tla.yml"
+  pull_request:
+    paths:
+      - "docs/input/OpenPinceryCanonical.tla"
+      - "docs/input/OpenPinceryCanonical.cfg"
+      - "docs/input/OpenPinceryCanonical.small.cfg"
+      - "scripts/tlc_check.sh"
+      - ".github/workflows/tla.yml"
+  workflow_dispatch:
+
+jobs:
+  tla:
+    name: SANY parse + TLC simulation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TLA_TOOLS_JAR: ${{ github.workspace }}/target/tla/tla2tools.jar
+      # Larger sweep than the local default: in CI we can afford a few
+      # minutes of simulation for deeper coverage of InvariantsV1.
+      TLC_SIM_NUM: "2000"
+      TLC_SIM_DEPTH: "150"
+      TLC_WORKERS: "2"
+      JAVA_XMX: "3g"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: cache tla2tools.jar
+        uses: actions/cache@v4
+        with:
+          path: target/tla/tla2tools.jar
+          # The jar itself is versioned by release URL (v1.8.0) inside
+          # scripts/tlc_check.sh, so a static cache key is fine until
+          # the URL bumps.
+          key: tla2tools-v1.8.0
+
+      - name: SANY parse
+        run: bash scripts/tlc_check.sh parse
+
+      - name: TLC simulation (InvariantsV1)
+        run: |
+          set -euo pipefail
+          LOG=$(mktemp)
+          bash scripts/tlc_check.sh simulate | tee "$LOG"
+          # Fail loudly on any invariant violation, error, or abort
+          # that TLC tends to surface with these tokens.
+          if grep -qiE 'Invariant .* is violated|Error:|Assumption|deadlock reached|counter-?example' "$LOG"; then
+            echo "::error::TLC reported an invariant/error/counterexample -- see log above"
+            exit 1
+          fi
+          # Defensive: must show a non-trivial state count.
+          if ! grep -qE 'states checked' "$LOG"; then
+            echo "::error::TLC produced no 'states checked' progress line"
+            exit 1
+          fi
