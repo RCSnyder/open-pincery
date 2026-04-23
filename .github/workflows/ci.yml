@@ -119,6 +119,7 @@ jobs:
               # because tempdirs + procfs probes are not thread-safe.
               cargo test --test sandbox_real_smoke --test sandbox_landlock_test \
                          --test sandbox_seccomp_test --test sandbox_cgroup_test \
+                         --no-fail-fast \
                          -- --nocapture --test-threads=1
             ' | tee "$OUT"
           # Fail if the suite ran zero tests -- would mean the
