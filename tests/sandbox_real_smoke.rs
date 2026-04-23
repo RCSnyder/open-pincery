@@ -55,12 +55,13 @@ fn profile() -> SandboxProfile {
         cwd: None,
         cgroup: None,
         seccomp: true,
-        // AC-53 amendment (2026-04-22 audit): the parent-`pre_exec`
-        // Landlock install is architecturally broken (see
-        // docs/security/sandbox-architecture-audit.md). Smoke tests
-        // exercise bwrap + seccomp only until Slice G0a lands a
-        // working in-sandbox Landlock install via `pincery-init`.
-        landlock: false,
+        // AC-53 / Phase G0a: smoke tests exercise the production
+        // default — all three layers on (bwrap + seccomp + landlock).
+        // Landlock is installed inside the sandbox via `pincery-init`
+        // (see docs/security/sandbox-architecture-audit.md); the
+        // dedicated `sandbox_landlock_test.rs` integration suite
+        // covers landlock-specific enforcement semantics.
+        landlock: true,
     }
 }
 

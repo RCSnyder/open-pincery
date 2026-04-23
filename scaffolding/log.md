@@ -1,5 +1,27 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — Slice G0a.3h: flip `SandboxProfile::default` to `landlock=true` (AC-83, readiness T-G0a-6 completed) — 2026-04-23T10:15Z
+
+- **Gate**: PASS locally (`get_errors` clean on both modified files). Linux-cfg landlock enforcement validated by the sandbox real-bwrap smoke CI job.
+- **What this slice ships**: Production default for `SandboxProfile` is now `landlock: true`. `src/runtime/sandbox/mod.rs::Default::default()` and `tests/sandbox_real_smoke.rs::profile()` both flip `false → true`. The stale "landlock install is architecturally broken" comments are replaced with pointers to the wrapper pipeline that landed in G0a.3g.
+- **Why this is the last G0a slice**: readiness claim T-G0a-6 ("pincery-init installs landlock inside the sandbox and this is the production default") had two halves — the install mechanism (G0a.3g) and the default flip (this slice). `tests/sandbox_real_smoke.rs` now exercises bwrap + seccomp + landlock together, matching what a production `execute_shell` call gets.
+- **Audit of implicit-default sites** (grep `SandboxProfile::default()`):
+  - `src/runtime/tools.rs:376` (`execute_shell` production path): auto-picks up landlock=true. This is the intended outcome.
+  - `tests/sandbox_test.rs` (×6): `ProcessExecutor` tests. `ProcessExecutor` is a non-sandboxing executor that ignores `profile.landlock` entirely (see `src/runtime/sandbox/mod.rs` impl of `ProcessExecutor::run`). No behavior change.
+- **Audit of explicit `landlock: false` sites** (grep `landlock: false`):
+  - `tests/sandbox_cgroup_test.rs` (×4), `tests/sandbox_seccomp_test.rs` (×1): focused single-layer tests (cgroup-only and seccomp-only). Keeping `landlock: false` preserves the layer-isolation property of those tests; flipping them would conflate what's being measured. Left alone.
+  - `tests/sandbox_landlock_test.rs:210`: deliberate "disabled posture" regression test that proves `landlock=false` is a no-op (the companion to the positive-enforcement cases un-ignored in G0a.3g). Left alone.
+- **Files touched**:
+  - `src/runtime/sandbox/mod.rs`: default `landlock: false → true`; comment block rewritten to reference the wrapper pipeline + readiness T-G0a-6.
+  - `tests/sandbox_real_smoke.rs`: `profile()` fn `landlock: false → true`; comment updated.
+  - `scaffolding/log.md`: this entry.
+- **Not touched**: focused layer-isolation tests (cgroup/seccomp), the disabled-posture landlock test, or any production code beyond the default. No changes to the bwrap argv pipeline, the wrapper, or the policy layout.
+- **Concerns**:
+  - `src/runtime/tools.rs::execute_shell` now runs through the landlock-installing pipeline. In `ProcessExecutor` (non-Linux or when no sandbox is configured), landlock is ignored. In `RealSandbox`, this exercises the full wrapper path for every tool invocation. If kernel landlock is unavailable, the behavior depends on `ResolvedSandboxMode`: Enforce fails closed, Audit/Disabled logs and proceeds — see `src/runtime/sandbox/bwrap.rs::run` after G0a.3g.
+  - Any test that invokes `RealSandbox::run` with an implicit default (none exist today) would suddenly require kernel landlock support. The smoke test is the only such call site, and it has an explicit `bwrap_available()` preflight + the `OPEN_PINCERY_SKIP_REAL_BWRAP` escape hatch.
+- **Retries**: 0 so far (pre-push).
+- **Next sub-slices**: G0a complete. Next is G0b (AC-84 kernel ABI floor preflight — require landlock_create_ruleset + PR_SET_NO_NEW_PRIVS + seccomp syscalls on the host kernel before spawning). Then G0c (AC-85 non-optional `require_fully_enforced`), G0d (AC-86 privilege isolation real drop), G0e (AC-87 ipc_scopes bitmap), G0f (AC-88 kernel_audit_log surface).
+
 ## BUILD v9 — Slice G0a.3g: RealSandbox wires `pincery-init` into bwrap + parent `pre_exec` landlock install removed (AC-83, readiness T-G0a-6 end-to-end) — 2026-04-23T09:45Z
 
 - **Gate**: PASS locally (`get_errors` clean on both modified files). Linux-cfg code is authoritatively validated by CI.
