@@ -47,23 +47,32 @@ use landlock::{
 /// Fixed set of host paths that need read+execute access for stock
 /// glibc programs to load and run inside the sandbox. Ordered for
 /// review-diff readability; runtime order does not matter.
-// Default read+execute allowlist. Includes:
-// - `/`: read access on the root dir. Bwrap's setup path walks /
-//   to resolve bind-mount targets and to do its MS_SLAVE|MS_REC
-//   propagation flip on the new mount-ns root. Without this the
-//   bwrap child fails during setup with EPERM on the mount call.
-//   Granting read on / leaks only the top-level dentry names (which
-//   are already readable via /bin, /etc, etc.), so the additional
-//   exposure is nil.
-// - standard rootfs dirs sh + coreutils need to execute
-// - /sys: bwrap may stat /sys/fs/cgroup for delegated cgroup v2 setup
+// Default read+execute allowlist. Includes standard rootfs dirs
+// sh + coreutils need to execute, plus /sys for bwrap's cgroup v2
+// probes.
+//
+// NOTE: `/` is deliberately NOT here, but the real defect is
+// architectural, not allowlist-shaped. Landlock V1+ unconditionally
+// denies mount(2) for any task in a Landlock domain (kernel.org,
+// userspace-api/landlock §"Current limitations"), and Landlock
+// domains are inherited via clone(2) (§"Inheritance"). Because we
+// install the ruleset in a `pre_exec` hook in the parent process,
+// the bwrap child inherits the domain and EPERMs on its very first
+// `mount(NULL, "/", MS_SLAVE | MS_REC, NULL)` call regardless of
+// PathBeneath rules. Adding `/` to the allowlist did not (and could
+// not) fix this; it only enlarged the read surface.
+//
+// The correct fix is to install Landlock INSIDE the sandbox after
+// bwrap finishes mount-namespace setup, via a `pincery-init` exec
+// wrapper. Tracked as AC-83..AC-88 / Phase G0 in scope.md. Full
+// architectural audit: docs/security/sandbox-architecture-audit.md.
+// Until G0a lands, production defaults to `landlock=false` and
+// emits a `sandbox_landlock_disabled` event (AC-53 amendment).
 //
 // NOTE: /proc is NOT here because bwrap writes /proc/self/uid_map,
 // /proc/self/gid_map, /proc/self/setgroups during user-namespace
 // setup. /proc must be in rwx_paths instead. See default_for_cwd.
-const ROOTFS_RX_PATHS: &[&str] = &[
-    "/", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/sys",
-];
+const ROOTFS_RX_PATHS: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/sys"];
 
 /// Profile describing which paths are allowed and at what access
 /// level. Built once per tool call by [`LandlockProfile::default_for_cwd`].

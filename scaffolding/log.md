@@ -1,5 +1,40 @@
 # Open Pincery — Experiment Log
 
+## EXPAND v9 — scope addendum: sandbox architecture rework (AC-83..AC-88, Phase G0) — 2026-04-23T00:30Z
+
+- **Gate**: PASS (post-expand, addendum mode).
+- **Trigger**: Distinguished-engineer security audit of the v9 sandbox stack after the `/` allowlist "fix" (commit `85b0bd7`) failed to restore CI. Audit pulled primary kernel + crate documentation (kernel.org `userspace-api/landlock.html`, `docs.rs/landlock`, bubblewrap source, `landlock_restrict_self(2)`) and identified the true root cause plus six adjacent defects. Full audit: [docs/security/sandbox-architecture-audit.md](../docs/security/sandbox-architecture-audit.md).
+- **Definitive root cause** (primary-source backed): Landlock V1+ unconditionally denies `mount(2)` for any task in a Landlock domain (kernel.org §"Current limitations"). Landlock domains are inherited via `clone(2)` (§"Inheritance"). Today we install the ruleset in a `pre_exec` hook in the parent — bwrap inherits the domain and EPERMs on its very first `mount(NULL, "/", MS_SLAVE | MS_REC, NULL)` call. The PathBeneath allowlist contents are irrelevant; the syscall itself is gated. The 13:52 `/` "fix" was a misdiagnosis caused by a stale binary in the smoke harness.
+- **Six additional defects identified** (severities in audit doc):
+  - CRITICAL: seccomp filter is a 11-entry denylist, not a default-deny allowlist.
+  - HIGH: `CompatLevel::BestEffort` silently downgrades to `PartiallyEnforced` on older kernels with no error.
+  - HIGH: bwrap runs as real UID with full capability set; userns gives root inside the sandbox.
+  - MEDIUM: no kernel ABI floor preflight — silent feature loss across kernels.
+  - MEDIUM: single Landlock domain forecloses per-tool/per-policy stacking.
+  - LOW: no kernel audit netlink integration — denials are invisible.
+- **Architectural fix** (translated into 6 ACs): introduce `pincery-init`, a musl-static wrapper installed inside the sandbox via bwrap `--ro-bind`, that applies prctl(NO_NEW_PRIVS) + setresuid(65534) + setresgid(65534) + landlock_restrict_self + seccomp BPF + capset(empty) AFTER bwrap finishes mount-namespace setup, then `execvp`s the user payload. Pattern matches Flatpak, Firejail, and the official `rust-landlock` `sandboxer.rs` example.
+- **Changes to scaffolding/scope.md**:
+  - **AC-53** amended with an "Architectural amendment (2026-04-22, audit-driven)" paragraph forward-pointing to AC-83..AC-88 and declaring the interim production default `landlock=false` (logged as `sandbox_landlock_disabled`).
+  - New sub-section **"v9 Sandbox Architecture Rework (AC-83..AC-88, 2026-04-22 audit)"** added after AC-82 with six new ACs:
+    - **AC-83** `pincery-init` exec wrapper (`src/bin/pincery_init.rs`, musl static, `panic=abort`, policy memfd IPC over fd 3, exit 125 on policy-application failure).
+    - **AC-84** kernel ABI floor preflight (Linux ≥ 6.7, Landlock ABI ≥ 6, exit 4 on unmet floor; opt-out `OPEN_PINCERY_SANDBOX_FLOOR=relaxed` requires `OPEN_PINCERY_ALLOW_UNSAFE=true`).
+    - **AC-85** FullyEnforced-or-refuse (`Ruleset::set_compatibility(CompatLevel::HardRequirement)`).
+    - **AC-86** UID/GID/cap drop in bwrap (`--uid 65534 --gid 65534 --cap-drop ALL`) plus pincery-init defense-in-depth.
+    - **AC-87** Landlock IPC scoping (`LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL` on ABI ≥ 6).
+    - **AC-88** kernel audit netlink reader emitting `landlock_denied` events (ABI ≥ 7 for `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON`).
+  - Build Order: new **Phase G0 — Sandbox Architecture Rework (P0, ~2 weeks)** inserted before Phase G with six slices G0a–G0f mapping 1:1 to AC-83..AC-88. Phase G slices renumbered to start at #26.
+  - Quality Tier line extended to include AC-83..AC-88 in adversarial-test rider.
+  - Data-Model Addendum event-type list extended with: `sandbox_landlock_disabled`, `sandbox_kernel_floor_unmet`, `sandbox_floor_relaxed`, `sandbox_partial_enforcement`, `sandbox_scope_unavailable`, `landlock_denied`, `audit_log_unavailable`.
+  - v9 total estimate updated from 12-15 weeks to **14-17 weeks**; v9.0 ship now gates on Phases A + B + C + E + **G0** + G.
+- **Changes to src/runtime/sandbox/landlock.rs**:
+  - Reverted `/` from `ROOTFS_RX_PATHS` (the failed 13:52 "fix").
+  - Replaced misleading NOTE comment ("V1 landlock does not gate mount(2)") with the correct kernel.org-citation explanation pointing at AC-83..AC-88 and the audit doc.
+  - This file is scheduled for full removal in Slice G0a once `pincery-init` ships; until then it stays disabled-by-default per AC-53 amendment.
+- **Sequencing rationale**: Phase G0 must precede Phase G. The 12-payload escape suite (AC-76 / Slice G1) is meaningless against a stack that fail-opens by default. Build the architecture, then audit it.
+- **Evidence**: `git diff scaffolding/scope.md` shows AC-53 amendment, six new AC blocks, new "v9 Sandbox Architecture Rework" header, new Phase G0 build-order block, updated Quality Tier line, extended event-type list, updated total-estimate sentence. `git diff src/runtime/sandbox/landlock.rs` shows the `/` revert and corrected NOTE block. `git status` shows new file `docs/security/sandbox-architecture-audit.md` (~10 KB, 8 sections).
+- **Decisions still open** (in audit doc, deferred to Slice G0a kickoff): (1) Should `pincery-init` be a separate binary or a `#[cfg(target_os="linux")] mod` selected via `argv[0]`? (2) IPC: memfd vs. anonymous pipe vs. environment? (3) Static-musl build infra: cross-compile in CI vs. `cargo zigbuild` vs. dedicated container? (4) Audit netlink: NETLINK_AUDIT subscriber in-process or sidecar? (5) Should AC-84 floor be advisory in dev profile, hard in prod profile?
+- **Next**: Commit this addendum, then ANALYZE Slice G0a (AC-83 — `pincery-init` skeleton). Each of AC-83..AC-88 is its own ANALYZE → BUILD → REVIEW → RECONCILE → VERIFY cycle. PR #4 stays red until Slice G0a lands; the smoke test will be re-baselined once the wrapper is in.
+
 ## EXPAND v9 — scope addendum: 7 audit-surfaced release blockers (AC-76..AC-82) — 2026-04-22T23:30Z
 
 - **Gate**: PASS (post-expand, addendum mode).
