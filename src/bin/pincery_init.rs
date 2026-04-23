@@ -112,6 +112,7 @@ mod linux {
     /// code here keeps the field + parser shape stable so that
     /// integrity check is a one-line addition rather than a parser
     /// rewrite.
+    #[derive(Debug)]
     struct ParsedArgs {
         policy_fd: i32,
         #[allow(dead_code)]
