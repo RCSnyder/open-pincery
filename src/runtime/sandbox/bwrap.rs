@@ -85,7 +85,15 @@ pub(super) fn pincery_init_bin_path() -> Result<PathBuf, String> {
 /// no-op because `target_uid`/`target_gid` match the wrapper's
 /// inherited euid/egid (bwrap without an explicit `--uid` preserves
 /// the caller's uid inside the userns).
-fn build_init_policy(cwd: &Path) -> SandboxInitPolicy {
+///
+/// `user_argv` is populated with `["sh", "-c", cmd]` to match the
+/// bwrap argv tail. `pincery-init::run_inner` execvps from
+/// `policy.user_argv`, NOT from the CLI tail, so the two sources
+/// MUST carry identical argv (an empty `user_argv` makes
+/// `parse_args` reject the CLI form with `user argv after '--'
+/// must be non-empty`, which is what G0a.3g's first CI run tripped
+/// on).
+fn build_init_policy(cwd: &Path, cmd: &str) -> SandboxInitPolicy {
     let landlock = LandlockProfile::default_for_cwd(cwd);
     // SAFETY: libc getters with no arguments; cannot fail.
     let uid = unsafe { libc::geteuid() };
@@ -97,7 +105,7 @@ fn build_init_policy(cwd: &Path) -> SandboxInitPolicy {
         target_uid: uid,
         target_gid: gid,
         require_fully_enforced: false,
-        user_argv: Vec::new(), // unused — wrapper gets argv via `--` tail
+        user_argv: vec!["sh".into(), "-c".into(), cmd.into()],
     }
 }
 
@@ -423,7 +431,7 @@ impl ToolExecutor for RealSandbox {
                             ));
                         }
                     };
-                    let policy = build_init_policy(&cwd);
+                    let policy = build_init_policy(&cwd, &cmd.command);
                     let policy_bytes = match policy.to_bytes() {
                         Ok(b) => b,
                         Err(e) => {
