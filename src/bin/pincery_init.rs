@@ -15,12 +15,16 @@
 //!   `setresgid -> setgroups(0, NULL) -> setresuid` with
 //!   `getresuid`/`getresgid` verification. Short-circuits when already
 //!   at target (host-test accommodation; does not fire inside bwrap).
-//! - G0a.3c (this slice): install seccomp filter via
+//! - G0a.3c (shipped): install seccomp filter via
 //!   `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &sock_fprog)`.
 //!   Verifies install via `/proc/self/status`'s `Seccomp:` line.
-//! - G0a.3d..h (pending): landlock (TSYNC) → FullyEnforced verify →
-//!   JSON fd-3 error channel → RealSandbox rewiring → default flip +
-//!   un-ignore landlock tests.
+//! - G0a.3d (this slice): install landlock filesystem ruleset via
+//!   `runtime::sandbox::landlock_layer::install_landlock`, placed
+//!   BEFORE seccomp so the filter does not need to allow the
+//!   `landlock_*` syscalls. Gate on at least one rx/rwx path.
+//! - G0a.3e..h (pending): FullyEnforced verify → JSON fd-3 error
+//!   channel → RealSandbox rewiring → default flip + un-ignore
+//!   landlock tests.
 //!
 //! ## Still out of scope until later sub-slices
 //!
@@ -402,28 +406,80 @@ mod linux {
         Ok(())
     }
 
+    /// Install the landlock filesystem ruleset derived from
+    /// `policy.landlock_rx_paths` + `policy.landlock_rwx_paths`.
+    /// Step 3 of the T-G0a-6 pipeline (placed BEFORE seccomp so
+    /// the seccomp filter does not need to allow the `landlock_*`
+    /// syscalls — landlock only restricts filesystem access, and
+    /// installing it before the seccomp layer means the filter
+    /// catches any post-landlock syscall regardless of fs outcome).
+    ///
+    /// ## Empty-policy short-circuit
+    ///
+    /// When both path lists are empty we log and skip. The parent
+    /// populates the lists only when `SandboxProfile.landlock = true`,
+    /// so empty lists mean "landlock layer not requested". G0a.3e's
+    /// FullyEnforced verify will refuse to accept empty lists when
+    /// `require_fully_enforced = true`.
+    ///
+    /// ## Why we reuse `landlock_layer::install_landlock`
+    ///
+    /// The existing function is already the single implementation
+    /// of the landlock apply path — it builds an `ABI::V1` ruleset,
+    /// adds each path as a `PathBeneath` rule (rx = read access,
+    /// rwx = all access), calls `restrict_self`, and rejects a
+    /// `NotEnforced` result. Duplicating that logic inside the
+    /// wrapper would be a pure copy-paste; the G0a fix is
+    /// architectural (install inside the sandbox, not in the
+    /// parent's `pre_exec`), not algorithmic.
+    ///
+    /// ## TSYNC note
+    ///
+    /// Readiness T-G0a-6 lists `LANDLOCK_RESTRICT_SELF_TSYNC` as
+    /// the intended flag. `landlock = "0.4"` exposes
+    /// `restrict_self()` with flags fixed at 0, and the wrapper
+    /// here is single-threaded (no threads exist until after
+    /// `execvp`), so TSYNC would be a no-op anyway — landlock
+    /// domains are already inherited across `execve` for the
+    /// calling task (kernel.org `userspace-api/landlock.html`
+    /// §"Inheritance"). If the wrapper ever grows a pre-exec
+    /// thread, a raw `syscall(SYS_landlock_restrict_self, fd,
+    /// LANDLOCK_RESTRICT_SELF_TSYNC)` shim must replace the crate
+    /// call.
+    fn apply_landlock(policy: &SandboxInitPolicy) -> Result<(), InitError> {
+        use open_pincery::runtime::sandbox::landlock_layer::{install_landlock, LandlockProfile};
+
+        if policy.landlock_rx_paths.is_empty() && policy.landlock_rwx_paths.is_empty() {
+            eprintln!("pincery-init: landlock skipped (no rx/rwx paths in policy)");
+            return Ok(());
+        }
+
+        let profile = LandlockProfile {
+            rx_paths: policy.landlock_rx_paths.clone(),
+            rwx_paths: policy.landlock_rwx_paths.clone(),
+        };
+
+        install_landlock(&profile).map_err(|e| InitError::ApplyPolicy(format!("landlock: {e}")))
+    }
+
     /// Apply every restriction in the order mandated by readiness
-    /// T-G0a-6. Slices G0a.3a+b+c ship steps 1, 2, and 3; subsequent
+    /// T-G0a-6. Slices G0a.3a+b+c+d ship steps 1–4; subsequent
     /// sub-slices fill in:
     ///
-    /// - G0a.3d: landlock_restrict_self with TSYNC (step 4).
     /// - G0a.3e: FullyEnforced verification (step 5).
     ///
     /// Order is load-bearing: seccomp MUST come after NO_NEW_PRIVS
     /// (unprivileged filter load), drop_privs MUST come before
-    /// landlock (so the ruleset applies to the unprivileged identity),
-    /// seccomp is placed after drop_privs so the new identity is the
-    /// one subject to the filter, and FullyEnforced verification MUST
-    /// come after both landlock and seccomp. Callers must not permute
-    /// this function's body.
+    /// landlock (so the ruleset applies to the unprivileged
+    /// identity), landlock MUST come before seccomp (so the filter
+    /// does not need to allow `landlock_*` syscalls), and
+    /// FullyEnforced verification MUST come after both landlock and
+    /// seccomp. Callers must not permute this function's body.
     fn apply_policy(policy: &SandboxInitPolicy) -> Result<(), InitError> {
         apply_no_new_privs()?;
         apply_drop_privs(policy)?;
+        apply_landlock(policy)?;
         apply_seccomp(policy)?;
-        // TODO(G0a.3d): landlock_restrict_self when either rx_paths
-        //   or rwx_paths is non-empty, using the existing
-        //   `runtime::sandbox::landlock_layer::install_landlock` once
-        //   it gains a TSYNC flag.
         verify_no_new_privs()?;
         // TODO(G0a.3e): if policy.require_fully_enforced, confirm
         //   the landlock RulesetStatus is FullyEnforced.

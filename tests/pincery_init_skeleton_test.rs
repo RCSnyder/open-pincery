@@ -11,11 +11,16 @@
 //!   `setresgid -> setgroups(0, NULL) -> setresuid`, short-circuiting
 //!   when already at target. Proved via stderr short-circuit log +
 //!   `id -u`/`id -g` inside the user program.
-//! - G0a.3c (this slice): install seccomp filter via
+//! - G0a.3c (shipped): install seccomp filter via
 //!   `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER)`. Proved via
 //!   `/proc/self/status`'s `Seccomp: 2` line + a misaligned-bytes
 //!   negative case.
-//! - G0a.3d..e (pending): landlock → FullyEnforced verification.
+//! - G0a.3d (this slice): install landlock filesystem ruleset via
+//!   `runtime::sandbox::landlock_layer::install_landlock`. Proved
+//!   by observing that a write to a path OUTSIDE
+//!   `policy.landlock_rwx_paths` fails while a write INSIDE
+//!   succeeds.
+//! - G0a.3e (pending): FullyEnforced verification.
 //!
 //! Linux-only: relies on `memfd_create(2)` + fd inheritance via
 //! `pre_exec(dup2)`. Windows/macOS compile this file as empty.
@@ -535,5 +540,123 @@ fn skeleton_rejects_missing_policy_fd_flag() {
     assert!(
         stderr.contains("usage error") || stderr.contains("--policy-fd"),
         "expected usage error on stderr, got:\n{stderr}",
+    );
+}
+
+/// Slice G0a.3d proof: before exec, the wrapper must install a
+/// landlock filesystem ruleset derived from `policy.landlock_rx_paths`
+/// + `policy.landlock_rwx_paths`. After install, the forked user
+/// program inherits the landlock domain (kernel
+/// `userspace-api/landlock.html` §"Inheritance"), so writes to paths
+/// OUTSIDE the rwx list must EACCES.
+///
+/// We assert both sides of the ruleset:
+/// 1. `touch <workspace>/allowed` succeeds (workspace is in rwx).
+/// 2. `touch /tmp/pincery-g0a3d-forbidden-<pid>` fails (/tmp is NOT
+///    in rwx — only the specific workspace path is).
+///
+/// Why running the wrapper directly on the host is a valid proof:
+/// landlock is a kernel LSM that restricts any task with an active
+/// domain. We don't need bwrap + namespaces to prove enforcement —
+/// we just need a kernel >= 5.13 (all supported CI runners and
+/// modern Docker Desktop images satisfy this). The real bwrap path
+/// (G0a.3g) stitches this wrapper into the `--ro-bind` + memfd
+/// plumbing; the ruleset semantics proved here are unchanged.
+#[test]
+fn skeleton_installs_landlock_restricts_fs_before_exec() {
+    if !PathBuf::from("/bin/sh").exists() {
+        eprintln!("skipping: /bin/sh not present on this host");
+        return;
+    }
+    // Kernel must support landlock. On unsupported kernels
+    // `install_landlock` returns Err and the wrapper fails with
+    // exit 125 — that's the correct fail-closed behavior, but the
+    // test's expected observable is successful exit + blocked write,
+    // so skip cleanly.
+    if !open_pincery::runtime::sandbox::landlock_layer::landlock_supported() {
+        eprintln!("skipping: landlock not supported by this kernel");
+        return;
+    }
+
+    let workspace = tempfile::tempdir().expect("create workspace tempdir");
+    let forbidden =
+        std::env::temp_dir().join(format!("pincery-g0a3d-forbidden-{}", std::process::id()));
+    // Scrub any stale leftover from a previous run.
+    let _ = std::fs::remove_file(&forbidden);
+
+    // Allowed paths for the user program: standard rootfs rx plus
+    // /proc as rwx (apply_seccomp reads /proc/self/status after
+    // landlock applies) plus the workspace. /sys is rx so the
+    // C library's various probe paths don't trip an unrelated
+    // failure.
+    let mut policy = sample_policy(vec![]);
+    policy.landlock_rx_paths = vec![
+        PathBuf::from("/usr"),
+        PathBuf::from("/bin"),
+        PathBuf::from("/lib"),
+        PathBuf::from("/lib64"),
+        PathBuf::from("/etc"),
+        PathBuf::from("/sys"),
+    ];
+    policy.landlock_rwx_paths = vec![PathBuf::from("/proc"), workspace.path().to_path_buf()];
+
+    // Shell script: attempt write inside rwx, then write outside
+    // rwx. Print which half blocked. We use `||` so the second
+    // touch's non-zero exit does not fail the whole script —
+    // landlock returns EACCES, which sh surfaces as exit 1, which
+    // the `||` branch catches.
+    let script = format!(
+        "touch {workspace}/allowed && ( touch {forbidden} 2>/dev/null && echo LEAKED || echo BLOCKED )",
+        workspace = workspace.path().display(),
+        forbidden = forbidden.display(),
+    );
+    policy.user_argv = vec!["/bin/sh".to_string(), "-c".to_string(), script.clone()];
+
+    let bytes = policy.to_bytes().expect("serialize policy");
+    let policy_fd = make_policy_memfd(&bytes);
+
+    let mut cmd = Command::new(pincery_init_bin());
+    cmd.args(["--policy-fd", "3", "--", "/bin/sh", "-c", &script])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::dup2(policy_fd, 3) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    let output = cmd.output().expect("spawn pincery-init");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "pincery-init failed: status={:?} stdout={stdout} stderr={stderr}",
+        output.status,
+    );
+    assert!(
+        stdout.contains("BLOCKED"),
+        "expected landlock to block write to {} (which is outside the \
+         rwx_paths set); stdout={stdout} stderr={stderr}",
+        forbidden.display(),
+    );
+    assert!(
+        !stdout.contains("LEAKED"),
+        "write to forbidden path succeeded — landlock did NOT enforce; \
+         stdout={stdout} stderr={stderr}",
+    );
+    assert!(
+        !forbidden.exists(),
+        "forbidden path {} exists on disk; landlock did not block",
+        forbidden.display(),
+    );
+    assert!(
+        workspace.path().join("allowed").exists(),
+        "write to rwx workspace {} failed — rwx rule not granting \
+         access; stderr={stderr}",
+        workspace.path().display(),
     );
 }
