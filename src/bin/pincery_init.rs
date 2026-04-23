@@ -184,7 +184,7 @@ mod linux {
     /// stderr+exit 125 is the always-on fallback. Wrapping the raw
     /// fd in `File` takes ownership and closes it on drop, which is
     /// the correct lifetime (the wrapper is about to `_exit`).
-    fn write_error_channel(error_fd: Option<i32>, err: &InitError) {
+    pub fn write_error_channel(error_fd: Option<i32>, err: &InitError) {
         let Some(fd) = error_fd else { return };
         // SAFETY: parse_args validated fd >= 0. The parent placed
         // this fd in the child; we own it from here.
