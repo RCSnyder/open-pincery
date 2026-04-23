@@ -25,8 +25,8 @@
 //!
 //! ## What this module ships
 //!
-//! A single struct `SandboxInitPolicy` that is bincode-serialized by
-//! the parent and bincode-deserialized by the wrapper. This module is
+//! A single struct `SandboxInitPolicy` that is serialized by
+//! the parent and deserialized by the wrapper. This module is
 //! the **only** cross-binary type boundary; everything else stays
 //! private to each binary. Because both binaries ship from the same
 //! git SHA, we do not need a stable schema or versioning.
@@ -34,7 +34,7 @@
 //! ### Slice G0a.1 (this slice)
 //!
 //! - Struct definition with serde derives.
-//! - Bincode round-trip unit test proving
+//! - JSON round-trip unit test proving
 //!   `deserialize(serialize(x)) == x`.
 //! - No wrapper binary, no bwrap wiring. Those are G0a.2 and G0a.3.
 //!
@@ -45,6 +45,19 @@
 //! - AC-87 / Slice G0e: `ipc_scopes` bitmap (Landlock ABI >= 6).
 //! - AC-88 / Slice G0f: `kernel_audit_log` toggle for
 //!   `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON`.
+
+//! ## Wire format
+//!
+//! Serialized as JSON via `serde_json`. Bincode would be more
+//! compact, but the v1 line is flagged unmaintained by
+//! RUSTSEC-2025-0141 and the v2 rewrite is a breaking API change
+//! that would add a new direct dependency solely for this one IPC
+//! boundary. `serde_json` is already a transitive dep (axum/utoipa)
+//! and the payload is bounded at well under 1 KB in practice, so
+//! the text-format cost is irrelevant. An operator inspecting a
+//! failing sandbox's core dump also gets a human-readable policy
+//! for free. The `seccomp_bpf` byte blob is encoded as a JSON array
+//! of small integers — verbose but correct and lossless.
 
 use std::path::PathBuf;
 
@@ -96,10 +109,11 @@ pub struct SandboxInitPolicy {
 /// a JSON line on fd 3 and `_exit(125)`; there is no recovery path.
 #[derive(Debug)]
 pub enum InitPolicyError {
-    /// bincode encode/decode failed. Message is the bincode error,
-    /// preserved for operator debugging (it ends up in the kernel
-    /// audit log via `landlock_denied` once AC-88 ships, or on
-    /// stderr of the failing bwrap invocation in the meantime).
+    /// Serialization or deserialization failed. Message is the
+    /// underlying serde error, preserved for operator debugging (it
+    /// ends up in the kernel audit log via `landlock_denied` once
+    /// AC-88 ships, or on stderr of the failing bwrap invocation in
+    /// the meantime).
     Codec(String),
 }
 
@@ -115,10 +129,12 @@ impl std::error::Error for InitPolicyError {}
 
 impl SandboxInitPolicy {
     /// Serialize to the exact bytes that will be written to the IPC
-    /// memfd. Uses bincode's default configuration (little-endian,
-    /// fixed-int encoding) which matches what `from_bytes` expects.
+    /// memfd. Uses `serde_json` (see module docs for rationale). The
+    /// output is a single JSON object terminated by an EOF — no
+    /// trailing newline, no framing. `from_bytes` is its exact
+    /// inverse.
     pub fn to_bytes(&self) -> Result<Vec<u8>, InitPolicyError> {
-        bincode::serialize(self).map_err(|e| InitPolicyError::Codec(e.to_string()))
+        serde_json::to_vec(self).map_err(|e| InitPolicyError::Codec(e.to_string()))
     }
 
     /// Deserialize bytes read from the IPC memfd. The wrapper calls
@@ -126,7 +142,7 @@ impl SandboxInitPolicy {
     /// application — the wrapper writes an error JSON to fd 3 and
     /// `_exit(125)`.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, InitPolicyError> {
-        bincode::deserialize(bytes).map_err(|e| InitPolicyError::Codec(e.to_string()))
+        serde_json::from_slice(bytes).map_err(|e| InitPolicyError::Codec(e.to_string()))
     }
 }
 
@@ -163,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn bincode_roundtrip_preserves_every_field() {
+    fn json_roundtrip_preserves_every_field() {
         let original = sample_policy();
         let bytes = original.to_bytes().expect("serialize should succeed");
         let restored = SandboxInitPolicy::from_bytes(&bytes).expect("deserialize should succeed");
@@ -188,7 +204,8 @@ mod tests {
 
     #[test]
     fn malformed_bytes_return_codec_error() {
-        let garbage: &[u8] = &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
+        // Arbitrary non-JSON bytes.
+        let garbage: &[u8] = &[0xff, 0xfe, 0xfd, 0xfc, 0xfb];
         let result = SandboxInitPolicy::from_bytes(garbage);
         assert!(
             matches!(result, Err(InitPolicyError::Codec(_))),
@@ -200,9 +217,9 @@ mod tests {
     fn truncated_bytes_return_codec_error() {
         let original = sample_policy();
         let bytes = original.to_bytes().unwrap();
-        // Chop off the last third of the encoded buffer — bincode
-        // will hit EOF mid-field and error.
-        let truncated = &bytes[..bytes.len() * 2 / 3];
+        // Chop off the closing brace — serde_json will report
+        // unexpected EOF mid-object.
+        let truncated = &bytes[..bytes.len() - 10];
         let result = SandboxInitPolicy::from_bytes(truncated);
         assert!(matches!(result, Err(InitPolicyError::Codec(_))));
     }
