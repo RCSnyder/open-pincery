@@ -43,6 +43,14 @@ async-trait = "0.1"
 tempfile = "3"
 aes-gcm = "0.10"
 rpassword = "7"
+# AC-83 / Slice G0a.1: SandboxInitPolicy IPC between the parent
+# (pincery-server) and the in-sandbox `pincery-init` exec wrapper.
+# Bincode is a small, deterministic, no-schema format well-suited
+# to a single-producer single-consumer memfd payload that will never
+# cross a version boundary (wrapper + server ship from the same
+# git SHA). Pinned to the v1 line — v2 is a rewrite with a different
+# API surface and is not needed here.
+bincode = "1.3"
 # AC-44 (v8): OpenAPI 3.1 spec generation via derive macros.
 # `axum_extras` unlocks type-driven path-param extraction; `yaml` is
 # used by the /openapi.yaml handler.

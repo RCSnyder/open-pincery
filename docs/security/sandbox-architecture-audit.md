@@ -20,7 +20,7 @@ The current sandbox installs Landlock on the **parent process** via `Command::pr
 
 Combined: bwrap inherits the parent's Landlock domain, then EPERMs on its very first `mount(NULL, "/", MS_SLAVE | MS_REC, NULL)` call because Landlock V1 unconditionally denies `mount(2)` to any sandboxed thread. **Removing `/` from the allowlist did not fix it because the issue is `mount(2)` denial, not path-resolution denial.**
 
-The fix is a small **`pincery-init` exec wrapper** that runs *inside* the bwrap sandbox, applies Landlock + seccomp + capability drop *after* bwrap completes mount setup, then `execve`s the user command. This is the canonical pattern used by `flatpak`, `firejail`, and the official rust-landlock `sandboxer.rs` example. This document also identifies **four additional defects** in the current architecture that must be addressed for an industry-leading agentic-OS posture.
+The fix is a small **`pincery-init` exec wrapper** that runs _inside_ the bwrap sandbox, applies Landlock + seccomp + capability drop _after_ bwrap completes mount setup, then `execve`s the user command. This is the canonical pattern used by `flatpak`, `firejail`, and the official rust-landlock `sandboxer.rs` example. This document also identifies **four additional defects** in the current architecture that must be addressed for an industry-leading agentic-OS posture.
 
 ---
 
@@ -28,14 +28,14 @@ The fix is a small **`pincery-init` exec wrapper** that runs *inside* the bwrap 
 
 ### 1.1 Defense layers (claimed in code comments)
 
-| # | Layer | Mechanism | Status |
-|---|-------|-----------|--------|
-| 1 | Mount/PID/IPC/UTS/cgroup namespace isolation | `bwrap --unshare-{user,pid,ipc,uts,cgroup-try,net}` | ✅ implemented |
-| 2 | Resource quota | cgroup v2 `pincery-<uuid>` (memory/pids/cpu) attached post-spawn | ✅ implemented |
-| 3 | Syscall filtering | seccomp-bpf **denylist** (11 syscalls) injected via `--seccomp <fd>` | ⚠️ implemented but denylist (anti-pattern) |
-| 4 | Path-based MAC | Landlock V1 PathBeneath rules installed in parent `pre_exec` | ❌ broken — see §2 |
-| 5 | UID/GID/capability drop | not implemented | ❌ missing |
-| 6 | L7 egress allowlist (slirp4netns + envoy/HAProxy) | not implemented | ❌ missing |
+| #   | Layer                                             | Mechanism                                                            | Status                                     |
+| --- | ------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------ |
+| 1   | Mount/PID/IPC/UTS/cgroup namespace isolation      | `bwrap --unshare-{user,pid,ipc,uts,cgroup-try,net}`                  | ✅ implemented                             |
+| 2   | Resource quota                                    | cgroup v2 `pincery-<uuid>` (memory/pids/cpu) attached post-spawn     | ✅ implemented                             |
+| 3   | Syscall filtering                                 | seccomp-bpf **denylist** (11 syscalls) injected via `--seccomp <fd>` | ⚠️ implemented but denylist (anti-pattern) |
+| 4   | Path-based MAC                                    | Landlock V1 PathBeneath rules installed in parent `pre_exec`         | ❌ broken — see §2                         |
+| 5   | UID/GID/capability drop                           | not implemented                                                      | ❌ missing                                 |
+| 6   | L7 egress allowlist (slirp4netns + envoy/HAProxy) | not implemented                                                      | ❌ missing                                 |
 
 ### 1.2 Default profile (`src/runtime/sandbox/mod.rs`)
 
@@ -112,9 +112,10 @@ Commit `85b0bd7` added `/` to `ROOTFS_RX_PATHS`. CI initially passed with the ca
 ### 2.5 Confirmation
 
 From the `landlock_restrict_self(2)` man page:
+
 > In order to enforce a ruleset, either the caller must have `CAP_SYS_ADMIN` in its user namespace, or the thread must already have the `no_new_privs` bit set.
 
-We set `NO_NEW_PRIVS`. That is necessary for `landlock_restrict_self` to succeed. It is *not* the cause of the bwrap mount EPERM (NO_NEW_PRIVS does not gate `mount(2)` directly — it gates suid escalation and `execve` setid behavior).
+We set `NO_NEW_PRIVS`. That is necessary for `landlock_restrict_self` to succeed. It is _not_ the cause of the bwrap mount EPERM (NO_NEW_PRIVS does not gate `mount(2)` directly — it gates suid escalation and `execve` setid behavior).
 
 ---
 
@@ -127,22 +128,25 @@ A principal-engineer review surfaces five further issues. Each is rated by sever
 **Code:** `src/runtime/sandbox/seccomp.rs::denied_syscalls()` blocks 11 syscalls; `mismatch_action=Allow`.
 
 **Why it's a critical defect:**
+
 - The syscall surface on x86_64 is ~360 syscalls. Denying 11 leaves ~349 attack-surface entries.
 - Every kernel CVE in the last 5 years (e.g., CVE-2022-0185 fsconfig, CVE-2022-2588 cls_route, CVE-2023-0386 overlayfs, CVE-2024-1086 nf_tables) was exploitable via syscalls **not** in our denylist.
 - The code itself acknowledges this: `// FIXME: switch to allowlist in next sub-slice`.
 
 **Authoritative guidance:** Docker's default seccomp profile and systemd's `SystemCallFilter=` both use **allowlists**. Chrome's sandbox uses an allowlist. Bottlerocket, gVisor, Kata, Firecracker all use allowlists. Denylist seccomp is universally regarded as security theater.
 
-**Reference:** [`seccomp(2)` man page](https://man7.org/linux/man-pages/man2/seccomp.2.html) §NOTES: "It is recommended to apply seccomp filters in conjunction with no_new_privs, and only to syscalls that an application is *known* to need."
+**Reference:** [`seccomp(2)` man page](https://man7.org/linux/man-pages/man2/seccomp.2.html) §NOTES: "It is recommended to apply seccomp filters in conjunction with no_new_privs, and only to syscalls that an application is _known_ to need."
 
 ### 3.2 [HIGH] `RulesetStatus::PartiallyEnforced` is silently accepted
 
 **Code:** `src/runtime/sandbox/landlock.rs` accepts `FullyEnforced | PartiallyEnforced`, errors only on `NotEnforced`.
 
 **Why it matters:** From the rust-landlock crate docs ([`docs.rs/landlock`](https://docs.rs/landlock/latest/landlock/) §"Test strategy"):
+
 > Developers should test their sandboxed applications with a kernel that supports all requested Landlock features and check that `restrict_self()` returns a status matching `Ok(RestrictionStatus { ruleset: RulesetStatus::FullyEnforced, no_new_privs: true })`.
 
 `PartiallyEnforced` means the running kernel does not support some access right we asked for (e.g., `LANDLOCK_ACCESS_FS_REFER` on ABI < 2, `TRUNCATE` on ABI < 3, `IOCTL_DEV` on ABI < 5). Silently degrading is **fail-open** for the missing axis. For an "industry leading agentic OS" we need either:
+
 - (a) `HardRequirement` mode: refuse to start if ABI < 5; surface it as a deployment requirement.
 - (b) Tier the requirement: `FullyEnforced` for prod, `PartiallyEnforced` only with explicit operator opt-in + structured warning.
 
@@ -151,6 +155,7 @@ A principal-engineer review surfaces five further issues. Each is rated by sever
 **Code:** `bwrap.rs::build_bwrap_args` does not pass `--uid`, `--gid`, or `--cap-drop`.
 
 **Why it matters:** Inside the bwrap user-namespace, the sandboxed process starts as `uid=real_uid` (typically the pincery service account) with **all 39 capabilities effective in the new userns**. While userns capabilities don't translate to host capabilities, several attack paths exist:
+
 - `CAP_NET_RAW` in the new userns + `slirp4netns` egress would allow ARP/ICMP spoofing inside the sandbox network if egress ever materializes.
 - `CAP_SYS_ADMIN` in the new userns enables further nested namespace creation, which can be a kernel attack surface (CVE-2022-0185, CVE-2023-32233).
 - `CAP_SYS_PTRACE` in-userns plus a shared PID namespace would be exploitable; we already isolate PID, but the cap is still present.
@@ -177,7 +182,7 @@ ABI ≥ 7 supports `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON` which causes the ker
 
 ### 4.1 Design principles
 
-1. **Restrictions installed by the *innermost* trustworthy code.** Bwrap builds the namespace; a tiny pincery-init wrapper inside the sandbox locks it down; the user command runs under those locks.
+1. **Restrictions installed by the _innermost_ trustworthy code.** Bwrap builds the namespace; a tiny pincery-init wrapper inside the sandbox locks it down; the user command runs under those locks.
 2. **Allowlist, not denylist, for syscalls.** Generated from a profile per agent/tool class.
 3. **Fully enforced or refuse to start.** No silent degradation.
 4. **Explicit kernel ABI floor.** Documented and asserted at server boot, not per-call.
@@ -229,6 +234,7 @@ Replace `denied_syscalls()` with profile-driven allowlist. Recommended starting 
 Network syscalls allowed only when `profile.deny_net == false`: `socket, bind, listen, accept4, connect, getsockname, getpeername, sendto, recvfrom, sendmsg, recvmsg, sendmmsg, recvmmsg, shutdown, getsockopt, setsockopt`.
 
 Hard-deny via `SECCOMP_RET_KILL_PROCESS` (not `KILL_THREAD`, not `ERRNO`):
+
 - `clone`/`clone3` with `CLONE_NEWUSER|CLONE_NEWNS` (user-arg filtering, BPF cmpand on flags).
 - `bpf, perf_event_open, kexec_*, finit_module, init_module, delete_module, mount, umount2, pivot_root, swapon, swapoff, reboot, settimeofday, adjtimex, clock_settime, ptrace, process_vm_{readv,writev}, kcmp, syslog, acct, quotactl, lookup_dcookie, sysfs, _sysctl, nfsservctl, vhangup, modify_ldt, vm86old, vm86, create_module, get_kernel_syms, query_module, uselib, ustat, set_mempolicy, mbind, get_mempolicy, migrate_pages, move_pages, set_thread_area, get_thread_area, io_setup, io_destroy, io_submit, io_cancel, io_getevents, io_uring_*, name_to_handle_at, open_by_handle_at, fanotify_init, fanotify_mark`.
 
@@ -274,9 +280,11 @@ if status.ruleset != RulesetStatus::FullyEnforced || !status.no_new_privs {
 ### 4.7 Layer 5 — capability drop & UID change
 
 Achieved entirely through bwrap flags, no extra code:
+
 ```
 --uid 65534 --gid 65534 --cap-drop ALL --unshare-user
 ```
+
 plus pincery-init double-checks: `setresuid(65534, 65534, 65534); setresgid(65534, 65534, 65534); setgroups(0, NULL); capset(empty)` — defense in depth.
 
 ### 4.8 Layer 6 — egress (deferred to a later slice; design noted)
@@ -287,21 +295,21 @@ When network is enabled, attach the sandbox to a `slirp4netns` instance that its
 
 ## 5. Threat model & mitigation matrix
 
-| Threat | Today | Proposed | Notes |
-|--------|-------|----------|-------|
-| Container/sandbox escape via `mount` syscall | denylist blocks (Allow on miss is concerning) | seccomp KILL_PROCESS on mount | hardened |
-| Kernel exploit via untracked syscall | exposed (denylist) | minimized (allowlist) | the biggest delta |
-| Filesystem path escape (`../`, symlinks) | landlock prevents, but only PartiallyEnforced accepted | landlock FullyEnforced or refuse | hardened |
-| Privilege escalation via setuid binary | NO_NEW_PRIVS set | NO_NEW_PRIVS set + uid=nobody + cap-drop | hardened |
-| User-namespace nesting (CVE-2023-32233 class) | possible (CAP_SYS_ADMIN in userns) | seccomp blocks `clone(CLONE_NEWUSER)` | hardened |
-| Abstract UNIX socket → host D-Bus | not blocked | `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET` (ABI 6) | hardened |
-| Signal injection to host PID | partial (PID ns) | + `LANDLOCK_SCOPE_SIGNAL` | hardened |
-| Resource exhaustion | cgroup memory/pids/cpu | unchanged | already good |
-| ptrace of host processes | seccomp blocks ptrace | unchanged | already good |
-| BPF program load | seccomp blocks bpf | unchanged | already good |
-| io_uring (CVE-2024-0582 class) | NOT blocked today | seccomp KILL_PROCESS on io_uring_* | new |
-| Network egress to arbitrary host | bwrap --unshare-net (full deny) | slirp4netns + L7 allowlist when needed | future slice |
-| Audit/forensics ("what did the agent try?") | none | LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON → kernel audit → event log | new |
+| Threat                                        | Today                                                  | Proposed                                                          | Notes             |
+| --------------------------------------------- | ------------------------------------------------------ | ----------------------------------------------------------------- | ----------------- |
+| Container/sandbox escape via `mount` syscall  | denylist blocks (Allow on miss is concerning)          | seccomp KILL_PROCESS on mount                                     | hardened          |
+| Kernel exploit via untracked syscall          | exposed (denylist)                                     | minimized (allowlist)                                             | the biggest delta |
+| Filesystem path escape (`../`, symlinks)      | landlock prevents, but only PartiallyEnforced accepted | landlock FullyEnforced or refuse                                  | hardened          |
+| Privilege escalation via setuid binary        | NO_NEW_PRIVS set                                       | NO_NEW_PRIVS set + uid=nobody + cap-drop                          | hardened          |
+| User-namespace nesting (CVE-2023-32233 class) | possible (CAP_SYS_ADMIN in userns)                     | seccomp blocks `clone(CLONE_NEWUSER)`                             | hardened          |
+| Abstract UNIX socket → host D-Bus             | not blocked                                            | `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET` (ABI 6)                     | hardened          |
+| Signal injection to host PID                  | partial (PID ns)                                       | + `LANDLOCK_SCOPE_SIGNAL`                                         | hardened          |
+| Resource exhaustion                           | cgroup memory/pids/cpu                                 | unchanged                                                         | already good      |
+| ptrace of host processes                      | seccomp blocks ptrace                                  | unchanged                                                         | already good      |
+| BPF program load                              | seccomp blocks bpf                                     | unchanged                                                         | already good      |
+| io_uring (CVE-2024-0582 class)                | NOT blocked today                                      | seccomp KILL*PROCESS on io_uring*\*                               | new               |
+| Network egress to arbitrary host              | bwrap --unshare-net (full deny)                        | slirp4netns + L7 allowlist when needed                            | future slice      |
+| Audit/forensics ("what did the agent try?")   | none                                                   | LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON → kernel audit → event log | new               |
 
 ---
 

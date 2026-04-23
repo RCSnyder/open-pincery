@@ -30,6 +30,7 @@
 
 pub mod bwrap;
 pub mod cgroup;
+pub mod init_policy;
 #[path = "landlock.rs"]
 pub mod landlock_layer;
 pub mod netns;

@@ -41,7 +41,7 @@ Non-negotiable statements that must be true in the shipped Slice G0a:
   a new shared module (`src/runtime/sandbox/init_policy.rs`) and is the
   only type used to cross the parent→wrapper IPC boundary. Shape:
   `{ landlock_rules: LandlockProfile, seccomp_bpf: Vec<u8>, target_uid: u32,
-  target_gid: u32, require_fully_enforced: bool, user_argv: Vec<OsString> }`.
+target_gid: u32, require_fully_enforced: bool, user_argv: Vec<OsString> }`.
 - **T-G0a-5** Policy IPC uses a memfd (`memfd_create("pincery-init-policy", 0)`,
   **not** CLOEXEC). Parent writes the bincode bytes, `lseek(0)`, passes the
   fd as `--policy-fd 3` in the user argv via bwrap fd inheritance. Wrapper
@@ -52,7 +52,7 @@ Non-negotiable statements that must be true in the shipped Slice G0a:
   → (landlock_restrict_self with LANDLOCK_RESTRICT_SELF_TSYNC) →
   verify `RestrictionStatus::FullyEnforced && no_new_privs == 1` → execvp.
   Any non-zero return from any step: write JSON `{"stage":"...", "errno":N,
-  "message":"..."}` to fd 3, `_exit(125)`.
+"message":"..."}` to fd 3, `_exit(125)`.
 - **T-G0a-7** When AC-84's preflight lands, the wrapper also asserts the
   kernel ABI floor at startup. In G0a the wrapper accepts any ABI ≥ 1
   (because the interim production default is `landlock=false`, and the
@@ -61,7 +61,7 @@ Non-negotiable statements that must be true in the shipped Slice G0a:
 - **T-G0a-8** Slice G0a does **not** implement AC-84, AC-85, AC-86, AC-87,
   AC-88, or the seccomp allowlist rewrite. Each is its own slice. G0a only
   proves the architectural substrate (wrapper + IPC + in-sandbox install
-  + fail-closed exit 125) is sound.
+  - fail-closed exit 125) is sound.
 
 ## Key Links — AC → Design → Test → Proof
 
@@ -76,9 +76,9 @@ Non-negotiable statements that must be true in the shipped Slice G0a:
 
 ## Acceptance Criteria Coverage (G0a only)
 
-| AC      | Planned Test                                          | Planned Runtime Proof                                                        |
-| ------- | ----------------------------------------------------- | ---------------------------------------------------------------------------- |
-| AC-83   | `tests/pincery_init_test.rs` (4 cases above)          | Devshell: bwrap → pincery-init → user cmd, with induced failure showing 125. |
+| AC    | Planned Test                                 | Planned Runtime Proof                                                        |
+| ----- | -------------------------------------------- | ---------------------------------------------------------------------------- |
+| AC-83 | `tests/pincery_init_test.rs` (4 cases above) | Devshell: bwrap → pincery-init → user cmd, with induced failure showing 125. |
 
 ## Scope Reduction Risks
 
