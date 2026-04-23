@@ -5,11 +5,14 @@
 //! Coverage by slice:
 //!
 //! - G0a.2 (shipped): parse + log + exec, no restrictions.
-//! - G0a.3a (this slice): `prctl(PR_SET_NO_NEW_PRIVS, 1)` before exec
+//! - G0a.3a (shipped): `prctl(PR_SET_NO_NEW_PRIVS, 1)` before exec
 //!   — proved via `/proc/self/status`.
-//! - G0a.3b..e (pending): setres*id → seccomp → landlock →
-//!   FullyEnforced verification. Each sub-slice adds one more case
-//!   alongside the three below.
+//! - G0a.3b (this slice): drop uid/gid via
+//!   `setresgid -> setgroups(0, NULL) -> setresuid`, short-circuiting
+//!   when already at target. Proved via stderr short-circuit log +
+//!   `id -u`/`id -g` inside the user program.
+//! - G0a.3c..e (pending): seccomp → landlock →
+//!   FullyEnforced verification.
 //!
 //! Linux-only: relies on `memfd_create(2)` + fd inheritance via
 //! `pre_exec(dup2)`. Windows/macOS compile this file as empty.
@@ -66,13 +69,24 @@ fn make_policy_memfd(bytes: &[u8]) -> RawFd {
 
 /// Build a minimal but realistic policy payload. G0a.2 doesn't
 /// interpret any of these fields; it just round-trips the bytes.
+///
+/// Starting in G0a.3b the wrapper actively drops privileges to
+/// `target_uid`/`target_gid`. Host integration tests cannot obtain
+/// `CAP_SETUID`, so we set the target to the **current** euid/egid.
+/// The wrapper's `apply_drop_privs` short-circuits when already at
+/// target, which exercises the full code path without requiring
+/// privileges. The real bwrap path (G0a.3g) runs the wrapper as
+/// namespace-root and drops to an unprivileged uid there.
 fn sample_policy(user_argv: Vec<String>) -> SandboxInitPolicy {
+    // SAFETY: pure getters.
+    let cur_uid = unsafe { libc::geteuid() };
+    let cur_gid = unsafe { libc::getegid() };
     SandboxInitPolicy {
         landlock_rx_paths: vec![PathBuf::from("/usr"), PathBuf::from("/bin")],
         landlock_rwx_paths: vec![PathBuf::from("/tmp")],
         seccomp_bpf: vec![0x06, 0x00, 0x00, 0x00],
-        target_uid: 65534,
-        target_gid: 65534,
+        target_uid: cur_uid,
+        target_gid: cur_gid,
         require_fully_enforced: false,
         user_argv,
     }
@@ -146,9 +160,12 @@ fn skeleton_parses_policy_then_execs_user_argv() {
         stderr.contains("rx_paths=2"),
         "summary should reflect the 2 rx paths we supplied, got:\n{stderr}",
     );
+    // SAFETY: pure getter.
+    let cur_uid = unsafe { libc::geteuid() };
     assert!(
-        stderr.contains("target_uid=65534"),
-        "summary should reflect target_uid=65534, got:\n{stderr}",
+        stderr.contains(&format!("target_uid={cur_uid}")),
+        "summary should reflect target_uid={cur_uid} (matches current \
+         euid for host-test drop short-circuit), got:\n{stderr}",
     );
 }
 
@@ -265,6 +282,86 @@ fn skeleton_applies_no_new_privs_before_exec() {
         !stdout.contains("NoNewPrivs:\t0") && !stdout.contains("NoNewPrivs: 0"),
         "NoNewPrivs is 0 — prctl(PR_SET_NO_NEW_PRIVS) did not take effect before exec; \
          stdout:\n{stdout}",
+    );
+}
+
+/// Slice G0a.3b proof: before exec, the wrapper must drop real/
+/// effective/saved uid+gid to `policy.target_uid`/`policy.target_gid`
+/// via `setresgid -> setgroups(0, NULL) -> setresuid`. Host tests
+/// cannot obtain `CAP_SETUID`, so `sample_policy` uses the current
+/// euid/egid and the wrapper short-circuits. We assert two things:
+///
+/// 1. The short-circuit log line appears on stderr (proves the code
+///    path ran and saw the matching target).
+/// 2. `id -u` / `id -g` inside the user program report the expected
+///    uid/gid (proves the wrapper did NOT accidentally change them).
+///
+/// The bwrap-path proof (actually dropping from namespace-root to
+/// an unprivileged uid) lands in the G0a.3g integration.
+#[test]
+fn skeleton_short_circuits_drop_when_already_at_target() {
+    if !PathBuf::from("/bin/sh").exists() {
+        eprintln!("skipping: /bin/sh not present on this host");
+        return;
+    }
+
+    // SAFETY: pure getters.
+    let cur_uid = unsafe { libc::geteuid() };
+    let cur_gid = unsafe { libc::getegid() };
+
+    let user_argv = vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        "printf '%s %s' \"$(id -u)\" \"$(id -g)\"".to_string(),
+    ];
+    let policy = sample_policy(user_argv);
+    let bytes = policy.to_bytes().expect("serialize policy");
+
+    let policy_fd = make_policy_memfd(&bytes);
+
+    let mut cmd = Command::new(pincery_init_bin());
+    cmd.args([
+        "--policy-fd",
+        "3",
+        "--",
+        "/bin/sh",
+        "-c",
+        "printf '%s %s' \"$(id -u)\" \"$(id -g)\"",
+    ])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::dup2(policy_fd, 3) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    let output = cmd.output().expect("spawn pincery-init");
+    assert!(
+        output.status.success(),
+        "pincery-init failed: status={:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("drop_privs short-circuit"),
+        "expected drop_privs short-circuit log line (target matches \
+         current euid/egid); stderr:\n{stderr}",
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let expected = format!("{cur_uid} {cur_gid}");
+    assert_eq!(
+        stdout.trim(),
+        expected,
+        "user program's id output should match current euid/egid (the \
+         wrapper short-circuited the drop); got stdout={stdout:?} \
+         stderr={stderr}",
     );
 }
 

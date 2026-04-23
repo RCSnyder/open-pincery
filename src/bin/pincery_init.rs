@@ -1,29 +1,30 @@
-//! AC-83 / Slice G0a.2: `pincery-init` exec wrapper — skeleton.
+//! AC-83: `pincery-init` exec wrapper.
 //!
 //! This binary runs **inside** the bwrap sandbox after mount/namespace
 //! setup is complete. It reads a serialized [`SandboxInitPolicy`] from
-//! an inherited file descriptor, then `execvp`s the user's real argv.
+//! an inherited file descriptor, applies every restriction in the
+//! mandated order (readiness T-G0a-6), then `execvp`s the user's real
+//! argv.
 //!
-//! ## Slice scope (G0a.2)
+//! ## Coverage by slice
 //!
-//! This slice ships the skeleton only:
+//! - G0a.2 (shipped): argv parse, policy read, decode, summary log,
+//!   `execvp`. No restrictions.
+//! - G0a.3a (shipped): `prctl(PR_SET_NO_NEW_PRIVS, 1)` + verify.
+//! - G0a.3b (this slice): drop r/e/s uid+gid via
+//!   `setresgid -> setgroups(0, NULL) -> setresuid` with
+//!   `getresuid`/`getresgid` verification. Short-circuits when already
+//!   at target (host-test accommodation; does not fire inside bwrap).
+//! - G0a.3c..h (pending): seccomp → landlock (TSYNC) → FullyEnforced
+//!   verify → JSON fd-3 error channel → RealSandbox rewiring → default
+//!   flip + un-ignore landlock tests.
 //!
-//! 1. Parse argv: `pincery-init --policy-fd <N> -- <user_argv...>`.
-//! 2. Read the policy from fd N to EOF.
-//! 3. Deserialize into [`SandboxInitPolicy`] (log a summary to stderr
-//!    so operators and integration tests can observe the parse).
-//! 4. `execvp` the user argv. No restrictions are installed yet.
+//! ## Still out of scope until later sub-slices
 //!
-//! ## Out of scope until G0a.3
-//!
-//! - prctl(NO_NEW_PRIVS), setresuid/setresgid, seccomp install,
-//!   landlock_restrict_self, FullyEnforced verification. All of those
-//!   land in Slice G0a.3 in the exact order mandated by readiness
-//!   T-G0a-6, gated by a matching four-case integration test suite.
-//! - Fail-closed JSON error channel on fd 3. G0a.2 uses stderr + exit
-//!   125 for any pre-exec failure; G0a.3 reshapes that into the
-//!   structured JSON channel the parent can parse.
-//! - musl-static linking. The wrapper is dynamically linked for G0a.2
+//! - Fail-closed JSON error channel on fd 3. The current code still
+//!   uses stderr + exit 125 for any pre-exec failure; G0a.3f reshapes
+//!   that into the structured JSON channel the parent can parse.
+//! - musl-static linking. The wrapper is dynamically linked
 //!   (see readiness T-G0a-1 and the G0a-followup tracking item).
 //!
 //! ## Why a separate binary (not argv[0] dispatch)
@@ -163,23 +164,144 @@ mod linux {
         }
     }
 
-    /// Apply every restriction in the order mandated by readiness
-    /// T-G0a-6. Slice G0a.3a ships only step 1 (`prctl(NO_NEW_PRIVS)`)
-    /// and the matching verify. Subsequent sub-slices fill in:
+    /// Drop real/effective/saved uid+gid to `policy.target_uid` /
+    /// `policy.target_gid` and clear supplementary groups. Step 2 of
+    /// the T-G0a-6 pipeline. Order within the step is fixed:
     ///
-    /// - G0a.3b: setresgid → setgroups → setresuid (steps 2).
+    /// 1. `setresgid(gid, gid, gid)` — must come first. After
+    ///    `setresuid` we lose `CAP_SETGID` (if we ever had it), so
+    ///    the gid change would be rejected.
+    /// 2. `setgroups(0, NULL)` — clear supplementary groups. Also
+    ///    requires `CAP_SETGID`, also must precede `setresuid`.
+    /// 3. `setresuid(uid, uid, uid)` — finally drop uid. No-op
+    ///    verification via `getresuid` / `getresgid` confirms all
+    ///    three slots (real/effective/saved) took.
+    ///
+    /// ## Short-circuit when already at target
+    ///
+    /// If the current euid/egid already equal the target, this is
+    /// a no-op. This is load-bearing for two reasons:
+    ///
+    /// - Host-level integration tests (which cannot obtain
+    ///   `CAP_SETUID`) set `target_uid == geteuid()` so the step is
+    ///   skipped and the rest of the pipeline still gets exercised.
+    /// - In the real bwrap path (G0a.3g) the wrapper is namespace-
+    ///   root (`euid == 0`) and the target is a non-zero unprivileged
+    ///   uid, so the short-circuit does NOT fire and the full drop
+    ///   runs. This is the only path that actually matters for
+    ///   AC-86's privilege isolation; the host-test short-circuit is
+    ///   purely a testability accommodation.
+    ///
+    /// `setgroups(0, NULL)` is skipped alongside the uid/gid change
+    /// in the short-circuit case because it also requires
+    /// `CAP_SETGID`; calling it as an unprivileged user returns EPERM.
+    fn apply_drop_privs(policy: &SandboxInitPolicy) -> Result<(), InitError> {
+        // SAFETY: pure getters with no arguments.
+        let cur_uid = unsafe { libc::geteuid() };
+        let cur_gid = unsafe { libc::getegid() };
+
+        if cur_uid == policy.target_uid && cur_gid == policy.target_gid {
+            eprintln!(
+                "pincery-init: drop_privs short-circuit (already at \
+                 uid={cur_uid} gid={cur_gid})"
+            );
+            return Ok(());
+        }
+
+        let gid: libc::gid_t = policy.target_gid;
+        let uid: libc::uid_t = policy.target_uid;
+
+        // Step 1: setresgid(gid, gid, gid). Must precede setresuid.
+        // SAFETY: libc FFI; return value is checked.
+        let rc = unsafe { libc::setresgid(gid, gid, gid) };
+        if rc != 0 {
+            return Err(InitError::ApplyPolicy(format!(
+                "setresgid({gid}, {gid}, {gid}): {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        // Step 2: clear supplementary groups. Passing a NULL list with
+        // size 0 is the canonical way to drop to the empty set per
+        // setgroups(2).
+        // SAFETY: libc FFI with documented (size=0, list=NULL) form.
+        let rc = unsafe { libc::setgroups(0, std::ptr::null()) };
+        if rc != 0 {
+            return Err(InitError::ApplyPolicy(format!(
+                "setgroups(0, NULL): {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        // Step 3: setresuid(uid, uid, uid). This is the point of no
+        // return — if we had CAP_SETUID before this call, we don't
+        // after it.
+        // SAFETY: libc FFI; return value is checked.
+        let rc = unsafe { libc::setresuid(uid, uid, uid) };
+        if rc != 0 {
+            return Err(InitError::ApplyPolicy(format!(
+                "setresuid({uid}, {uid}, {uid}): {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        // Belt-and-braces verify: all three uid slots match the
+        // target. This catches a kernel that silently dropped a
+        // component (which should never happen, but fail loudly if
+        // it does).
+        let mut ruid: libc::uid_t = libc::uid_t::MAX;
+        let mut euid: libc::uid_t = libc::uid_t::MAX;
+        let mut suid: libc::uid_t = libc::uid_t::MAX;
+        // SAFETY: libc FFI; pointers are to locals that outlive the call.
+        let rc = unsafe { libc::getresuid(&mut ruid, &mut euid, &mut suid) };
+        if rc != 0 {
+            return Err(InitError::VerifyPolicy(format!(
+                "getresuid after drop: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        if ruid != uid || euid != uid || suid != uid {
+            return Err(InitError::VerifyPolicy(format!(
+                "uid slots mismatch after setresuid: r={ruid} e={euid} s={suid} want={uid}"
+            )));
+        }
+
+        let mut rgid: libc::gid_t = libc::gid_t::MAX;
+        let mut egid: libc::gid_t = libc::gid_t::MAX;
+        let mut sgid: libc::gid_t = libc::gid_t::MAX;
+        // SAFETY: libc FFI; pointers are to locals that outlive the call.
+        let rc = unsafe { libc::getresgid(&mut rgid, &mut egid, &mut sgid) };
+        if rc != 0 {
+            return Err(InitError::VerifyPolicy(format!(
+                "getresgid after drop: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        if rgid != gid || egid != gid || sgid != gid {
+            return Err(InitError::VerifyPolicy(format!(
+                "gid slots mismatch after setresgid: r={rgid} e={egid} s={sgid} want={gid}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Apply every restriction in the order mandated by readiness
+    /// T-G0a-6. Slices G0a.3a+b ship steps 1 and 2; subsequent
+    /// sub-slices fill in:
+    ///
     /// - G0a.3c: seccomp BPF (step 3).
     /// - G0a.3d: landlock_restrict_self with TSYNC (step 4).
     /// - G0a.3e: FullyEnforced verification (step 5).
     ///
     /// Order is load-bearing: seccomp MUST come after NO_NEW_PRIVS
-    /// (unprivileged filter load), and FullyEnforced verification
-    /// MUST come after both landlock and seccomp. Callers must not
-    /// permute this function's body.
-    fn apply_policy(_policy: &SandboxInitPolicy) -> Result<(), InitError> {
+    /// (unprivileged filter load), drop_privs MUST come before
+    /// landlock (so the ruleset applies to the unprivileged identity),
+    /// and FullyEnforced verification MUST come after both landlock
+    /// and seccomp. Callers must not permute this function's body.
+    fn apply_policy(policy: &SandboxInitPolicy) -> Result<(), InitError> {
         apply_no_new_privs()?;
-        // TODO(G0a.3b): setresgid / setgroups / setresuid using
-        //   policy.target_uid / policy.target_gid.
+        apply_drop_privs(policy)?;
         // TODO(G0a.3c): seccomp install when !policy.seccomp_bpf.is_empty().
         // TODO(G0a.3d): landlock_restrict_self when either rx_paths
         //   or rwx_paths is non-empty, using the existing

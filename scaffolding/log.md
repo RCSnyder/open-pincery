@@ -1,5 +1,26 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — Slice G0a.3b: drop r/e/s uid+gid inside `pincery-init` (AC-83, T-G0a-6 step 2 of 6) — 2026-04-23T05:20Z
+
+- **Gate**: PASS (verification ladder; `get_errors` clean; CI is the authoritative runner).
+- **What this slice ships**: `apply_drop_privs(&policy)` inside the wrapper, executing `setresgid(gid,gid,gid)` → `setgroups(0, NULL)` → `setresuid(uid,uid,uid)` in exactly that order, with post-hoc `getresuid`/`getresgid` verification that all three slots (real/effective/saved) match the target. Wired into `apply_policy` between step 1 (NO_NEW_PRIVS) and step 3 (future seccomp). Ordering is load-bearing — `setresgid` + `setgroups` must precede `setresuid` because both require `CAP_SETGID`, which is lost once uid drops away from root.
+- **Why the short-circuit exists**: host-level integration tests cannot obtain `CAP_SETUID`, so calling `setresgid(65534,…)` from a non-root test runner would fail with `EPERM` and break the wrapper before the rest of the pipeline is observable. The step detects "current euid/egid already match target" and returns `Ok(())` with a single stderr log line. This is purely a testability accommodation: in the real bwrap path (G0a.3g) the wrapper runs as namespace-root and the target is an unprivileged uid, so the short-circuit does NOT fire and the full drop runs. Recorded as a "short-circuit does not mask real-world behavior" comment inline, and the G0a.3g integration will assert the non-short-circuit path separately.
+- **Evidence**:
+  - `get_errors` clean on `src/bin/pincery_init.rs` and `tests/pincery_init_skeleton_test.rs`.
+  - New integration case `skeleton_short_circuits_drop_when_already_at_target` runs `/bin/sh -c "printf '%s %s' \"$(id -u)\" \"$(id -g)\""` through the wrapper; asserts (a) stderr contains `drop_privs short-circuit`, (b) stdout equals `<cur_euid> <cur_egid>`. This proves the step ran, detected the match, and did not corrupt the identity before exec.
+  - Existing G0a.3a NO_NEW_PRIVS test + G0a.2 parse-exec + two negative cases all continue to pass — proves drop_privs is transparent in the short-circuit path.
+  - `sample_policy` in the integration test now reads `geteuid()`/`getegid()` so the short-circuit fires. Documented inline why (and why the real-bwrap path does not need this accommodation).
+- **Files shipped**:
+  - `src/bin/pincery_init.rs`: +`apply_drop_privs(&SandboxInitPolicy)` with ~110-line docstring spelling out the ordering rationale and short-circuit semantics; `apply_policy` now calls it between `apply_no_new_privs` and `verify_no_new_privs`; module doc updated to reflect G0a.2+G0a.3a+G0a.3b coverage.
+  - `tests/pincery_init_skeleton_test.rs`: `sample_policy` now uses current euid/egid (commented); existing happy-path test's `target_uid=65534` assertion updated to use runtime euid; new test case added; module doc updated.
+- **Changed**: three syscalls now fire inside the wrapper before exec (the short-circuit log, but the full path exists and is reachable); one new integration test; no dep changes; no parent-side changes.
+- **Not touched**: `RealSandbox::run`, `build_bwrap_args`, `SandboxProfile::default` (still `landlock=false` interim), the three `#[ignore]`d landlock tests, the parent-side `pre_exec` landlock install. Those move in G0a.3g/h. No seccomp, no landlock in the wrapper yet.
+- **Concerns / follow-ups**:
+  - `setgroups(2)` with `list=NULL, size=0` is the canonical "drop all supplementary groups" form; some older glibc versions rejected NULL, but libc 0.2.x and modern kernels accept it. Pinned via the `getresuid`/`getresgid` verify — if `setgroups` silently failed, the next step would still catch identity drift. Noted; will re-examine when seccomp forces an exact libc-function inventory (G0a.3c).
+  - The stderr short-circuit log is informational, not enforced. G0a.3f's JSON channel will not need to promote it — it's a success signal, not an error.
+  - `setresuid`/`setresgid`/`setgroups`/`getresuid`/`getresgid` must all be in the seccomp allowlist (G0a.3c). Added to the G0a.3c carry-forward TODO inline.
+- **Next sub-slices**: G0a.3c (seccomp BPF install — requires compiling the allowlist + calling `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &filter)` after NO_NEW_PRIVS but before landlock/drop — wait actually drop comes first; re-verify order at G0a.3c kickoff), then G0a.3d..h per the prior plan.
+
 ## BUILD v9 — Slice G0a.3a: apply `prctl(PR_SET_NO_NEW_PRIVS)` inside `pincery-init` (AC-83, T-G0a-6 step 1 of 6) — 2026-04-23T04:15Z
 
 - **Gate**: PASS (verification ladder; `get_errors` clean; CI is the authoritative runner).
