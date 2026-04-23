@@ -11,13 +11,16 @@
 //! - G0a.2 (shipped): argv parse, policy read, decode, summary log,
 //!   `execvp`. No restrictions.
 //! - G0a.3a (shipped): `prctl(PR_SET_NO_NEW_PRIVS, 1)` + verify.
-//! - G0a.3b (this slice): drop r/e/s uid+gid via
+//! - G0a.3b (shipped): drop r/e/s uid+gid via
 //!   `setresgid -> setgroups(0, NULL) -> setresuid` with
 //!   `getresuid`/`getresgid` verification. Short-circuits when already
 //!   at target (host-test accommodation; does not fire inside bwrap).
-//! - G0a.3c..h (pending): seccomp → landlock (TSYNC) → FullyEnforced
-//!   verify → JSON fd-3 error channel → RealSandbox rewiring → default
-//!   flip + un-ignore landlock tests.
+//! - G0a.3c (this slice): install seccomp filter via
+//!   `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &sock_fprog)`.
+//!   Verifies install via `/proc/self/status`'s `Seccomp:` line.
+//! - G0a.3d..h (pending): landlock (TSYNC) → FullyEnforced verify →
+//!   JSON fd-3 error channel → RealSandbox rewiring → default flip +
+//!   un-ignore landlock tests.
 //!
 //! ## Still out of scope until later sub-slices
 //!
@@ -286,23 +289,137 @@ mod linux {
         Ok(())
     }
 
+    /// Install the seccomp-bpf filter from `policy.seccomp_bpf` via
+    /// `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &fprog)`. Step 3
+    /// of the T-G0a-6 pipeline.
+    ///
+    /// ## Input format
+    ///
+    /// `policy.seccomp_bpf` is the raw `struct sock_filter[]` byte
+    /// stream produced by `runtime::sandbox::seccomp::compose_seccomp_program`
+    /// — no `sock_fprog` wrapper, no framing. Each instruction is
+    /// 8 bytes (`__u16 code; __u8 jt; __u8 jf; __u32 k`), so the
+    /// byte length MUST be a non-zero multiple of 8, and the
+    /// instruction count MUST fit in `u16` (kernel limit is
+    /// `BPF_MAXINSNS = 32768`, which is well inside `u16::MAX`). The
+    /// wrapper enforces both invariants and fails with
+    /// `InitError::ApplyPolicy` on violation.
+    ///
+    /// ## Prerequisite ordering
+    ///
+    /// `PR_SET_SECCOMP` with `SECCOMP_MODE_FILTER` requires either
+    /// `CAP_SYS_ADMIN` or `no_new_privs=1`. `apply_no_new_privs`
+    /// (G0a.3a) runs first in `apply_policy`, so we always take the
+    /// unprivileged path. If that ever regresses, the prctl here
+    /// returns `EACCES` and the wrapper fails closed.
+    ///
+    /// ## Empty-filter case
+    ///
+    /// If `policy.seccomp_bpf` is empty we log and skip. The parent
+    /// only populates the field when `SandboxProfile.seccomp = true`;
+    /// an empty field means "no seccomp layer requested". G0a.3e's
+    /// FullyEnforced verify will refuse to accept an empty filter
+    /// when `require_fully_enforced = true`.
+    ///
+    /// ## Verification
+    ///
+    /// After install, `/proc/self/status`'s `Seccomp:` line must read
+    /// 2 (`SECCOMP_MODE_FILTER`). Any other value means the filter
+    /// was not installed or was replaced. The integration test pins
+    /// on this observable.
+    fn apply_seccomp(policy: &SandboxInitPolicy) -> Result<(), InitError> {
+        if policy.seccomp_bpf.is_empty() {
+            eprintln!("pincery-init: seccomp skipped (policy.seccomp_bpf is empty)");
+            return Ok(());
+        }
+
+        const SOCK_FILTER_SIZE: usize = std::mem::size_of::<libc::sock_filter>();
+        let bytes = &policy.seccomp_bpf;
+        if bytes.len() % SOCK_FILTER_SIZE != 0 {
+            return Err(InitError::ApplyPolicy(format!(
+                "seccomp_bpf length {} not a multiple of sock_filter size {}",
+                bytes.len(),
+                SOCK_FILTER_SIZE,
+            )));
+        }
+        let insn_count = bytes.len() / SOCK_FILTER_SIZE;
+        if insn_count == 0 || insn_count > u16::MAX as usize {
+            return Err(InitError::ApplyPolicy(format!(
+                "seccomp_bpf instruction count {insn_count} out of range (1..=u16::MAX)",
+            )));
+        }
+
+        // Build a `sock_fprog` pointing at the policy's bytes. The
+        // kernel copies the filter into its own memory during the
+        // prctl call, so the pointer only needs to stay valid for
+        // the duration of the syscall — `bytes` is owned by the
+        // `policy` reference which outlives this call.
+        let fprog = libc::sock_fprog {
+            len: insn_count as u16,
+            filter: bytes.as_ptr() as *mut libc::sock_filter,
+        };
+
+        // SAFETY: `PR_SET_SECCOMP` with `SECCOMP_MODE_FILTER` and a
+        // valid `sock_fprog` pointer. The struct lives on the stack
+        // for the duration of the call; the kernel copies before
+        // returning.
+        let rc = unsafe {
+            libc::prctl(
+                libc::PR_SET_SECCOMP,
+                libc::SECCOMP_MODE_FILTER as libc::c_ulong,
+                &fprog as *const libc::sock_fprog as libc::c_ulong,
+                0u64,
+                0u64,
+            )
+        };
+        if rc != 0 {
+            return Err(InitError::ApplyPolicy(format!(
+                "prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER): {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        // Verify via /proc/self/status. Reading /proc requires `openat`
+        // and `read` — both must be in the allowlist, which they are
+        // by construction in `compose_seccomp_program` (they're part
+        // of the host-io baseline). If they weren't, the filter would
+        // have killed or blocked us before we got here.
+        let status = std::fs::read_to_string("/proc/self/status")
+            .map_err(|e| InitError::VerifyPolicy(format!("read /proc/self/status: {e}")))?;
+        let mode = status
+            .lines()
+            .find_map(|l| l.strip_prefix("Seccomp:"))
+            .map(str::trim)
+            .ok_or_else(|| {
+                InitError::VerifyPolicy("no Seccomp: line in /proc/self/status".into())
+            })?;
+        if mode != "2" {
+            return Err(InitError::VerifyPolicy(format!(
+                "Seccomp mode in /proc/self/status is {mode:?}, expected \"2\" (filter)"
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Apply every restriction in the order mandated by readiness
-    /// T-G0a-6. Slices G0a.3a+b ship steps 1 and 2; subsequent
+    /// T-G0a-6. Slices G0a.3a+b+c ship steps 1, 2, and 3; subsequent
     /// sub-slices fill in:
     ///
-    /// - G0a.3c: seccomp BPF (step 3).
     /// - G0a.3d: landlock_restrict_self with TSYNC (step 4).
     /// - G0a.3e: FullyEnforced verification (step 5).
     ///
     /// Order is load-bearing: seccomp MUST come after NO_NEW_PRIVS
     /// (unprivileged filter load), drop_privs MUST come before
     /// landlock (so the ruleset applies to the unprivileged identity),
-    /// and FullyEnforced verification MUST come after both landlock
-    /// and seccomp. Callers must not permute this function's body.
+    /// seccomp is placed after drop_privs so the new identity is the
+    /// one subject to the filter, and FullyEnforced verification MUST
+    /// come after both landlock and seccomp. Callers must not permute
+    /// this function's body.
     fn apply_policy(policy: &SandboxInitPolicy) -> Result<(), InitError> {
         apply_no_new_privs()?;
         apply_drop_privs(policy)?;
-        // TODO(G0a.3c): seccomp install when !policy.seccomp_bpf.is_empty().
+        apply_seccomp(policy)?;
         // TODO(G0a.3d): landlock_restrict_self when either rx_paths
         //   or rwx_paths is non-empty, using the existing
         //   `runtime::sandbox::landlock_layer::install_landlock` once

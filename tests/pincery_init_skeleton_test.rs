@@ -7,12 +7,15 @@
 //! - G0a.2 (shipped): parse + log + exec, no restrictions.
 //! - G0a.3a (shipped): `prctl(PR_SET_NO_NEW_PRIVS, 1)` before exec
 //!   — proved via `/proc/self/status`.
-//! - G0a.3b (this slice): drop uid/gid via
+//! - G0a.3b (shipped): drop uid/gid via
 //!   `setresgid -> setgroups(0, NULL) -> setresuid`, short-circuiting
 //!   when already at target. Proved via stderr short-circuit log +
 //!   `id -u`/`id -g` inside the user program.
-//! - G0a.3c..e (pending): seccomp → landlock →
-//!   FullyEnforced verification.
+//! - G0a.3c (this slice): install seccomp filter via
+//!   `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER)`. Proved via
+//!   `/proc/self/status`'s `Seccomp: 2` line + a misaligned-bytes
+//!   negative case.
+//! - G0a.3d..e (pending): landlock → FullyEnforced verification.
 //!
 //! Linux-only: relies on `memfd_create(2)` + fd inheritance via
 //! `pre_exec(dup2)`. Windows/macOS compile this file as empty.
@@ -67,6 +70,22 @@ fn make_policy_memfd(bytes: &[u8]) -> RawFd {
     raw
 }
 
+/// A minimal valid seccomp filter: one instruction that returns
+/// `SECCOMP_RET_ALLOW` unconditionally. Serialized as a single
+/// `struct sock_filter` (8 bytes): `code=BPF_RET|BPF_K (0x06)`,
+/// `jt=0`, `jf=0`, `k=SECCOMP_RET_ALLOW (0x7fff0000)`.
+///
+/// This is what the G0a.3c integration test feeds the wrapper: it
+/// installs cleanly (proves the apply path and `/proc/self/status`
+/// verify work), never kills the user program (so the test binary
+/// can read `/proc` and print), and is byte-for-byte identical to
+/// what a real `seccompiler` run would emit for a trivial allow.
+fn allow_all_seccomp_bytes() -> Vec<u8> {
+    // code (u16 LE) | jt (u8) | jf (u8) | k (u32 LE)
+    // 0x0006         | 0x00    | 0x00    | 0x7fff0000
+    vec![0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x7f]
+}
+
 /// Build a minimal but realistic policy payload. G0a.2 doesn't
 /// interpret any of these fields; it just round-trips the bytes.
 ///
@@ -77,6 +96,11 @@ fn make_policy_memfd(bytes: &[u8]) -> RawFd {
 /// target, which exercises the full code path without requiring
 /// privileges. The real bwrap path (G0a.3g) runs the wrapper as
 /// namespace-root and drops to an unprivileged uid there.
+///
+/// Starting in G0a.3c `seccomp_bpf` must be a valid `sock_filter[]`
+/// byte stream (multiple of 8). `allow_all_seccomp_bytes()` gives us
+/// a one-instruction allow filter that verifies cleanly via
+/// `/proc/self/status` without blocking the user program.
 fn sample_policy(user_argv: Vec<String>) -> SandboxInitPolicy {
     // SAFETY: pure getters.
     let cur_uid = unsafe { libc::geteuid() };
@@ -84,7 +108,7 @@ fn sample_policy(user_argv: Vec<String>) -> SandboxInitPolicy {
     SandboxInitPolicy {
         landlock_rx_paths: vec![PathBuf::from("/usr"), PathBuf::from("/bin")],
         landlock_rwx_paths: vec![PathBuf::from("/tmp")],
-        seccomp_bpf: vec![0x06, 0x00, 0x00, 0x00],
+        seccomp_bpf: allow_all_seccomp_bytes(),
         target_uid: cur_uid,
         target_gid: cur_gid,
         require_fully_enforced: false,
@@ -362,6 +386,135 @@ fn skeleton_short_circuits_drop_when_already_at_target() {
         "user program's id output should match current euid/egid (the \
          wrapper short-circuited the drop); got stdout={stdout:?} \
          stderr={stderr}",
+    );
+}
+
+/// Slice G0a.3c proof: before exec, the wrapper must install the
+/// seccomp filter supplied in `policy.seccomp_bpf` via
+/// `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ...)`. The user
+/// program reads its own `/proc/self/status`'s `Seccomp:` line:
+///
+/// - `0` = disabled (filter not installed)
+/// - `1` = strict mode (not what we install)
+/// - `2` = filter mode (what the wrapper must produce)
+///
+/// We assert `Seccomp:\t2` — any other value means the install did
+/// not happen, the filter was replaced, or the kernel silently
+/// downgraded us.
+///
+/// The user program runs `/bin/sh` which in turn runs `grep` + reads
+/// `/proc`. For those to all succeed under our filter, the filter
+/// must allow every syscall those binaries make. We use a trivial
+/// `SECCOMP_RET_ALLOW` one-instruction program (`allow_all_seccomp_bytes`)
+/// — real production policies go through `seccompiler`'s allowlist
+/// compile; that path is covered by separate unit tests for the
+/// `runtime::sandbox::seccomp` module.
+#[test]
+fn skeleton_installs_seccomp_filter_before_exec() {
+    if !PathBuf::from("/bin/sh").exists() {
+        eprintln!("skipping: /bin/sh not present on this host");
+        return;
+    }
+
+    let user_argv = vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        "grep ^Seccomp: /proc/self/status".to_string(),
+    ];
+    let policy = sample_policy(user_argv);
+    let bytes = policy.to_bytes().expect("serialize policy");
+
+    let policy_fd = make_policy_memfd(&bytes);
+
+    let mut cmd = Command::new(pincery_init_bin());
+    cmd.args([
+        "--policy-fd",
+        "3",
+        "--",
+        "/bin/sh",
+        "-c",
+        "grep ^Seccomp: /proc/self/status",
+    ])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::dup2(policy_fd, 3) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    let output = cmd.output().expect("spawn pincery-init");
+    assert!(
+        output.status.success(),
+        "pincery-init failed: status={:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Seccomp:\t2") || stdout.contains("Seccomp: 2"),
+        "expected Seccomp=2 (filter mode) in /proc/self/status after \
+         wrapper install; got:\n{stdout}",
+    );
+    // Defense against the filter getting silently unset or downgraded.
+    for bad in ["Seccomp:\t0", "Seccomp: 0", "Seccomp:\t1", "Seccomp: 1"] {
+        assert!(
+            !stdout.contains(bad),
+            "/proc/self/status shows {bad}, meaning the filter was \
+             never installed or was downgraded; stdout:\n{stdout}",
+        );
+    }
+}
+
+/// Slice G0a.3c negative case: a seccomp_bpf payload whose length is
+/// not a multiple of `sizeof(struct sock_filter)` must fail-closed
+/// with exit 125 — NOT silently truncate or install a bogus filter.
+/// This is the pre-kernel guard; the kernel would also reject it,
+/// but failing early with a clear error keeps the blast radius
+/// observable in the wrapper's own stderr.
+#[test]
+fn skeleton_rejects_misaligned_seccomp_bpf() {
+    if !PathBuf::from("/bin/true").exists() {
+        eprintln!("skipping: /bin/true not present on this host");
+        return;
+    }
+
+    let mut policy = sample_policy(vec!["/bin/true".to_string()]);
+    // 7 bytes — not a multiple of 8.
+    policy.seccomp_bpf = vec![1, 2, 3, 4, 5, 6, 7];
+    let bytes = policy.to_bytes().expect("serialize policy");
+
+    let policy_fd = make_policy_memfd(&bytes);
+
+    let mut cmd = Command::new(pincery_init_bin());
+    cmd.args(["--policy-fd", "3", "--", "/bin/true"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::dup2(policy_fd, 3) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    let output = cmd.output().expect("spawn pincery-init");
+    assert_eq!(
+        output.status.code(),
+        Some(125),
+        "misaligned seccomp_bpf should exit 125, got status={:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("sock_filter") || stderr.contains("seccomp_bpf length"),
+        "stderr should name the seccomp alignment failure, got:\n{stderr}",
     );
 }
 

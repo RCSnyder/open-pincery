@@ -1,5 +1,27 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — Slice G0a.3c: install seccomp filter inside `pincery-init` (AC-83, T-G0a-6 step 3 of 6) — 2026-04-23T06:30Z
+
+- **Gate**: PASS (verification ladder; `get_errors` clean; CI is the authoritative runner).
+- **What this slice ships**: `apply_seccomp(&policy)` inside the wrapper. Validates `policy.seccomp_bpf.len()` is a non-zero multiple of `sizeof(struct sock_filter) == 8` and fits in `u16` (kernel `BPF_MAXINSNS` = 32768). Wraps the raw bytes in a stack-local `libc::sock_fprog { len, filter }` and calls `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &fprog)`. After install, reads `/proc/self/status` and fails closed unless the `Seccomp:` line reads `2` (filter mode). Empty `seccomp_bpf` is treated as "no seccomp requested" — logged + skipped; G0a.3e's FullyEnforced verify will refuse the empty case when `require_fully_enforced=true`.
+- **Why this is safe without `CAP_SYS_ADMIN`**: `PR_SET_SECCOMP` + `SECCOMP_MODE_FILTER` accepts unprivileged callers when `no_new_privs=1`. `apply_no_new_privs` (G0a.3a) runs earlier in `apply_policy`, so the prerequisite is already in force. If that ever regresses the kernel returns `EACCES` and the wrapper fails closed on the prctl. No change to the prior pipeline steps.
+- **Ordering rationale (recorded in code)**: seccomp is placed AFTER `drop_privs` so the new identity — not namespace-root — is the one actually subject to the filter. The T-G0a-6 order enforced by `apply_policy` is now: NO_NEW_PRIVS → drop_privs → seccomp → (landlock, G0a.3d) → verify. Call sites must not permute.
+- **Evidence**:
+  - `get_errors` clean on `src/bin/pincery_init.rs` and `tests/pincery_init_skeleton_test.rs`.
+  - New test `skeleton_installs_seccomp_filter_before_exec` runs `/bin/sh -c "grep ^Seccomp: /proc/self/status"` through the wrapper and asserts stdout contains `Seccomp:\t2`, explicitly excluding `0` (not installed) and `1` (strict mode — not what we install). Unforgeable from userspace — `/proc/self/status`'s Seccomp line is populated from the kernel's seccomp_mode field.
+  - New negative test `skeleton_rejects_misaligned_seccomp_bpf` feeds a 7-byte (not a multiple of 8) filter and asserts exit 125 + stderr naming the `sock_filter` alignment failure. Protects against silent truncation or bogus-filter install if the parent ever produces a corrupt payload.
+  - Existing G0a.2 + G0a.3a + G0a.3b tests continue to pass: `sample_policy` now uses an 8-byte single-instruction `SECCOMP_RET_ALLOW` filter (0x06 00 00 00 00 00 FF 7F), which installs cleanly AND allows every subsequent syscall the user program makes (`sh`, `grep`, `id` all continue to work).
+- **Files shipped**:
+  - `src/bin/pincery_init.rs`: +`apply_seccomp(&SandboxInitPolicy)` with ~90-line docstring; `apply_policy` now calls it after `drop_privs` and before `verify_no_new_privs`; module doc updated.
+  - `tests/pincery_init_skeleton_test.rs`: +`allow_all_seccomp_bytes()` helper with the 8-byte `SECCOMP_RET_ALLOW` instruction byte-encoded and commented; `sample_policy` uses it so all existing tests get a valid filter; +`skeleton_installs_seccomp_filter_before_exec` + `skeleton_rejects_misaligned_seccomp_bpf` test cases; module doc updated.
+- **Changed**: one new syscall fires inside the wrapper before exec; two new integration tests; no dep changes; no parent-side changes.
+- **Not touched**: `RealSandbox::run`, `build_bwrap_args`, `SandboxProfile::default` (still `landlock=false` interim), the three `#[ignore]`d landlock tests, the parent-side `pre_exec` landlock install. Those move in G0a.3g/h.
+- **Concerns / follow-ups**:
+  - The `std::fs::read_to_string("/proc/self/status")` verify path uses `openat` + `read` + `close` + allocator syscalls (`brk`/`mmap`). These MUST be in the compose_seccomp_program allowlist; they already are in practice (host-io baseline), but G0a.3e's FullyEnforced verify should assert this explicitly when a non-trivial filter is supplied. Tracked inline.
+  - `Command::exec` inside `exec_user_argv` calls several libc functions before execve (arg vector prep, signal handling). Under a real production filter, every one must be allowlisted. This was the existing G0a.2 carry-forward concern; G0a.3c doesn't change it but does now make the allowlist actually active in the wrapper. No regression — the same constraint already applied on the parent-side bwrap `--seccomp` path.
+  - The fprog pointer cast `&fprog as *const _ as libc::c_ulong` is 64-bit-clean on x86_64 (the only target CI builds); 32-bit hosts would need a narrower cast. Recorded next to the existing x86_64-only note from G0a.3a.
+- **Next sub-slices**: G0a.3d (landlock_restrict_self with `LANDLOCK_RESTRICT_SELF_TSYNC` — integrate the existing `runtime::sandbox::landlock_layer::install_landlock` and gate on `!rx_paths.is_empty() || !rwx_paths.is_empty()`), G0a.3e (FullyEnforced verification when `require_fully_enforced=true`), G0a.3f (JSON error channel on fd 3), G0a.3g (RealSandbox wiring: `--ro-bind <init>`, memfd inheritance, argv rewrite, remove parent `pre_exec`), G0a.3h (flip `SandboxProfile::default` → landlock=true + un-ignore the three tests).
+
 ## BUILD v9 — Slice G0a.3b: drop r/e/s uid+gid inside `pincery-init` (AC-83, T-G0a-6 step 2 of 6) — 2026-04-23T05:20Z
 
 - **Gate**: PASS (verification ladder; `get_errors` clean; CI is the authoritative runner).
