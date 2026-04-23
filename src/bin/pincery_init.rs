@@ -335,7 +335,7 @@ mod linux {
 
         const SOCK_FILTER_SIZE: usize = std::mem::size_of::<libc::sock_filter>();
         let bytes = &policy.seccomp_bpf;
-        if bytes.len() % SOCK_FILTER_SIZE != 0 {
+        if !bytes.len().is_multiple_of(SOCK_FILTER_SIZE) {
             return Err(InitError::ApplyPolicy(format!(
                 "seccomp_bpf length {} not a multiple of sock_filter size {}",
                 bytes.len(),
