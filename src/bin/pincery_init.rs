@@ -22,19 +22,22 @@
 //!   `runtime::sandbox::landlock_layer::install_landlock`, placed
 //!   BEFORE seccomp so the filter does not need to allow the
 //!   `landlock_*` syscalls. Gate on at least one rx/rwx path.
-//! - G0a.3e (this slice): if `policy.require_fully_enforced` is
+//! - G0a.3e (shipped): if `policy.require_fully_enforced` is
 //!   `true`, verify that every requested layer actually enforced:
 //!   landlock status is `RulesetStatus::FullyEnforced`, seccomp
 //!   mode in `/proc/self/status` is `2`, `NoNewPrivs` is `1`.
 //!   Fails closed with `InitError::VerifyPolicy` otherwise.
-//! - G0a.3f..h (pending): JSON fd-3 error channel → RealSandbox
-//!   rewiring → default flip + un-ignore landlock tests.
+//! - G0a.3f (this slice): structured JSON error channel on
+//!   `--error-fd N` (optional). Any pre-exec `InitError` is
+//!   serialized as `{"stage":"...", "errno":N, "message":"..."}`
+//!   and written to the fd before `_exit(125)`. Stderr + exit 125
+//!   remain the always-on fallback, covering the pre-parse case
+//!   and legacy callers that don't wire the channel.
+//! - G0a.3g..h (pending): RealSandbox rewiring → default flip +
+//!   un-ignore landlock tests.
 //!
 //! ## Still out of scope until later sub-slices
 //!
-//! - Fail-closed JSON error channel on fd 3. The current code still
-//!   uses stderr + exit 125 for any pre-exec failure; G0a.3f reshapes
-//!   that into the structured JSON channel the parent can parse.
 //! - musl-static linking. The wrapper is dynamically linked
 //!   (see readiness T-G0a-1 and the G0a-followup tracking item).
 //!
@@ -58,11 +61,15 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 fn main() {
-    match run() {
+    let (error_fd, result) = run();
+    match result {
         Ok(never) => match never {},
         Err(e) => {
-            // G0a.2: stderr + exit 125. G0a.3 will replace this with
-            // a structured JSON error on fd 3.
+            // G0a.3f: structured JSON channel on --error-fd when
+            // supplied; stderr+exit 125 is the always-on fallback
+            // (covers the pre-parse_args case and older tests that
+            // don't wire an error pipe).
+            linux::write_error_channel(error_fd, &e);
             eprintln!("pincery-init: {e}");
             std::process::exit(125);
         }
@@ -74,6 +81,7 @@ mod linux {
     use std::ffi::OsString;
     use std::fs::File;
     use std::io::Read;
+    use std::io::Write;
     use std::os::fd::FromRawFd;
     use std::os::unix::process::CommandExt;
     use std::process::Command;
@@ -122,6 +130,67 @@ mod linux {
     }
 
     impl std::error::Error for InitError {}
+
+    impl InitError {
+        /// Short, stable identifier for this error variant. Used as
+        /// the `stage` field in the fd-3 JSON error channel so the
+        /// parent can branch on categorical failure type without
+        /// string-matching on `Display` output.
+        fn stage(&self) -> &'static str {
+            match self {
+                Self::Usage(_) => "usage",
+                Self::BadPolicyFd(_) => "bad_policy_fd",
+                Self::ReadPolicy(_) => "read_policy",
+                Self::DecodePolicy(_) => "decode_policy",
+                Self::ApplyPolicy(_) => "apply_policy",
+                Self::VerifyPolicy(_) => "verify_policy",
+                Self::Exec(_) => "exec",
+            }
+        }
+
+        /// Extract the OS errno when the variant wraps an
+        /// `io::Error`; returns 0 for variants that carry no errno
+        /// (usage/decode/etc.). 0 is the POSIX-reserved "no error"
+        /// value, which cannot collide with a real errno and is
+        /// cheap for the parent to ignore.
+        fn errno(&self) -> i32 {
+            match self {
+                Self::ReadPolicy(e) | Self::Exec(e) => e.raw_os_error().unwrap_or(0),
+                _ => 0,
+            }
+        }
+
+        /// Serialize this error as the structured JSON payload
+        /// defined in readiness T-G0a-6:
+        /// `{"stage":"...", "errno":N, "message":"..."}`. Emits a
+        /// trailing newline so line-based readers work naturally.
+        pub fn to_json_line(&self) -> Vec<u8> {
+            // serde_json guarantees a successful serialization for a
+            // plain object of strings + i32; unwrap is safe.
+            let v = serde_json::json!({
+                "stage": self.stage(),
+                "errno": self.errno(),
+                "message": self.to_string(),
+            });
+            let mut bytes = serde_json::to_vec(&v).expect("serde_json of flat object");
+            bytes.push(b'\n');
+            bytes
+        }
+    }
+
+    /// Write the JSON-serialized error to the inherited error fd, if
+    /// one was configured via `--error-fd`. Failures to write are
+    /// deliberately swallowed: the wrapper has no recovery path and
+    /// stderr+exit 125 is the always-on fallback. Wrapping the raw
+    /// fd in `File` takes ownership and closes it on drop, which is
+    /// the correct lifetime (the wrapper is about to `_exit`).
+    fn write_error_channel(error_fd: Option<i32>, err: &InitError) {
+        let Some(fd) = error_fd else { return };
+        // SAFETY: parse_args validated fd >= 0. The parent placed
+        // this fd in the child; we own it from here.
+        let mut f = unsafe { File::from_raw_fd(fd) };
+        let _ = f.write_all(&err.to_json_line());
+    }
 
     /// Apply `prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)` to the current
     /// thread (and by inheritance all threads of this process — the
@@ -633,6 +702,17 @@ mod linux {
     #[derive(Debug)]
     struct ParsedArgs {
         policy_fd: i32,
+        /// Optional JSON error channel (readiness T-G0a-6). When
+        /// present, any pre-exec `InitError` is serialized as
+        /// `{"stage":..., "errno":..., "message":...}` and written to
+        /// this fd before `_exit(125)`. When absent, errors go to
+        /// stderr only (the behaviour from G0a.2–e). The parent
+        /// (RealSandbox, G0a.3g) sets this up as a pipe write-end
+        /// so it can parse structured failures. Integration tests
+        /// that do not care about structured errors (e.g. the
+        /// skeleton tests that only check stderr+exit code) simply
+        /// omit the flag.
+        error_fd: Option<i32>,
         #[allow(dead_code)]
         user_argv: Vec<OsString>,
     }
@@ -655,6 +735,7 @@ mod linux {
         let _ = iter.next();
 
         let mut policy_fd: Option<i32> = None;
+        let mut error_fd: Option<i32> = None;
         let mut user_argv: Option<Vec<OsString>> = None;
 
         while let Some(arg) = iter.next() {
@@ -670,12 +751,24 @@ mod linux {
                     return Err(InitError::BadPolicyFd(format!("negative fd {n}")));
                 }
                 policy_fd = Some(n);
+            } else if arg == "--error-fd" {
+                let raw = iter
+                    .next()
+                    .ok_or_else(|| InitError::Usage("--error-fd requires a value".into()))?;
+                let s = raw.to_string_lossy();
+                let n: i32 = s.parse().map_err(|e: std::num::ParseIntError| {
+                    InitError::BadPolicyFd(format!("--error-fd {raw:?}: {e}"))
+                })?;
+                if n < 0 {
+                    return Err(InitError::BadPolicyFd(format!("negative --error-fd {n}")));
+                }
+                error_fd = Some(n);
             } else if arg == "--" {
                 user_argv = Some(iter.collect());
                 break;
             } else {
                 return Err(InitError::Usage(format!(
-                    "unexpected argument {arg:?}; expected --policy-fd or --"
+                    "unexpected argument {arg:?}; expected --policy-fd, --error-fd, or --"
                 )));
             }
         }
@@ -688,17 +781,26 @@ mod linux {
                 "user argv after `--` must be non-empty".into(),
             ));
         }
+        if let Some(efd) = error_fd {
+            if efd == policy_fd {
+                return Err(InitError::Usage(format!(
+                    "--error-fd {efd} must not equal --policy-fd {policy_fd}"
+                )));
+            }
+        }
 
         Ok(ParsedArgs {
             policy_fd,
+            error_fd,
             user_argv,
         })
     }
 
     /// Read the entire policy fd into memory. The fd is consumed
-    /// (closed on drop) once we return — G0a.3 may change this when
-    /// fd 3 is repurposed as the JSON error channel after the policy
-    /// is decoded.
+    /// (closed on drop) once we return. `--error-fd` (G0a.3f) is a
+    /// separate, independently-inherited fd so the channel stays
+    /// open for the entire wrapper lifetime, not just until the
+    /// policy is read.
     fn read_policy_bytes(fd: i32) -> Result<Vec<u8>, InitError> {
         // Safety: the parent is the sole owner of this fd number
         // inside the child address space (it was placed there by
@@ -747,8 +849,21 @@ mod linux {
         InitError::Exec(err)
     }
 
-    pub fn run() -> Result<Never, InitError> {
-        let parsed = parse_args(std::env::args_os())?;
+    pub fn run() -> (Option<i32>, Result<Never, InitError>) {
+        // Parse argv first so we know which fd (if any) to route
+        // structured errors to. Any failure BEFORE parse succeeds
+        // lands on stderr only; every later failure also lands on
+        // the --error-fd pipe when one was supplied. Mirrors the
+        // readiness T-G0a-6 contract.
+        let parsed = match parse_args(std::env::args_os()) {
+            Ok(p) => p,
+            Err(e) => return (None, Err(e)),
+        };
+        let error_fd = parsed.error_fd;
+        (error_fd, run_inner(parsed))
+    }
+
+    fn run_inner(parsed: ParsedArgs) -> Result<Never, InitError> {
         let bytes = read_policy_bytes(parsed.policy_fd)?;
         let policy = SandboxInitPolicy::from_bytes(&bytes)
             .map_err(|e| InitError::DecodePolicy(e.to_string()))?;
@@ -844,6 +959,53 @@ mod linux {
             ]))
             .unwrap_err();
             assert!(matches!(err, InitError::BadPolicyFd(_)), "got {err:?}");
+        }
+
+        #[test]
+        fn parse_args_accepts_error_fd() {
+            let parsed = parse_args(args(&[
+                "pincery-init",
+                "--policy-fd",
+                "3",
+                "--error-fd",
+                "4",
+                "--",
+                "/bin/true",
+            ]))
+            .unwrap();
+            assert_eq!(parsed.policy_fd, 3);
+            assert_eq!(parsed.error_fd, Some(4));
+        }
+
+        #[test]
+        fn parse_args_rejects_error_fd_equal_to_policy_fd() {
+            let err = parse_args(args(&[
+                "pincery-init",
+                "--policy-fd",
+                "3",
+                "--error-fd",
+                "3",
+                "--",
+                "/bin/true",
+            ]))
+            .unwrap_err();
+            assert!(matches!(err, InitError::Usage(_)), "got {err:?}");
+        }
+
+        #[test]
+        fn init_error_json_line_shape() {
+            // Use a non-io variant to pin stage + errno=0 behavior.
+            let err = InitError::DecodePolicy("bad bytes".into());
+            let line = err.to_json_line();
+            assert!(line.ends_with(b"\n"));
+            let v: serde_json::Value =
+                serde_json::from_slice(line.strip_suffix(b"\n").unwrap()).unwrap();
+            assert_eq!(v["stage"], "decode_policy");
+            assert_eq!(v["errno"], 0);
+            assert!(
+                v["message"].as_str().unwrap().contains("bad bytes"),
+                "message field should carry the Display output, got {v:?}"
+            );
         }
     }
 }

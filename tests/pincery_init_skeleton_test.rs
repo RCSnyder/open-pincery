@@ -20,7 +20,7 @@
 //!   by observing that a write to a path OUTSIDE
 //!   `policy.landlock_rwx_paths` fails while a write INSIDE
 //!   succeeds.
-//! - G0a.3e (this slice): when `policy.require_fully_enforced` is
+//! - G0a.3e (shipped): when `policy.require_fully_enforced` is
 //!   true, verify landlock `FullyEnforced` + seccomp filter + NNP.
 //!   Proved by (a) a happy-path policy with a real landlock install
 //!   that succeeds and execs cleanly, (b) a negative case that arms
@@ -28,6 +28,12 @@
 //!   `OPEN_PINCERY_ALLOW_UNSAFE=true` to downgrade the observed
 //!   status to `PartiallyEnforced`, expecting exit 125 with a
 //!   descriptive stderr line.
+//! - G0a.3f (this slice): `--error-fd N` JSON error channel. Any
+//!   pre-exec `InitError` is serialized as
+//!   `{"stage":"...", "errno":N, "message":"..."}` to the supplied
+//!   fd before `_exit(125)`. Proved by wiring a pipe on fd 4, feeding
+//!   garbage policy bytes, and parsing the JSON line the parent
+//!   reads out of the pipe.
 //!
 //! Linux-only: relies on `memfd_create(2)` + fd inheritance via
 //! `pre_exec(dup2)`. Windows/macOS compile this file as empty.
@@ -818,5 +824,108 @@ fn skeleton_fully_enforced_rejects_partial_landlock() {
     assert!(
         stderr.contains("verifying policy") || stderr.contains("VerifyPolicy"),
         "stderr should surface this as a verify-stage failure, got:\n{stderr}",
+    );
+}
+
+/// G0a.3f proof: when `--error-fd N` is supplied, a pre-exec failure
+/// (here: garbage policy bytes → `InitError::DecodePolicy`) serializes
+/// as the readiness T-G0a-6 JSON shape
+/// (`{"stage":"...", "errno":N, "message":"..."}`) on that fd BEFORE
+/// the wrapper `_exit(125)`s. Stderr stays populated for humans.
+///
+/// Wiring: parent opens a pipe, dups the write end to fd 4 in the
+/// child (alongside the policy memfd on fd 3), closes its own write
+/// end post-spawn so `read_to_end` sees EOF when the child exits.
+#[test]
+fn skeleton_writes_json_error_to_error_fd_on_decode_failure() {
+    let garbage = b"\xff\xfe\xfd\xfc not valid json";
+    let policy_fd = make_policy_memfd(garbage);
+
+    // Create pipe for the JSON error channel. We intentionally leave
+    // both ends NON-CLOEXEC so the child inherits them; dup2 below
+    // also clears CLOEXEC on the destination.
+    let mut pipe_fds: [libc::c_int; 2] = [-1, -1];
+    // SAFETY: libc FFI with valid out-param; rc checked below.
+    let rc = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) };
+    assert_eq!(rc, 0, "pipe(2) failed: {}", std::io::Error::last_os_error());
+    let pipe_read = pipe_fds[0];
+    let pipe_write = pipe_fds[1];
+
+    let mut cmd = Command::new(pincery_init_bin());
+    cmd.args(["--policy-fd", "3", "--error-fd", "4", "--", "/bin/true"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // dup2 policy memfd → 3 and pipe_write → 4. dup2 clears CLOEXEC
+    // on the destination so the fds survive execvp inside the
+    // wrapper binary.
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::dup2(policy_fd, 3) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::dup2(pipe_write, 4) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    let output = cmd.output().expect("spawn pincery-init");
+
+    // Parent must drop its own write-end so `read_to_end` on the
+    // read-end sees EOF instead of blocking forever. Do this AFTER
+    // spawn (child already has its copy via dup2). Also close the
+    // memfd we no longer need.
+    // SAFETY: we own these fds; converting to File drops+closes.
+    unsafe {
+        drop(std::fs::File::from_raw_fd(pipe_write));
+        drop(std::fs::File::from_raw_fd(policy_fd));
+    }
+
+    assert_eq!(
+        output.status.code(),
+        Some(125),
+        "garbage policy should exit 125; stderr={}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // Read the JSON line the child wrote to the pipe.
+    // SAFETY: we own pipe_read; File takes ownership and closes on
+    // drop at end of scope.
+    let mut reader = unsafe { std::fs::File::from_raw_fd(pipe_read) };
+    let mut buf = Vec::new();
+    std::io::Read::read_to_end(&mut reader, &mut buf).expect("read error pipe");
+    assert!(
+        !buf.is_empty(),
+        "wrapper must have written a JSON line to the error fd \
+         (stderr was:\n{})",
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // Parse the JSON. Accept an optional trailing newline per the
+    // wrapper's `to_json_line` contract.
+    let trimmed = buf.strip_suffix(b"\n").unwrap_or(&buf);
+    let v: serde_json::Value = serde_json::from_slice(trimmed)
+        .unwrap_or_else(|e| panic!("fd-3 JSON parse failed: {e}; raw={buf:?}"));
+    assert_eq!(
+        v["stage"], "decode_policy",
+        "expected stage=decode_policy for garbage bytes, got {v:?}"
+    );
+    assert_eq!(
+        v["errno"], 0,
+        "DecodePolicy is not io-backed; errno must be 0, got {v:?}"
+    );
+    assert!(
+        v["message"].as_str().is_some_and(|s| !s.is_empty()),
+        "message field must be a non-empty string, got {v:?}"
+    );
+
+    // Stderr fallback must ALSO fire — operators still need a
+    // human-readable log line even when fd 4 is wired.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("decoding policy") || stderr.contains("pincery-init:"),
+        "stderr fallback should still be populated, got:\n{stderr}",
     );
 }
