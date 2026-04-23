@@ -1,5 +1,25 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — Slice G0a.1: SandboxInitPolicy IPC module (AC-83, layer 1 of 3) — 2026-04-23T01:15Z
+
+- **Gate**: PASS (verification ladder, G0a.1 only).
+- **What this slice ships**: the cross-binary IPC struct + bincode codec that the parent (`pincery-server`) and the forthcoming in-sandbox exec wrapper (`pincery-init`, Slice G0a.2) use to exchange the full restriction policy over an inherited memfd. No wrapper binary and no bwrap wiring yet — this is just the type boundary, locked in isolation.
+- **Architectural context**: Translates the audit-driven AC-83 (scope.md) + readiness truths T-G0a-4 (policy shape) and T-G0a-5 (memfd format) into code. Unblocks G0a.2 (wrapper binary skeleton) and G0a.3 (bwrap `--ro-bind` + parent `pre_exec` removal).
+- **Evidence**:
+  - `cargo test --lib runtime::sandbox::init_policy` — 5/5 green (bincode_roundtrip_preserves_every_field, empty_policy_roundtrips, malformed_bytes_return_codec_error, truncated_bytes_return_codec_error, distinct_policies_produce_distinct_bytes).
+  - `cargo check` — clean, no warnings.
+  - No regression in pre-existing lib tests (filtered run showed 60 other lib tests still present and compiling; full-suite runtime verification deferred to CI because the unfiltered `cargo test --lib` exhausted console handles on the local MSYS shell after compile — unrelated to slice content; previous runs on this machine hit the same known-broken Cygwin console limit).
+- **Files shipped**:
+  - `src/runtime/sandbox/init_policy.rs` (new, ~180 lines incl. doc + tests): `SandboxInitPolicy { landlock_rx_paths, landlock_rwx_paths, seccomp_bpf, target_uid, target_gid, require_fully_enforced, user_argv }` + `to_bytes` / `from_bytes` + `InitPolicyError::Codec`.
+  - `src/runtime/sandbox/mod.rs`: module registration.
+  - `Cargo.toml` + `Cargo.lock`: bincode = "1.3" with inline rationale comment.
+- **Changed**: new serializable IPC type; one new dependency (bincode v1); module registration.
+- **Not touched**: `landlock.rs`, `bwrap.rs`, `SandboxProfile`, all other sandbox layers. The parent-side `pre_exec` landlock install is still present in the codebase but disabled by the AC-53 amendment (commit `4cf7bc9`); its removal is Slice G0a.3.
+- **Concerns / follow-ups**:
+  - `SandboxInitPolicy` today uses `Vec<String>` for `user_argv`. Linux argv is `Vec<u8>` / `Vec<OsString>` in principle (may contain non-UTF8). For real tool commands this is never the case today — `ShellCommand.command` is already `String` — but if we ever admit non-UTF8 argv, this type must widen to `Vec<Vec<u8>>` before that admission. Captured here so G0a.2 / G0a.3 do not silently paper over it.
+  - Musl static-linking infra is still deferred; tracked as Slice G0a-followup per readiness.md Scope Reduction Risks.
+- **Next**: Slice G0a.2 — scaffold `src/bin/pincery_init.rs`, add the `[[bin]]` entry in `Cargo.toml`, implement `read_policy_from_fd(3) -> SandboxInitPolicy` and the end-of-line `execvp(user_argv)` step. **No** Landlock / seccomp / prctl application in G0a.2 — that is G0a.3. The wrapper must be proven to parse + exec cleanly first, so the G0a.3 failure-closed tests have a known-good baseline to regress against.
+
 ## EXPAND v9 — scope addendum: sandbox architecture rework (AC-83..AC-88, Phase G0) — 2026-04-23T00:30Z
 
 - **Gate**: PASS (post-expand, addendum mode).
