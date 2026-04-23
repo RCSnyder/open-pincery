@@ -36,6 +36,9 @@ use open_pincery::runtime::sandbox::{
 use std::time::Duration;
 
 fn bwrap_available() -> bool {
+    if std::env::var_os("OPEN_PINCERY_SKIP_REAL_BWRAP").is_some() {
+        return false;
+    }
     std::process::Command::new("bwrap")
         .arg("--version")
         .output()

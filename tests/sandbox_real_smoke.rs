@@ -26,6 +26,13 @@ use open_pincery::runtime::sandbox::{
 use std::time::Duration;
 
 fn bwrap_available() -> bool {
+    // CI/local escape hatch: unprivileged jobs (hosted GitHub runners)
+    // cannot run these tests because bwrap's MS_SLAVE|MS_REC on / is
+    // blocked on locked inherited mounts. The dedicated sandbox-smoke
+    // CI job runs this binary under sudo and leaves this var unset.
+    if std::env::var_os("OPEN_PINCERY_SKIP_REAL_BWRAP").is_some() {
+        return false;
+    }
     std::process::Command::new("bwrap")
         .arg("--version")
         .output()

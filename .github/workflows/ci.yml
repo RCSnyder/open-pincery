@@ -54,95 +54,77 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # AC-53 / AC-72 userland: installing here so the full suite's
-      # Linux-gated sandbox tests (`tests/sandbox_real_smoke.rs`) do not
-      # self-skip and silently fail to produce evidence.
-      - name: install sandbox userland (bubblewrap, slirp4netns, uidmap)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            bubblewrap slirp4netns uidmap
-          bwrap --version
-      # Ubuntu 24.04 ships with
-      # kernel.apparmor_restrict_unprivileged_userns=1, which blocks
-      # bwrap's `--unshare-user` for non-root callers. Production
-      # devshell sidesteps this by running the container as root with
-      # `--privileged`; on bare CI runners we flip the sysctl off so
-      # the sandbox tests can exercise real namespace isolation.
-      # This is safe on an ephemeral hosted runner.
-      #
-      # Inherited mounts from systemd on hosted runners are LOCKED
-      # under an unprivileged user-ns: bwrap's internal
-      # `mount("none", "/", NULL, MS_SLAVE|MS_REC, NULL)` returns
-      # EPERM ("Failed to make / slave"). Workarounds tried:
-      #   - `mount --make-rprivate /` on host:      insufficient,
-      #     locked-mount check is on the ownership of the mount.
-      #   - `setcap cap_sys_admin+ep bwrap`:       modern bwrap
-      #     refuses ("Unexpected capabilities but not setuid").
-      # What actually works: invoke bwrap from a caller that has
-      # CAP_SYS_ADMIN in the init user namespace (i.e. root). Inside
-      # the init userns, locked-mount propagation rules don't apply,
-      # and bwrap's `--unshare-user` still creates an unprivileged
-      # child userns exactly as the non-CI path does. This affects
-      # ONLY where bwrap is launched from, never the isolation
-      # posture of the sandboxed process.
-      - name: allow unprivileged user namespaces (AppArmor workaround)
-        run: |
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          # Sanity-check: bwrap actually creates a user+pid ns on this runner.
-          bwrap --unshare-user --unshare-pid --dev-bind / / /bin/true
-      # `cargo test --all` stays unprivileged so postgres/sqlx and
-      # socket tests behave like the real devshell. The dedicated
-      # sandbox-smoke job below owns AC-53 evidence and runs the
-      # smoke binary under sudo. We skip sandbox_real_smoke here via
-      # env gate so the unprivileged runner doesn't fail on the
-      # locked-mount issue the other job is designed to work around.
-      - run: cargo test --all -- --test-threads=1 --skip real_sandbox_
+      # The real-bwrap tests are skipped here via env gate (see below)
+      # and run in the sandbox-smoke job's privileged container instead.
+      # This job stays unprivileged so postgres/sqlx and socket tests
+      # match the real devshell posture.
+      - run: cargo test --all -- --test-threads=1
+        env:
+          OPEN_PINCERY_SKIP_REAL_BWRAP: "1"
 
-  # Dedicated gate for AC-53 RealSandbox evidence.  The smoke suite
-  # self-skips if `bwrap` is absent; this job fails loudly if it ever
-  # produces "0 passed" so regressions in the environment are visible.
+  # Dedicated gate for AC-53 RealSandbox evidence.
+  #
+  # Runs inside a `--privileged` Docker container because hosted
+  # GitHub runners block bwrap's MS_SLAVE|MS_REC on the inherited
+  # root mount even for root callers (the mounts are locked with
+  # respect to the init user namespace's ability to change
+  # propagation on a shared-propagation systemd-managed /).
+  # Workarounds attempted and rejected:
+  #   - `mount --make-rprivate /` on host:  locked mounts unaffected.
+  #   - `setcap cap_sys_admin+ep bwrap`:   modern bwrap refuses.
+  #   - `sudo -E <test-binary>`:            still hits the locked-mount
+  #                                         check; userns-propagation
+  #                                         rules key on mount owner.
+  #
+  # A privileged container lifts AppArmor + seccomp restrictions and
+  # runs its own mount namespace from first principles, so bwrap's
+  # internal MS_SLAVE on / succeeds. This is the same posture the
+  # local devshell uses (`docker run --privileged --cgroupns=host`).
+  # The sandboxed child still unshares into an unprivileged userns
+  # for every tool invocation — isolation posture is unchanged.
   sandbox-smoke:
     name: sandbox real-bwrap smoke
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: install sandbox userland (bubblewrap, slirp4netns, uidmap)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            bubblewrap slirp4netns uidmap
-          bwrap --version
-      - name: allow unprivileged user namespaces (AppArmor workaround)
-        run: |
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          bwrap --unshare-user --unshare-pid --dev-bind / / /bin/true
-      - name: cargo test --test sandbox_real_smoke (verbose, fail-on-skip)
+      - name: run AC-53 sandbox tests in privileged container
         run: |
           set -euo pipefail
+          # Use a minimal Ubuntu 24.04 image and install the exact
+          # userland the devshell uses. This is the shortest path to
+          # a working bwrap on a hosted GitHub runner. If test timings
+          # become a concern we can pre-publish ghcr.io/open-pincery/devshell.
           OUT=$(mktemp)
-          # Build the test binary first (unprivileged — cargo + rust-cache
-          # own the target dir).
-          cargo test --no-run --test sandbox_real_smoke
-          # Locate the compiled test binary.
-          TEST_BIN=$(find target/debug/deps -maxdepth 1 -type f -name 'sandbox_real_smoke-*' -executable | head -1)
-          if [ -z "$TEST_BIN" ]; then
-            echo "::error::could not locate compiled sandbox_real_smoke test binary" >&2
-            exit 1
-          fi
-          # Run as root so bwrap inherits CAP_SYS_ADMIN in the init
-          # user namespace. Required to bypass the locked-inherited-mount
-          # propagation check on hosted runners (see comments in the
-          # `test` job). Bwrap still unshares into an unprivileged
-          # child userns for the actual sandboxed command — isolation
-          # posture is unchanged.
-          sudo -E "$TEST_BIN" --nocapture --test-threads=1 | tee "$OUT"
-          # Fail if the suite ran zero tests -- that would mean the
-          # Linux gate or bwrap probe silently disabled our evidence.
-          if grep -qE '^test result:.*0 passed' "$OUT"; then
-            echo "::error::sandbox_real_smoke produced 0 passed tests -- evidence gate failed" >&2
+          docker run --rm --privileged --cgroupns=host \
+            -v "$PWD:/work" -w /work \
+            -e CARGO_HOME=/tmp/cargo \
+            -e CARGO_TERM_COLOR=always \
+            -e RUSTFLAGS="-D warnings" \
+            ubuntu:24.04 \
+            bash -c '
+              set -euo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                bubblewrap slirp4netns uidmap libseccomp-dev libseccomp2 \
+                pkg-config build-essential ca-certificates curl git libssl-dev libpq-dev
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --default-toolchain 1.88.0 --profile minimal
+              export PATH=/tmp/cargo/bin:$PATH
+              bwrap --version
+              # Sanity-check: bwrap actually creates a user+pid ns.
+              bwrap --unshare-user --unshare-pid --dev-bind / / /bin/true
+              # Run every real-bwrap suite as a single cargo invocation
+              # so target/ is shared. --test-threads=1 matches production
+              # because tempdirs + procfs probes are not thread-safe.
+              cargo test --test sandbox_real_smoke --test sandbox_landlock_test \
+                         --test sandbox_seccomp_test --test sandbox_cgroup_test \
+                         -- --nocapture --test-threads=1
+            ' | tee "$OUT"
+          # Fail if the suite ran zero tests -- would mean the
+          # bwrap probe or Linux gate silently skipped our evidence.
+          if grep -qE '^test result:.*0 passed' "$OUT" && ! grep -qE '^test result:.*[1-9][0-9]* passed' "$OUT"; then
+            echo "::error::sandbox smoke produced 0 passed tests -- evidence gate failed" >&2
             exit 1
           fi
 
