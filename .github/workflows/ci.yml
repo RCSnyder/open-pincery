@@ -70,9 +70,20 @@ jobs:
       # `--privileged`; on bare CI runners we flip the sysctl off so
       # the sandbox tests can exercise real namespace isolation.
       # This is safe on an ephemeral hosted runner.
+      #
+      # We also have to change `/` to MS_PRIVATE propagation on the
+      # host. Hosted runners inherit systemd's default shared mount
+      # propagation, and an unprivileged user namespace cannot alter
+      # mount propagation on LOCKED mounts inherited from the host.
+      # Bwrap's internal `mount("none", "/", NULL, MS_SLAVE|MS_REC, NULL)`
+      # then fails with EPERM ("Failed to make / slave"). Making /
+      # private on the host means bwrap's child ns inherits it as
+      # private, and the MS_SLAVE flip becomes a no-op that succeeds.
+      # This only affects the ephemeral runner, not our sandbox posture.
       - name: allow unprivileged user namespaces (AppArmor workaround)
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo mount --make-rprivate /
           # Sanity-check: bwrap actually creates a user+pid ns on this runner.
           bwrap --unshare-user --unshare-pid --dev-bind / / /bin/true
       - run: cargo test --all -- --test-threads=1
@@ -96,6 +107,7 @@ jobs:
       - name: allow unprivileged user namespaces (AppArmor workaround)
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo mount --make-rprivate /
           bwrap --unshare-user --unshare-pid --dev-bind / / /bin/true
       - name: cargo test --test sandbox_real_smoke (verbose, fail-on-skip)
         run: |
