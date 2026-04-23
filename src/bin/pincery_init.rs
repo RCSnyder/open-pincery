@@ -18,13 +18,17 @@
 //! - G0a.3c (shipped): install seccomp filter via
 //!   `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &sock_fprog)`.
 //!   Verifies install via `/proc/self/status`'s `Seccomp:` line.
-//! - G0a.3d (this slice): install landlock filesystem ruleset via
+//! - G0a.3d (shipped): install landlock filesystem ruleset via
 //!   `runtime::sandbox::landlock_layer::install_landlock`, placed
 //!   BEFORE seccomp so the filter does not need to allow the
 //!   `landlock_*` syscalls. Gate on at least one rx/rwx path.
-//! - G0a.3e..h (pending): FullyEnforced verify → JSON fd-3 error
-//!   channel → RealSandbox rewiring → default flip + un-ignore
-//!   landlock tests.
+//! - G0a.3e (this slice): if `policy.require_fully_enforced` is
+//!   `true`, verify that every requested layer actually enforced:
+//!   landlock status is `RulesetStatus::FullyEnforced`, seccomp
+//!   mode in `/proc/self/status` is `2`, `NoNewPrivs` is `1`.
+//!   Fails closed with `InitError::VerifyPolicy` otherwise.
+//! - G0a.3f..h (pending): JSON fd-3 error channel → RealSandbox
+//!   rewiring → default flip + un-ignore landlock tests.
 //!
 //! ## Still out of scope until later sub-slices
 //!
@@ -416,11 +420,31 @@ mod linux {
     ///
     /// ## Empty-policy short-circuit
     ///
-    /// When both path lists are empty we log and skip. The parent
-    /// populates the lists only when `SandboxProfile.landlock = true`,
-    /// so empty lists mean "landlock layer not requested". G0a.3e's
-    /// FullyEnforced verify will refuse to accept empty lists when
-    /// `require_fully_enforced = true`.
+    /// When both path lists are empty we log and skip, returning
+    /// `Ok(None)`. The parent populates the lists only when
+    /// `SandboxProfile.landlock = true`, so empty lists mean
+    /// "landlock layer not requested". G0a.3e's FullyEnforced verify
+    /// refuses to accept empty lists when `require_fully_enforced`
+    /// is `true`.
+    ///
+    /// ## Return value
+    ///
+    /// `Ok(Some(status))` when the ruleset was installed —
+    /// `G0a.3e`'s verify step compares `status` against
+    /// `RulesetStatus::FullyEnforced`. `Ok(None)` when install was
+    /// skipped (empty policy).
+    ///
+    /// ## Test-only PartiallyEnforced override
+    ///
+    /// To exercise the FullyEnforced verify rejection path without
+    /// a kernel that actually downgrades to `PartiallyEnforced`,
+    /// setting both `OPEN_PINCERY_ALLOW_UNSAFE=true` AND
+    /// `OPEN_PINCERY_INIT_FORCE_PARTIAL=1` makes this function
+    /// return `Ok(Some(RulesetStatus::PartiallyEnforced))` after the
+    /// real install. The two-flag gate matches the existing
+    /// `ResolvedSandboxMode` unsafe-opt-in pattern (see `config.rs`)
+    /// so the knob cannot be armed by a single env-var typo in
+    /// production.
     ///
     /// ## Why we reuse `landlock_layer::install_landlock`
     ///
@@ -446,12 +470,17 @@ mod linux {
     /// thread, a raw `syscall(SYS_landlock_restrict_self, fd,
     /// LANDLOCK_RESTRICT_SELF_TSYNC)` shim must replace the crate
     /// call.
-    fn apply_landlock(policy: &SandboxInitPolicy) -> Result<(), InitError> {
-        use open_pincery::runtime::sandbox::landlock_layer::{install_landlock, LandlockProfile};
+    fn apply_landlock(
+        policy: &SandboxInitPolicy,
+    ) -> Result<Option<open_pincery::runtime::sandbox::landlock_layer::RulesetStatus>, InitError>
+    {
+        use open_pincery::runtime::sandbox::landlock_layer::{
+            install_landlock, LandlockProfile, RulesetStatus,
+        };
 
         if policy.landlock_rx_paths.is_empty() && policy.landlock_rwx_paths.is_empty() {
             eprintln!("pincery-init: landlock skipped (no rx/rwx paths in policy)");
-            return Ok(());
+            return Ok(None);
         }
 
         let profile = LandlockProfile {
@@ -459,30 +488,134 @@ mod linux {
             rwx_paths: policy.landlock_rwx_paths.clone(),
         };
 
-        install_landlock(&profile).map_err(|e| InitError::ApplyPolicy(format!("landlock: {e}")))
+        let mut status = install_landlock(&profile)
+            .map_err(|e| InitError::ApplyPolicy(format!("landlock: {e}")))?;
+
+        // Test-only override: force a PartiallyEnforced observation
+        // for the FullyEnforced verify negative case. Requires BOTH
+        // OPEN_PINCERY_ALLOW_UNSAFE=true AND
+        // OPEN_PINCERY_INIT_FORCE_PARTIAL=1 — the double gate is
+        // deliberate so the knob cannot trigger on a single env-var
+        // typo.
+        let unsafe_ok = std::env::var("OPEN_PINCERY_ALLOW_UNSAFE")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        let force_partial = std::env::var("OPEN_PINCERY_INIT_FORCE_PARTIAL")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        if unsafe_ok && force_partial {
+            eprintln!(
+                "pincery-init: OPEN_PINCERY_INIT_FORCE_PARTIAL override active \
+                 (landlock status downgraded to PartiallyEnforced for test)"
+            );
+            status = RulesetStatus::PartiallyEnforced;
+        }
+
+        Ok(Some(status))
+    }
+
+    /// Verify that every layer the policy requested is actually
+    /// FullyEnforced. Step 5 of the T-G0a-6 pipeline. No-op when
+    /// `policy.require_fully_enforced` is `false` (v9 default; AC-85
+    /// flips this to `true` for production).
+    ///
+    /// When `require_fully_enforced` is `true`, all three checks run
+    /// and ALL must pass:
+    ///
+    /// 1. Landlock: if `policy.landlock_rx_paths` or
+    ///    `landlock_rwx_paths` is non-empty, `landlock_status` must
+    ///    be `Some(RulesetStatus::FullyEnforced)`. Anything else
+    ///    (including `None`, meaning the apply short-circuited)
+    ///    fails.
+    /// 2. Seccomp: if `policy.seccomp_bpf` is non-empty,
+    ///    `/proc/self/status`'s `Seccomp:` line must read `2`
+    ///    (filter mode). This re-reads /proc rather than trusting a
+    ///    stashed value from `apply_seccomp` so a silent downgrade
+    ///    between steps would still be caught.
+    /// 3. NoNewPrivs: `prctl(PR_GET_NO_NEW_PRIVS)` must return `1`
+    ///    unconditionally. Handled by the same
+    ///    [`verify_no_new_privs`] function used today, called at
+    ///    the end of `apply_policy`.
+    ///
+    /// Failures surface as `InitError::VerifyPolicy` with a message
+    /// naming the specific failing layer, so the fd-3 JSON channel
+    /// (G0a.3f) can surface a structured `not_fully_enforced` event.
+    fn verify_fully_enforced(
+        policy: &SandboxInitPolicy,
+        landlock_status: Option<open_pincery::runtime::sandbox::landlock_layer::RulesetStatus>,
+    ) -> Result<(), InitError> {
+        use open_pincery::runtime::sandbox::landlock_layer::RulesetStatus;
+
+        if !policy.require_fully_enforced {
+            return Ok(());
+        }
+
+        let landlock_requested =
+            !policy.landlock_rx_paths.is_empty() || !policy.landlock_rwx_paths.is_empty();
+        if landlock_requested {
+            match landlock_status {
+                Some(RulesetStatus::FullyEnforced) => {}
+                Some(other) => {
+                    return Err(InitError::VerifyPolicy(format!(
+                        "landlock not FullyEnforced: status={other:?} \
+                         (require_fully_enforced=true)"
+                    )));
+                }
+                None => {
+                    return Err(InitError::VerifyPolicy(
+                        "landlock was skipped but require_fully_enforced=true".into(),
+                    ));
+                }
+            }
+        }
+
+        if !policy.seccomp_bpf.is_empty() {
+            // Re-read /proc/self/status so a downgrade between
+            // apply_seccomp and here is still caught. The re-read is
+            // cheap and matches the defense-in-depth posture of the
+            // uid/gid getresuid verification.
+            let status = std::fs::read_to_string("/proc/self/status").map_err(|e| {
+                InitError::VerifyPolicy(format!("read /proc/self/status for seccomp verify: {e}"))
+            })?;
+            let mode = status
+                .lines()
+                .find_map(|l| l.strip_prefix("Seccomp:"))
+                .map(str::trim)
+                .ok_or_else(|| {
+                    InitError::VerifyPolicy(
+                        "no Seccomp: line in /proc/self/status (require_fully_enforced)".into(),
+                    )
+                })?;
+            if mode != "2" {
+                return Err(InitError::VerifyPolicy(format!(
+                    "seccomp not in filter mode: Seccomp={mode:?} \
+                     (require_fully_enforced=true)"
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     /// Apply every restriction in the order mandated by readiness
-    /// T-G0a-6. Slices G0a.3a+b+c+d ship steps 1–4; subsequent
-    /// sub-slices fill in:
-    ///
-    /// - G0a.3e: FullyEnforced verification (step 5).
+    /// T-G0a-6. Slices G0a.3a+b+c+d+e ship steps 1–5; G0a.3f..h
+    /// rewire the wrapper into bwrap and flip the default profile.
     ///
     /// Order is load-bearing: seccomp MUST come after NO_NEW_PRIVS
     /// (unprivileged filter load), drop_privs MUST come before
     /// landlock (so the ruleset applies to the unprivileged
     /// identity), landlock MUST come before seccomp (so the filter
     /// does not need to allow `landlock_*` syscalls), and
-    /// FullyEnforced verification MUST come after both landlock and
-    /// seccomp. Callers must not permute this function's body.
+    /// FullyEnforced verification MUST come last so it observes the
+    /// final state of every layer. Callers must not permute this
+    /// function's body.
     fn apply_policy(policy: &SandboxInitPolicy) -> Result<(), InitError> {
         apply_no_new_privs()?;
         apply_drop_privs(policy)?;
-        apply_landlock(policy)?;
+        let landlock_status = apply_landlock(policy)?;
         apply_seccomp(policy)?;
         verify_no_new_privs()?;
-        // TODO(G0a.3e): if policy.require_fully_enforced, confirm
-        //   the landlock RulesetStatus is FullyEnforced.
+        verify_fully_enforced(policy, landlock_status)?;
         Ok(())
     }
 

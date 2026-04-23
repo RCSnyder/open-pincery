@@ -39,9 +39,9 @@
 
 use std::path::{Path, PathBuf};
 
+pub use landlock::RulesetStatus;
 use landlock::{
-    Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus,
-    ABI,
+    Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI,
 };
 
 /// Fixed set of host paths that need read+execute access for stock
@@ -117,8 +117,8 @@ pub fn landlock_supported() -> bool {
 ///
 /// MUST be called from within a `pre_exec` closure (after `fork(2)`,
 /// before `execve(2)`) so it restricts the child process but not the
-/// parent. Returns `Ok(())` on success, or a string error describing
-/// what failed.
+/// parent. Returns the final [`RulesetStatus`] on success, or a
+/// string error describing what failed.
 ///
 /// We use `ABI::V1` for maximum kernel compatibility (5.13+). V3
 /// adds file-truncation handling but is not required for the
@@ -129,7 +129,17 @@ pub fn landlock_supported() -> bool {
 /// silently skipped - read access to a non-existent path is moot.
 /// Missing rwx paths are an error because the cwd MUST exist (we
 /// just created it as a tempdir).
-pub fn install_landlock(profile: &LandlockProfile) -> Result<(), String> {
+///
+/// ## Return value
+///
+/// `RulesetStatus::FullyEnforced` means the kernel honored every
+/// access bit we requested. `RulesetStatus::PartiallyEnforced`
+/// means the kernel supports landlock but not every bit — harmless
+/// under V1 but callers wanting strict safety (see
+/// `SandboxInitPolicy::require_fully_enforced`) should reject it.
+/// `NotEnforced` is converted to an `Err` internally since it
+/// indicates the ruleset never took effect.
+pub fn install_landlock(profile: &LandlockProfile) -> Result<RulesetStatus, String> {
     let abi = ABI::V1;
     let access_all = AccessFs::from_all(abi);
     let access_read = AccessFs::from_read(abi);
@@ -163,10 +173,12 @@ pub fn install_landlock(profile: &LandlockProfile) -> Result<(), String> {
         .map_err(|e| format!("landlock restrict_self failed: {e}"))?;
 
     match status.ruleset {
-        // Either fully or partially is acceptable - partial means
-        // the kernel supports landlock but not at every access bit
-        // we asked for, which is harmless given V1's narrow surface.
-        RulesetStatus::FullyEnforced | RulesetStatus::PartiallyEnforced => Ok(()),
+        // Either fully or partially is acceptable here - partial
+        // means the kernel supports landlock but not at every access
+        // bit we asked for, which is harmless given V1's narrow
+        // surface. Callers that require strict enforcement compare
+        // the returned status against `RulesetStatus::FullyEnforced`.
+        RulesetStatus::FullyEnforced | RulesetStatus::PartiallyEnforced => Ok(status.ruleset),
         RulesetStatus::NotEnforced => {
             Err("landlock not enforced (kernel returned NotEnforced status)".into())
         }

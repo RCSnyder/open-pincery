@@ -1,5 +1,26 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — Slice G0a.3e: FullyEnforced verification inside `pincery-init` (AC-83, T-G0a-6 step 5 of 6) — 2026-04-23T08:00Z
+
+- **Gate**: PASS (verification ladder; `get_errors` clean; CI is the authoritative runner).
+- **What this slice ships**: `verify_fully_enforced(policy, landlock_status)` inside the wrapper. When `policy.require_fully_enforced = true`, all three layers must have taken: landlock status is `RulesetStatus::FullyEnforced` (only checked when the policy actually requested landlock — non-empty rx or rwx), seccomp mode in `/proc/self/status` is `2` (only checked when `seccomp_bpf` non-empty), and NNP is handled by the existing `verify_no_new_privs` call that already runs at the end of `apply_policy`. No-op when `require_fully_enforced = false` (v9 default; AC-85 flips this).
+- **Interface change**: `runtime::sandbox::landlock_layer::install_landlock` now returns `Result<RulesetStatus, String>` instead of `Result<(), String>`, and the module re-exports `RulesetStatus` for downstream callers. The one existing caller in `bwrap.rs` was updated to `.map(|_status| ())` — it already covers the `NotEnforced` rejection internally, so exposing the status is purely additive. The wrapper's `apply_landlock` now returns `Result<Option<RulesetStatus>, InitError>`; `None` means the apply step short-circuited on an empty policy.
+- **Test-only PartiallyEnforced knob**: readiness clarification #5 called for a stubbable reproducer since we can't easily force the kernel to return PartiallyEnforced. Implemented as an environment-variable override that downgrades the observed status to `PartiallyEnforced` after a successful install, gated on BOTH `OPEN_PINCERY_ALLOW_UNSAFE=true` AND `OPEN_PINCERY_INIT_FORCE_PARTIAL=1`. The double gate matches the existing `ResolvedSandboxMode` footgun pattern in `config.rs` (AC-73), so a single env-var typo in production cannot arm the knob.
+- **Ordering recap (unchanged)**: NNP → drop_privs → landlock → seccomp → verify_no_new_privs → verify_fully_enforced. The final verify runs LAST so it observes the terminal state of every layer; a silent downgrade between apply and verify would still be caught.
+- **Integration proofs** (`tests/pincery_init_skeleton_test.rs`):
+  - `skeleton_fully_enforced_passes_when_all_layers_enforce` — sets `require_fully_enforced=true` with the standard `sample_policy` (which actually installs landlock + loads seccomp), asserts exit 0 + expected stdout "fully-enforced-ok".
+  - `skeleton_fully_enforced_rejects_partial_landlock` — sets `require_fully_enforced=true` and arms the double-gated force-partial knob in the child process environment, asserts exit 125 and stderr that names both the FullyEnforced mismatch and the "verifying policy" stage.
+- **Files touched**:
+  - `src/runtime/sandbox/landlock.rs`: `install_landlock` signature change, `RulesetStatus` re-export, docstring updates.
+  - `src/runtime/sandbox/bwrap.rs`: existing `pre_exec` caller updated to discard the new `RulesetStatus` return.
+  - `src/bin/pincery_init.rs`: +`verify_fully_enforced`, `apply_landlock` rewritten to return `Option<RulesetStatus>`, `apply_policy` now captures and forwards the status, module doc + ordering rationale updated.
+  - `tests/pincery_init_skeleton_test.rs`: +2 tests, module doc updated.
+  - `scaffolding/log.md`: this entry.
+- **Not touched**: `bwrap.rs`'s parent-side landlock install (the whole `pre_exec` path) still exists — its removal is explicitly G0a.3g scope. `SandboxProfile::default` still ships `landlock=false` until G0a.3h. The three `#[ignore]`d landlock integration tests stay ignored until G0a.3h.
+- **Concerns**: None surfacing. The `install_landlock` return-type change could have downstream ripples if there were other callers — grep confirms there are only two (the wrapper and bwrap's `pre_exec`), both updated here.
+- **Retries**: 0 so far.
+- **Next sub-slices**: G0a.3f (JSON error channel on fd 3 — opens fd 3 in the wrapper AFTER consuming the policy fd, writes structured JSON for any pre-exec failure, leaves stderr + exit 125 as the fallback for fd-3 setup failures), G0a.3g (RealSandbox wiring: `--ro-bind <init>`, memfd inheritance, argv rewrite to invoke `pincery-init --policy-fd <N> -- <argv>`, remove parent `pre_exec` landlock install in `RealSandbox::run`), G0a.3h (flip `SandboxProfile::default → landlock=true` + un-ignore the three landlock integration tests).
+
 ## BUILD v9 — Slice G0a.3d: install landlock inside `pincery-init` (AC-83, T-G0a-6 step 4 of 6) — 2026-04-23T07:10Z
 
 - **Gate**: PASS (verification ladder; `get_errors` clean; CI is the authoritative runner).

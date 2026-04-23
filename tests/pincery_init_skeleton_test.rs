@@ -15,12 +15,19 @@
 //!   `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER)`. Proved via
 //!   `/proc/self/status`'s `Seccomp: 2` line + a misaligned-bytes
 //!   negative case.
-//! - G0a.3d (this slice): install landlock filesystem ruleset via
+//! - G0a.3d (shipped): install landlock filesystem ruleset via
 //!   `runtime::sandbox::landlock_layer::install_landlock`. Proved
 //!   by observing that a write to a path OUTSIDE
 //!   `policy.landlock_rwx_paths` fails while a write INSIDE
 //!   succeeds.
-//! - G0a.3e (pending): FullyEnforced verification.
+//! - G0a.3e (this slice): when `policy.require_fully_enforced` is
+//!   true, verify landlock `FullyEnforced` + seccomp filter + NNP.
+//!   Proved by (a) a happy-path policy with a real landlock install
+//!   that succeeds and execs cleanly, (b) a negative case that arms
+//!   `OPEN_PINCERY_INIT_FORCE_PARTIAL=1` alongside
+//!   `OPEN_PINCERY_ALLOW_UNSAFE=true` to downgrade the observed
+//!   status to `PartiallyEnforced`, expecting exit 125 with a
+//!   descriptive stderr line.
 //!
 //! Linux-only: relies on `memfd_create(2)` + fd inheritance via
 //! `pre_exec(dup2)`. Windows/macOS compile this file as empty.
@@ -685,5 +692,131 @@ fn skeleton_installs_landlock_restricts_fs_before_exec() {
         "write to rwx workspace {} failed — rwx rule not granting \
          access; stderr={stderr}",
         workspace.path().display(),
+    );
+}
+
+/// Slice G0a.3e happy path: when `require_fully_enforced=true`, a
+/// policy that actually installs landlock + seccomp + NNP must pass
+/// the final verify and reach exec. The observable is successful
+/// exit + expected stdout from the user program.
+#[test]
+fn skeleton_fully_enforced_passes_when_all_layers_enforce() {
+    if !PathBuf::from("/bin/sh").exists() {
+        eprintln!("skipping: /bin/sh not present on this host");
+        return;
+    }
+    if !open_pincery::runtime::sandbox::landlock_layer::landlock_supported() {
+        eprintln!("skipping: landlock not supported by this kernel");
+        return;
+    }
+
+    let mut policy = sample_policy(vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        "printf fully-enforced-ok".to_string(),
+    ]);
+    policy.require_fully_enforced = true;
+
+    let bytes = policy.to_bytes().expect("serialize policy");
+    let policy_fd = make_policy_memfd(&bytes);
+
+    let mut cmd = Command::new(pincery_init_bin());
+    cmd.args([
+        "--policy-fd",
+        "3",
+        "--",
+        "/bin/sh",
+        "-c",
+        "printf fully-enforced-ok",
+    ])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::dup2(policy_fd, 3) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    let output = cmd.output().expect("spawn pincery-init");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "pincery-init failed under require_fully_enforced=true: \
+         status={:?} stdout={stdout} stderr={stderr}",
+        output.status,
+    );
+    assert_eq!(
+        stdout.trim(),
+        "fully-enforced-ok",
+        "user program did not run (verify rejected or exec failed); \
+         stderr={stderr}",
+    );
+}
+
+/// Slice G0a.3e negative path: when `require_fully_enforced=true`
+/// and we arm the unsafe test knob
+/// (`OPEN_PINCERY_ALLOW_UNSAFE=true` + `OPEN_PINCERY_INIT_FORCE_PARTIAL=1`)
+/// to downgrade the observed landlock status to `PartiallyEnforced`,
+/// the wrapper must fail closed with exit 125 and name the failure
+/// on stderr.
+///
+/// This proves the rejection path runs end-to-end without requiring
+/// a kernel that actually returns `PartiallyEnforced` — the override
+/// gate is deliberately two env vars so it cannot arm in production
+/// (see the `apply_landlock` docstring).
+#[test]
+fn skeleton_fully_enforced_rejects_partial_landlock() {
+    if !PathBuf::from("/bin/true").exists() {
+        eprintln!("skipping: /bin/true not present on this host");
+        return;
+    }
+    if !open_pincery::runtime::sandbox::landlock_layer::landlock_supported() {
+        eprintln!("skipping: landlock not supported by this kernel");
+        return;
+    }
+
+    let mut policy = sample_policy(vec!["/bin/true".to_string()]);
+    policy.require_fully_enforced = true;
+
+    let bytes = policy.to_bytes().expect("serialize policy");
+    let policy_fd = make_policy_memfd(&bytes);
+
+    let mut cmd = Command::new(pincery_init_bin());
+    cmd.args(["--policy-fd", "3", "--", "/bin/true"])
+        .env("OPEN_PINCERY_ALLOW_UNSAFE", "true")
+        .env("OPEN_PINCERY_INIT_FORCE_PARTIAL", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::dup2(policy_fd, 3) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    let output = cmd.output().expect("spawn pincery-init");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        output.status.code(),
+        Some(125),
+        "forced PartiallyEnforced should fail closed under \
+         require_fully_enforced=true; status={:?} stderr={stderr}",
+        output.status,
+    );
+    assert!(
+        stderr.contains("FullyEnforced") || stderr.contains("PartiallyEnforced"),
+        "stderr should name the FullyEnforced verify failure, got:\n{stderr}",
+    );
+    assert!(
+        stderr.contains("verifying policy") || stderr.contains("VerifyPolicy"),
+        "stderr should surface this as a verify-stage failure, got:\n{stderr}",
     );
 }

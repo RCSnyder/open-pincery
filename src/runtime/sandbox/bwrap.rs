@@ -315,9 +315,11 @@ impl ToolExecutor for RealSandbox {
                 // same posture used by every Rust sandbox crate.
                 unsafe {
                     command.pre_exec(move || {
-                        super::landlock_layer::install_landlock(&landlock_profile).map_err(|e| {
-                            std::io::Error::new(std::io::ErrorKind::PermissionDenied, e)
-                        })
+                        super::landlock_layer::install_landlock(&landlock_profile)
+                            .map(|_status| ())
+                            .map_err(|e| {
+                                std::io::Error::new(std::io::ErrorKind::PermissionDenied, e)
+                            })
                     });
                 }
             }
