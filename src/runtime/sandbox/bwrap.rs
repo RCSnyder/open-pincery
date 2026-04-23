@@ -20,12 +20,109 @@
 #![cfg(target_os = "linux")]
 
 use async_trait::async_trait;
+use std::fs::File;
+use std::io::{self, Seek, SeekFrom, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use crate::config::{ResolvedSandboxMode, SandboxMode};
 
 use super::cgroup::CgroupGuard;
+use super::init_policy::SandboxInitPolicy;
+use super::landlock_layer::LandlockProfile;
 use super::{is_rejected_pattern, ExecResult, SandboxProfile, ShellCommand, ToolExecutor};
+
+/// AC-83 / Slice G0a.3g: parameters needed to splice `pincery-init`
+/// into bwrap's argv. The wrapper binary is ro-bind-mounted at a
+/// well-known path inside the sandbox, then bwrap's argv tail is
+/// rewritten from `-- sh -c <cmd>` to
+/// `-- /sandbox/init --policy-fd N -- sh -c <cmd>`. The policy
+/// memfd must be a non-CLOEXEC fd held alive by the caller
+/// until after `wait_with_output` so the kernel has the bytes
+/// available when the wrapper reads them.
+pub(super) struct PinceryInitWiring {
+    /// Absolute host path of the `pincery-init` binary. The
+    /// parent resolves this via [`pincery_init_bin_path`].
+    pub(super) host_path: String,
+    /// Raw fd number (non-CLOEXEC) of the policy memfd that the
+    /// wrapper will read its serialized [`SandboxInitPolicy`] from.
+    pub(super) policy_fd: RawFd,
+}
+
+/// Well-known path where the `pincery-init` binary is ro-bind-
+/// mounted inside every bwrap sandbox. Kept in one place so the
+/// argv rewrite and the `--ro-bind` flag can never disagree.
+const SANDBOX_INIT_PATH: &str = "/sandbox/init";
+
+/// Resolve the on-host path of the `pincery-init` binary.
+///
+/// Resolution order:
+///   1. `PINCERY_INIT_BIN_PATH` environment variable — explicit
+///      operator override, also used by integration tests to point
+///      at `env!("CARGO_BIN_EXE_pincery-init")`.
+///   2. `current_exe().parent()/pincery-init` — sibling of the
+///      running `open-pincery` binary. Matches the layout cargo
+///      produces for `cargo install` and the devshell's
+///      `/usr/local/bin` deploy.
+///
+/// Returns a `String` error (not `io::Error`) so the caller can
+/// thread it into an `ExecResult::Err` without an extra conversion.
+pub(super) fn pincery_init_bin_path() -> Result<PathBuf, String> {
+    if let Some(override_path) = std::env::var_os("PINCERY_INIT_BIN_PATH") {
+        return Ok(PathBuf::from(override_path));
+    }
+    let current = std::env::current_exe().map_err(|e| format!("current_exe() failed: {e}"))?;
+    let parent = current
+        .parent()
+        .ok_or_else(|| format!("current_exe has no parent: {}", current.display()))?;
+    Ok(parent.join("pincery-init"))
+}
+
+/// Build the `SandboxInitPolicy` that the in-sandbox wrapper will
+/// apply. G0a.3g only exercises the landlock layer — seccomp stays
+/// on bwrap's `--seccomp <fd>` path, and the privilege drop is a
+/// no-op because `target_uid`/`target_gid` match the wrapper's
+/// inherited euid/egid (bwrap without an explicit `--uid` preserves
+/// the caller's uid inside the userns).
+fn build_init_policy(cwd: &Path) -> SandboxInitPolicy {
+    let landlock = LandlockProfile::default_for_cwd(cwd);
+    // SAFETY: libc getters with no arguments; cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    let gid = unsafe { libc::getegid() };
+    SandboxInitPolicy {
+        landlock_rx_paths: landlock.rx_paths,
+        landlock_rwx_paths: landlock.rwx_paths,
+        seccomp_bpf: Vec::new(),
+        target_uid: uid,
+        target_gid: gid,
+        require_fully_enforced: false,
+        user_argv: Vec::new(), // unused — wrapper gets argv via `--` tail
+    }
+}
+
+/// Write the serialized `SandboxInitPolicy` into a fresh non-CLOEXEC
+/// memfd, rewound to offset 0 so the wrapper's first `read(2)`
+/// sees byte 0. Mirrors
+/// [`super::seccomp::write_bpf_to_memfd`] but for JSON bytes.
+fn write_policy_to_memfd(bytes: &[u8]) -> io::Result<OwnedFd> {
+    let name = c"pincery-init-policy";
+    // SAFETY: libc FFI; static C-string ptr; constant flags (0 so
+    // the fd inherits across execve without MFD_CLOEXEC).
+    let raw = unsafe { libc::memfd_create(name.as_ptr(), 0) };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `raw` is a fresh kernel-allocated fd with no existing
+    // owner; `OwnedFd` takes exclusive ownership.
+    let owned = unsafe { OwnedFd::from_raw_fd(raw) };
+    // Go through `File` for a batteries-included `write_all` +
+    // `seek` API, then hand ownership back as `OwnedFd`.
+    let mut file: File = owned.into();
+    file.write_all(bytes)?;
+    file.seek(SeekFrom::Start(0))?;
+    Ok(OwnedFd::from(file))
+}
 
 /// Linux-only bubblewrap-backed executor.
 ///
@@ -57,11 +154,19 @@ impl RealSandbox {
     /// insert `--seccomp <fd>` into bwrap's argv; bwrap reads the
     /// program from that fd and installs it via `seccomp(2)` right
     /// before `execve`-ing the user shell.
+    ///
+    /// `init_wiring` (AC-83 / Slice G0a.3g) threads `pincery-init`
+    /// into the argv: the binary is ro-bind-mounted at
+    /// `/sandbox/init`, and the argv tail is rewritten from
+    /// `-- sh -c <cmd>` to
+    /// `-- /sandbox/init --policy-fd N -- sh -c <cmd>`. When `None`
+    /// the argv tail is the pre-G0a shape (direct `sh -c <cmd>`).
     fn build_bwrap_args(
         cwd: &str,
         command: &str,
         deny_net: bool,
         seccomp_fd: Option<std::os::fd::RawFd>,
+        init_wiring: Option<&PinceryInitWiring>,
     ) -> Vec<String> {
         let mut args: Vec<String> = vec![
             // Clean up if the parent dies mid-execution.
@@ -133,7 +238,29 @@ impl RealSandbox {
             args.push("--seccomp".into());
             args.push(fd.to_string());
         }
-        args.extend(["--".into(), "sh".into(), "-c".into(), command.into()]);
+        if let Some(wiring) = init_wiring {
+            // Mount the pincery-init binary at a fixed well-known
+            // path inside the sandbox. `--ro-bind` auto-creates
+            // missing parent dirs in bwrap's root tmpfs.
+            args.push("--ro-bind".into());
+            args.push(wiring.host_path.clone());
+            args.push(SANDBOX_INIT_PATH.into());
+            // Argv tail: exec the wrapper, hand it the policy fd,
+            // then pass the user shell command as the wrapper's
+            // `user_argv` (everything after the inner `--`).
+            args.extend([
+                "--".into(),
+                SANDBOX_INIT_PATH.into(),
+                "--policy-fd".into(),
+                wiring.policy_fd.to_string(),
+                "--".into(),
+                "sh".into(),
+                "-c".into(),
+                command.into(),
+            ]);
+        } else {
+            args.extend(["--".into(), "sh".into(), "-c".into(), command.into()]);
+        }
         args
     }
 
@@ -234,8 +361,105 @@ impl ToolExecutor for RealSandbox {
             (None, None)
         };
 
-        let bwrap_args =
-            Self::build_bwrap_args(&cwd_str, &cmd.command, profile.deny_net, seccomp_fd_arg);
+        // AC-83 / Slice G0a.3g: landlock now installs INSIDE the
+        // sandbox via `pincery-init`, post-namespace setup. The old
+        // parent `pre_exec` install path is architecturally broken
+        // on MS_SLAVE-locked systemd hosts (see
+        // docs/security/sandbox-architecture-audit.md); the wrapper
+        // path is the replacement.
+        //
+        // Mode posture mirrors seccomp + cgroup:
+        //   - Enforce + landlock unsupported  → fail closed.
+        //   - Enforce + landlock supported    → wire pincery-init.
+        //   - Audit + unsupported             → log, proceed without
+        //                                       the wrapper (direct
+        //                                       `sh -c` argv tail).
+        //
+        // `_init_policy_fd` owns the non-CLOEXEC memfd and must
+        // outlive `wait_with_output` — the wrapper reads its policy
+        // from it during startup.
+        let (_init_policy_fd, init_wiring): (Option<OwnedFd>, Option<PinceryInitWiring>) =
+            if profile.landlock {
+                if !super::landlock_layer::landlock_supported() {
+                    match self.sandbox.mode {
+                        SandboxMode::Enforce => {
+                            return ExecResult::Err(
+                                "landlock layer unsupported (kernel < 5.13, enforce mode, \
+                             failing closed)"
+                                    .into(),
+                            );
+                        }
+                        SandboxMode::Audit | SandboxMode::Disabled => {
+                            tracing::warn!(
+                                target = "sandbox.landlock",
+                                mode = ?self.sandbox.mode,
+                                "landlock unsupported (kernel < 5.13); proceeding without it"
+                            );
+                            (None, None)
+                        }
+                    }
+                } else {
+                    let host_path = match pincery_init_bin_path() {
+                        Ok(p) => p,
+                        Err(reason) => {
+                            return ExecResult::Err(format!(
+                                "pincery-init bin path resolution failed: {reason}"
+                            ));
+                        }
+                    };
+                    if !host_path.exists() {
+                        return ExecResult::Err(format!(
+                            "pincery-init binary not found at {} (set PINCERY_INIT_BIN_PATH to \
+                         override)",
+                            host_path.display()
+                        ));
+                    }
+                    let host_path_str = match host_path.to_str() {
+                        Some(s) => s.to_string(),
+                        None => {
+                            return ExecResult::Err(format!(
+                                "pincery-init bin path is not valid UTF-8: {}",
+                                host_path.display()
+                            ));
+                        }
+                    };
+                    let policy = build_init_policy(&cwd);
+                    let policy_bytes = match policy.to_bytes() {
+                        Ok(b) => b,
+                        Err(e) => {
+                            return ExecResult::Err(format!(
+                                "serialize SandboxInitPolicy failed: {e}"
+                            ));
+                        }
+                    };
+                    let fd = match write_policy_to_memfd(&policy_bytes) {
+                        Ok(fd) => fd,
+                        Err(e) => {
+                            return ExecResult::Err(format!(
+                                "policy memfd_create/write failed: {e}"
+                            ));
+                        }
+                    };
+                    let raw = fd.as_raw_fd();
+                    (
+                        Some(fd),
+                        Some(PinceryInitWiring {
+                            host_path: host_path_str,
+                            policy_fd: raw,
+                        }),
+                    )
+                }
+            } else {
+                (None, None)
+            };
+
+        let bwrap_args = Self::build_bwrap_args(
+            &cwd_str,
+            &cmd.command,
+            profile.deny_net,
+            seccomp_fd_arg,
+            init_wiring.as_ref(),
+        );
 
         let mut command = tokio::process::Command::new("bwrap");
         command
@@ -257,72 +481,6 @@ impl ToolExecutor for RealSandbox {
         // plaintexts) wins over the allowlist when names collide.
         for (k, v) in &cmd.env {
             command.env(k, v);
-        }
-
-        // AC-53 / Slice A2b.4c: landlock LSM filesystem ruleset.
-        //
-        // Layer 4 of the six-layer sandbox. Installed AFTER fork but
-        // BEFORE execve via `pre_exec`, so the ruleset restricts the
-        // bwrap child + its sh descendant without touching the parent
-        // pincery process. Inode semantics: bwrap's RO-bind of /usr,
-        // /bin, etc. preserves the host inodes, so landlock's
-        // PathBeneath rules continue to allow access inside the
-        // sandbox view.
-        //
-        // Mode posture (mirrors cgroup + seccomp):
-        //   - Enforce + landlock unsupported  → fail closed.
-        //   - Enforce + landlock supported   → install; pre_exec
-        //     install failure surfaces as spawn() Err.
-        //   - Audit + unsupported            → log, proceed.
-        //   - Audit + install fails at runtime → spawn() Err
-        //     bubbles up (kernel-level enforcement failure is rare
-        //     and indistinguishable from a hard error from the
-        //     caller's perspective).
-        if profile.landlock {
-            if !super::landlock_layer::landlock_supported() {
-                match self.sandbox.mode {
-                    SandboxMode::Enforce => {
-                        return ExecResult::Err(
-                            "landlock layer unsupported (kernel < 5.13, enforce mode, \
-                             failing closed)"
-                                .into(),
-                        );
-                    }
-                    SandboxMode::Audit | SandboxMode::Disabled => {
-                        tracing::warn!(
-                            target = "sandbox.landlock",
-                            mode = ?self.sandbox.mode,
-                            "landlock unsupported (kernel < 5.13); proceeding without it"
-                        );
-                    }
-                }
-            } else {
-                let landlock_profile =
-                    super::landlock_layer::LandlockProfile::default_for_cwd(&cwd);
-                // Note: tokio::process::Command::pre_exec is an inherent method,
-                // so no trait import is required.
-                // SAFETY: pre_exec runs in the forked child between
-                // fork and execve. The closure must be async-signal
-                // safe in principle. install_landlock performs
-                // landlock syscalls (no malloc) and PathFd::new opens
-                // file descriptors (open(2), async-signal-safe). The
-                // landlock crate's internal Vec growth happens BEFORE
-                // pre_exec is invoked at spawn time? No - the closure
-                // is invoked post-fork, so the Vec grows in the
-                // child's address space. glibc's malloc post-fork in
-                // a multi-threaded parent is technically UB, but in
-                // practice glibc handles this safely; this is the
-                // same posture used by every Rust sandbox crate.
-                unsafe {
-                    command.pre_exec(move || {
-                        super::landlock_layer::install_landlock(&landlock_profile)
-                            .map(|_status| ())
-                            .map_err(|e| {
-                                std::io::Error::new(std::io::ErrorKind::PermissionDenied, e)
-                            })
-                    });
-                }
-            }
         }
 
         let child = match command.spawn() {
@@ -391,7 +549,7 @@ mod tests {
 
     #[test]
     fn bwrap_args_include_each_required_namespace_flag() {
-        let args = RealSandbox::build_bwrap_args("/tmp/work", "echo hi", true, None);
+        let args = RealSandbox::build_bwrap_args("/tmp/work", "echo hi", true, None, None);
         // The order matters less than the presence — bwrap processes
         // flags in sequence, but each namespace flag is independent.
         for flag in [
@@ -413,7 +571,7 @@ mod tests {
 
     #[test]
     fn bwrap_args_keep_net_namespace_inherited_when_deny_net_is_false() {
-        let args = RealSandbox::build_bwrap_args("/tmp/work", "echo hi", false, None);
+        let args = RealSandbox::build_bwrap_args("/tmp/work", "echo hi", false, None, None);
         assert!(
             !args.iter().any(|a| a == "--unshare-net"),
             "deny_net=false must not emit --unshare-net: {args:?}"
@@ -422,7 +580,7 @@ mod tests {
 
     #[test]
     fn bwrap_args_bind_and_chdir_cwd() {
-        let args = RealSandbox::build_bwrap_args("/tmp/work", "echo hi", true, None);
+        let args = RealSandbox::build_bwrap_args("/tmp/work", "echo hi", true, None, None);
         let bind_idx = args
             .iter()
             .position(|a| a == "--bind")
@@ -438,14 +596,15 @@ mod tests {
 
     #[test]
     fn bwrap_args_terminate_with_shell_invocation() {
-        let args = RealSandbox::build_bwrap_args("/tmp/work", "echo hello && exit 0", true, None);
+        let args =
+            RealSandbox::build_bwrap_args("/tmp/work", "echo hello && exit 0", true, None, None);
         let tail = &args[args.len() - 4..];
         assert_eq!(tail, &["--", "sh", "-c", "echo hello && exit 0"]);
     }
 
     #[test]
     fn bwrap_args_emit_seccomp_flag_when_fd_provided() {
-        let args = RealSandbox::build_bwrap_args("/tmp/work", "true", true, Some(7));
+        let args = RealSandbox::build_bwrap_args("/tmp/work", "true", true, Some(7), None);
         let idx = args
             .iter()
             .position(|a| a == "--seccomp")
@@ -462,7 +621,7 @@ mod tests {
 
     #[test]
     fn bwrap_args_omit_seccomp_flag_when_fd_absent() {
-        let args = RealSandbox::build_bwrap_args("/tmp/work", "true", true, None);
+        let args = RealSandbox::build_bwrap_args("/tmp/work", "true", true, None, None);
         assert!(
             !args.iter().any(|a| a == "--seccomp"),
             "seccomp_fd=None must not emit --seccomp: {args:?}"
@@ -471,7 +630,7 @@ mod tests {
 
     #[test]
     fn bwrap_args_mount_tmpfs_and_proc_and_dev() {
-        let args = RealSandbox::build_bwrap_args("/tmp/work", "true", true, None);
+        let args = RealSandbox::build_bwrap_args("/tmp/work", "true", true, None, None);
         assert!(
             args.windows(2).any(|w| w == ["--tmpfs", "/tmp"]),
             "tmpfs on /tmp missing"
@@ -484,5 +643,70 @@ mod tests {
             args.windows(2).any(|w| w == ["--dev", "/dev"]),
             "dev on /dev missing"
         );
+    }
+
+    #[test]
+    fn bwrap_args_rewrite_tail_through_pincery_init_when_wired() {
+        let wiring = PinceryInitWiring {
+            host_path: "/host/bin/pincery-init".into(),
+            policy_fd: 9,
+        };
+        let args =
+            RealSandbox::build_bwrap_args("/tmp/work", "echo hello", true, None, Some(&wiring));
+        // --ro-bind of the wrapper binary must be present.
+        let rb = args
+            .windows(3)
+            .position(|w| w == ["--ro-bind", "/host/bin/pincery-init", SANDBOX_INIT_PATH])
+            .expect("--ro-bind for pincery-init missing");
+        // Argv tail must exec the wrapper with --policy-fd, then
+        // pass sh -c <cmd> after the inner `--`.
+        let tail = &args[args.len() - 8..];
+        assert_eq!(
+            tail,
+            &[
+                "--",
+                SANDBOX_INIT_PATH,
+                "--policy-fd",
+                "9",
+                "--",
+                "sh",
+                "-c",
+                "echo hello",
+            ]
+        );
+        // The wrapper ro-bind must come before bwrap's outer `--`.
+        let sep = args
+            .iter()
+            .rposition(|a| a == "--")
+            .expect("outer -- separator");
+        assert!(
+            rb < sep,
+            "pincery-init ro-bind must precede outer `--`: rb={rb} sep={sep}"
+        );
+    }
+
+    #[test]
+    fn bwrap_args_skip_pincery_init_when_wiring_absent() {
+        let args = RealSandbox::build_bwrap_args("/tmp/work", "true", true, None, None);
+        assert!(
+            !args.iter().any(|a| a == SANDBOX_INIT_PATH),
+            "wiring=None must not mention {SANDBOX_INIT_PATH}: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "--policy-fd"),
+            "wiring=None must not emit --policy-fd: {args:?}"
+        );
+    }
+
+    #[test]
+    fn pincery_init_bin_path_respects_env_override() {
+        // Env override is the operator/test contract; the fallback
+        // path (current_exe sibling) is harder to assert portably
+        // and already exercised implicitly by the landlock
+        // integration suite.
+        std::env::set_var("PINCERY_INIT_BIN_PATH", "/opt/custom/pincery-init");
+        let resolved = pincery_init_bin_path().expect("env override must resolve");
+        assert_eq!(resolved, PathBuf::from("/opt/custom/pincery-init"));
+        std::env::remove_var("PINCERY_INIT_BIN_PATH");
     }
 }

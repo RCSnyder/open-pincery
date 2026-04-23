@@ -1,4 +1,12 @@
-//! AC-53 / Slice A2b.4c — adversarial tests for the landlock layer.
+//! AC-53 / Slice A2b.4c + AC-83 / Slice G0a.3g — adversarial tests
+//! for the landlock layer.
+//!
+//! As of G0a.3g, landlock installs INSIDE the sandbox via
+//! `pincery-init` (post-bwrap, post-namespace setup). These tests
+//! exercise the full wrapper pipeline:
+//!   parent builds `SandboxInitPolicy` + memfd → bwrap execs the
+//!   wrapper → wrapper installs landlock via
+//!   `landlock_restrict_self` → wrapper execvps `sh -c <cmd>`.
 //!
 //! Each test exercises a distinct posture of the landlock ruleset:
 //!   1. Positive control: `echo` + reading `/etc/hostname` (which is
@@ -53,6 +61,12 @@ fn preconditions_met() -> bool {
         eprintln!("skipping: kernel does not support landlock (need >= 5.13)");
         return false;
     }
+    // AC-83 / Slice G0a.3g: point RealSandbox at the cargo-built
+    // `pincery-init` binary. Integration tests get
+    // `CARGO_BIN_EXE_pincery-init` from cargo automatically, so the
+    // env var always resolves under `cargo test`. --test-threads=1
+    // (enforced by CI) makes `set_var` safe here.
+    std::env::set_var("PINCERY_INIT_BIN_PATH", env!("CARGO_BIN_EXE_pincery-init"));
     true
 }
 
@@ -82,12 +96,11 @@ fn landlock_profile() -> SandboxProfile {
 /// runs end-to-end exactly as it did before the landlock layer
 /// landed.
 ///
-/// Implicitly verifies the whole pipeline: `LandlockProfile` build
-/// → `pre_exec` install_landlock → kernel `landlock_restrict_self`
-/// → bwrap → sh. If any link breaks, spawn fails or sh dies before
-/// echo runs.
+/// Implicitly verifies the whole pipeline: `SandboxInitPolicy`
+/// build → memfd → bwrap → `pincery-init` → in-sandbox
+/// `landlock_restrict_self` → sh. If any link breaks, spawn
+/// fails or sh dies before echo runs.
 #[tokio::test]
-#[ignore = "AC-53 amendment: blocked on Slice G0a (AC-83 pincery-init). Parent-pre_exec Landlock install architecturally broken — see docs/security/sandbox-architecture-audit.md"]
 async fn landlock_permits_normal_commands() {
     if !preconditions_met() {
         return;
@@ -118,7 +131,6 @@ async fn landlock_permits_normal_commands() {
 /// `/etc` is in the default rx allowlist. We cat `/etc/hostname`
 /// which exists on every Linux distro we care about.
 #[tokio::test]
-#[ignore = "AC-53 amendment: blocked on Slice G0a (AC-83 pincery-init). Parent-pre_exec Landlock install architecturally broken — see docs/security/sandbox-architecture-audit.md"]
 async fn landlock_permits_reading_etc() {
     if !preconditions_met() {
         return;
@@ -158,7 +170,6 @@ async fn landlock_permits_reading_etc() {
 /// O_CREAT)` returns EACCES, the `&&` short-circuits, and we see
 /// `blocked`.
 #[tokio::test]
-#[ignore = "AC-53 amendment: blocked on Slice G0a (AC-83 pincery-init). Parent-pre_exec Landlock install architecturally broken — see docs/security/sandbox-architecture-audit.md"]
 async fn landlock_blocks_writes_to_unlisted_tmpfs() {
     if !preconditions_met() {
         return;
