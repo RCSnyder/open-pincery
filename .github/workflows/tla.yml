@@ -1,5 +1,11 @@
 name: TLA+ model check
 
+# Path-filtered: the job only runs when the TLA+ specs, cfgs, or
+# tooling change. NOTE: if this check is configured as a required
+# status check in branch protection, GitHub will block merges for
+# PRs that don't touch these paths (the required check never
+# reports). Either keep path filters + advisory, or drop them +
+# required — pick one.
 on:
   push:
     branches: [main]
@@ -7,6 +13,7 @@ on:
       - "docs/input/OpenPinceryCanonical.tla"
       - "docs/input/OpenPinceryCanonical.cfg"
       - "docs/input/OpenPinceryCanonical.small.cfg"
+      - "docs/input/security_append/**.tla"
       - "scripts/tlc_check.sh"
       - ".github/workflows/tla.yml"
   pull_request:
@@ -14,6 +21,7 @@ on:
       - "docs/input/OpenPinceryCanonical.tla"
       - "docs/input/OpenPinceryCanonical.cfg"
       - "docs/input/OpenPinceryCanonical.small.cfg"
+      - "docs/input/security_append/**.tla"
       - "scripts/tlc_check.sh"
       - ".github/workflows/tla.yml"
   workflow_dispatch:

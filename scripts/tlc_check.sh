@@ -55,8 +55,9 @@ case "$MODE" in
   parse)
     echo "==> SANY parse: $SPEC.tla"
     "$JAVA_BIN" -cp "$JAR" tla2sany.SANY "$SPEC.tla"
-    # NOTE: security_append/securitymodel.tla is a draft side-spec
-    # with known parse issues and is intentionally excluded from CI.
+    echo "==> SANY parse: security_append/AgenticOsSecureBehaviorV2.tla"
+    "$JAVA_BIN" -cp "$JAR" tla2sany.SANY \
+      security_append/AgenticOsSecureBehaviorV2.tla
     ;;
 
   simulate)
