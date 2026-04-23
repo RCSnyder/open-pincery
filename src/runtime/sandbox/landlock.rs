@@ -48,13 +48,22 @@ use landlock::{
 /// glibc programs to load and run inside the sandbox. Ordered for
 /// review-diff readability; runtime order does not matter.
 // Default read+execute allowlist. Includes:
+// - `/`: read access on the root dir. Bwrap's setup path walks /
+//   to resolve bind-mount targets and to do its MS_SLAVE|MS_REC
+//   propagation flip on the new mount-ns root. Without this the
+//   bwrap child fails during setup with EPERM on the mount call.
+//   Granting read on / leaks only the top-level dentry names (which
+//   are already readable via /bin, /etc, etc.), so the additional
+//   exposure is nil.
 // - standard rootfs dirs sh + coreutils need to execute
 // - /sys: bwrap may stat /sys/fs/cgroup for delegated cgroup v2 setup
 //
 // NOTE: /proc is NOT here because bwrap writes /proc/self/uid_map,
 // /proc/self/gid_map, /proc/self/setgroups during user-namespace
 // setup. /proc must be in rwx_paths instead. See default_for_cwd.
-const ROOTFS_RX_PATHS: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/sys"];
+const ROOTFS_RX_PATHS: &[&str] = &[
+    "/", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/sys",
+];
 
 /// Profile describing which paths are allowed and at what access
 /// level. Built once per tool call by [`LandlockProfile::default_for_cwd`].
