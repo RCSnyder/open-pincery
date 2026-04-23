@@ -87,14 +87,19 @@ pub struct LandlockProfile {
 
 impl LandlockProfile {
     /// Production profile for a tool invocation pinned to `cwd`.
-    /// Includes the standard rootfs read+execute paths, `/proc` as
-    /// read+write+execute (bwrap writes /proc/self/uid_map etc.
-    /// during user-namespace setup), and the cwd as read+write+
-    /// execute.
+    /// Includes the standard rootfs read+execute paths, `/proc` and
+    /// `/dev` as read+write+execute (bwrap writes /proc/self/uid_map
+    /// etc. during user-namespace setup, and the user shell needs
+    /// `/dev/null`, `/dev/urandom`, etc. as the bwrap `--dev` tmpfs
+    /// provides them), and the cwd as read+write+execute.
     pub fn default_for_cwd(cwd: &Path) -> Self {
         Self {
             rx_paths: ROOTFS_RX_PATHS.iter().map(PathBuf::from).collect(),
-            rwx_paths: vec![PathBuf::from("/proc"), cwd.to_path_buf()],
+            rwx_paths: vec![
+                PathBuf::from("/proc"),
+                PathBuf::from("/dev"),
+                cwd.to_path_buf(),
+            ],
         }
     }
 }
