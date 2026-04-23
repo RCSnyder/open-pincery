@@ -1,5 +1,26 @@
 # Open Pincery — Experiment Log
 
+## EXPAND v9 — scope addendum: 7 audit-surfaced release blockers (AC-76..AC-82) — 2026-04-22T23:30Z
+
+- **Gate**: PASS (post-expand, addendum mode).
+- **Trigger**: TLA+ v3.3 mechanical-verification pass (commits `02204a5`, `df51ea7`, `ebc6398`) + cross-reference audit between [docs/input/security-architecture.md](../docs/input/security-architecture.md), [docs/input/OpenPinceryCanonical.tla](../docs/input/OpenPinceryCanonical.tla), and the v9 AC set surfaced seven P0 gaps not yet represented in scope.
+- **Changes to scaffolding/scope.md**:
+  - Added §"v9 Release Blockers Surfaced By TLA+ + Security-Doc Audit" immediately after AC-75.
+  - **AC-76** Sandbox escape suite (12 payloads × 4 categories) — gates AC-53.
+  - **AC-77** Seccomp default-deny allowlist — replaces current 11-entry denylist.
+  - **AC-78** Event-log hash chain — promotes `Inv_AuditChainBeforeExecution` from cosmetic stand-in (v3.2 F4) to real.
+  - **AC-79** Prompt-injection defense floor — first T3 code (delimiter wrapping, schema-enforced tool calls, canary tokens, per-wake 32-call limit).
+  - **AC-80** Capability nonce / freshness — closes canonical TODO G7/G11.
+  - **AC-81** Binding commitments — spec_coverage.md + spec-coverage lint + commit-msg hook enforcing `canonical_action=<Name>` trailers.
+  - **AC-82** Fire reserved TLA+ lifecycle states — wire fine-grained `AgentStatus` variants into CAS transitions in `src/runtime/wake.rs`.
+- Added Data-Model Addendum section: new `capability_nonces` table; new `events.prev_hash`/`events.entry_hash` columns; 6 new event types.
+- Added **Phase G — Audit-Surfaced Release Blockers** to v9 Build Order (Slices G1..G7, ~4-5 weeks).
+- Updated total estimate from 8-10 weeks to 12-15 weeks; v9.0 ship now gates on Phases A + B + C + E + **G**.
+- Updated Quality Tier adversarial-test rider to include AC-76..AC-80, AC-82.
+- **Evidence**: `git diff scaffolding/scope.md` shows 7 new AC blocks, 1 new data-model subsection, 1 new build-order phase, 2 updated totals sentences.
+- **Next**: ANALYZE for AC-76..AC-82 (each AC is big enough to warrant its own ANALYZE pass — readiness.md addendum per slice). User explicitly flagged: "multiple rounds of agentic workflows to plan/design/implement/test." Do not batch these — each AC is its own ANALYZE → BUILD → REVIEW → RECONCILE → VERIFY cycle.
+- **In-flight context preserved**: PR #4 still red (`sandbox_real_smoke` 4/5 failing on CI; bwrap exits 1 with empty stdout on the hosted runner — different failure mode than the green local devshell). That fix remains the immediate-next concrete action before Phase G can start, because AC-76 depends on a green sandbox baseline.
+
 ## BUILD v9 — Slice A2b.4b seccomp-bpf denylist (layer 3 of 6) — 2026-04-22T20:38Z
 
 - **Gate**: PASS (attempt 2 — clippy fix cycle).
