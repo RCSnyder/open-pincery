@@ -34,6 +34,8 @@ pub mod init_policy;
 #[path = "landlock.rs"]
 pub mod landlock_layer;
 pub mod netns;
+#[cfg(target_os = "linux")]
+pub mod preflight;
 pub mod seccomp;
 
 use async_trait::async_trait;

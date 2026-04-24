@@ -1,5 +1,28 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — Slice G0b.1: kernel ABI floor preflight module (AC-84 scaffold) — 2026-04-23T11:00Z
+
+- **Gate**: PASS locally (`get_errors` clean). Linux-cfg body validated by CI `cargo test` job (unit tests live inside the `#[cfg(target_os="linux")]` module, so clippy/cargo-test on Linux exercises them end-to-end).
+- **What this slice ships**: New module `src/runtime/sandbox/preflight.rs` containing the full AC-84 preflight primitive — `KernelProbe` trait, `RealKernelProbe` production impl, `FloorEnv` (env-var parser), `FloorOutcome` / `FloorError` enums, `assert_kernel_floor` entry point, and a handwritten `StubKernelProbe` in-module test suite (14 unit tests) covering every rejection branch plus the canonical passing case, the relaxed path, the root-bypass-for-userns short-circuit, and the `parse_bwrap_version` helper. Also exposes `LANDLOCK_ABI_FLOOR = 6` and `BWRAP_MIN_VERSION = (0, 8, 0)` as pub consts so downstream code (G0b.2 wiring, DELIVERY.md) can reference a single source of truth.
+- **Design decisions recorded in code**:
+  - **Trait-based probes, not raw syscalls in `assert_kernel_floor`**: the module is 100% unit-testable without a real kernel. `StubKernelProbe` reuses a `compliant()` builder and tests override single fields for each failure case, which matches how `src/bin/pincery_init.rs::parse_args` built its test surface.
+  - **Landlock syscall via raw `libc::syscall(SYS_landlock_create_ruleset, NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)`**, not the `landlock = "0.4"` crate API: the crate exposes `ABI::V1..V4` as enum variants but has no "current best ABI" query function. Raw syscall returns the kernel's highest-supported ABI as a non-negative integer, or -1/ENOSYS on kernels < 5.13. The flag constant is `1u32 << 0` per the landlock(7) man page; it is not yet exposed by `libc`, so the literal is documented inline.
+  - **Ordering**: env-consistency → Landlock ABI → seccomp → cgroup v2 → userns → bwrap. Operator-ergonomic: loudest-likely-to-fail first. Each check is independent, so re-running surfaces the next issue.
+  - **Relaxed path refuses LandlockUnsupported**: `OPEN_PINCERY_SANDBOX_FLOOR=relaxed` downgrades the floor from ABI 6 to ABI 1, NOT to "no landlock at all". A kernel whose `landlock_create_ruleset` returns ENOSYS is rejected in both strict and relaxed mode; the sandbox has no filesystem LSM to install at all on such kernels.
+  - **Root bypass for userns**: `is_root() && !unprivileged_userns_allowed()` passes the check because root can always `unshare(CLONE_NEWUSER)` regardless of `/proc/sys/kernel/unprivileged_userns_clone`. The sysctl only matters for non-root callers (the AC-86 eventual deploy target).
+  - **Debian/Ubuntu-specific userns sysctl path**: `/proc/sys/kernel/unprivileged_userns_clone` only exists on Debian/Ubuntu patched kernels. On vanilla kernels the file is absent; `RealKernelProbe` treats absence as "allowed" and documents that false negatives (userns actually disabled via `user.max_user_namespaces=0`) surface later as bwrap spawn failures.
+- **Files touched**:
+  - `src/runtime/sandbox/preflight.rs`: new, `#[cfg(target_os="linux")]` at module top.
+  - `src/runtime/sandbox/mod.rs`: added `#[cfg(target_os = "linux")] pub mod preflight;`.
+  - `scaffolding/log.md`: this entry.
+- **Not touched**: `main.rs` — not wired into server startup yet. Exit-code 4 translation, `sandbox_kernel_floor_unmet` / `sandbox_floor_relaxed` log-event emission, and `preferences.md` / `DELIVERY.md` "System Requirements" sections all land in G0b.2. No changes to any existing sandbox module (landlock, bwrap, init_policy) — preflight is a pure additive module.
+- **Concerns**:
+  - `libc::SYS_landlock_create_ruleset` is architecture-gated (present on x86_64, aarch64, riscv64; absent on some embedded targets). If we ever target one of those, `#[cfg(target_arch = "...")]` gating becomes necessary. Today's targets are x86_64 + aarch64, so this is a latent assumption, not an active bug.
+  - `unprivileged_userns_allowed()` returns `true` on vanilla kernels (file absent) even when the actual feature is disabled via `user.max_user_namespaces`. Surfacing that as a preflight error would require a userns-dry-run (`unshare(CLONE_NEWUSER)` in a forked child), which is more side-effect-ful than the rest of the probes. Keeping the false-negative for now; real rejections will surface as bwrap stderr at first call.
+  - Only the unit-test `real_probe_does_not_panic` touches `RealKernelProbe` today. Once G0b.2 wires `assert_kernel_floor` into `main.rs`, the sandbox real-bwrap smoke CI job will exercise the real probe end-to-end against a compliant kernel. No concrete assertion is possible at this tier because kernel ABI is host-dependent.
+- **Retries**: 0 so far (pre-push).
+- **Next sub-slice**: G0b.2 — wire `assert_kernel_floor(&RealKernelProbe, &FloorEnv::from_env())` into `main.rs` before config load; map `FloorError` to exit code 4 with a `sandbox_kernel_floor_unmet` structured log record; emit `sandbox_floor_relaxed` on the relaxed outcome; add a docs/input/ or integration test covering the end-to-end happy path (compliant kernel in the smoke container); update `preferences.md` and `DELIVERY.md` with "System Requirements: Linux >= 6.7 (Landlock ABI 6), cgroup v2, bubblewrap >= 0.8.0"; ensure `OPEN_PINCERY_SANDBOX_FLOOR` is registered in `.env.example` per the AC-29 env coverage test.
+
 ## BUILD v9 — Slice G0a.3h: flip `SandboxProfile::default` to `landlock=true` (AC-83, readiness T-G0a-6 completed) — 2026-04-23T10:15Z
 
 - **Gate**: PASS locally (`get_errors` clean on both modified files). Linux-cfg landlock enforcement validated by the sandbox real-bwrap smoke CI job.
