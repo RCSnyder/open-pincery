@@ -135,7 +135,7 @@ A principal-engineer review surfaces five further issues. Each is rated by sever
 
 **Authoritative guidance:** Docker's default seccomp profile and systemd's `SystemCallFilter=` both use **allowlists**. Chrome's sandbox uses an allowlist. Bottlerocket, gVisor, Kata, Firecracker all use allowlists. Denylist seccomp is universally regarded as security theater.
 
-**Reference:** [`seccomp(2)` man page](https://man7.org/linux/man-pages/man2/seccomp.2.html) §NOTES: "It is recommended to apply seccomp filters in conjunction with no_new_privs, and only to syscalls that an application is _known_ to need."
+**Reference:** [`seccomp(2)` man page](https://man7.org/linux/man-pages/man2/seccomp.2.html) §NOTES: "It is recommended to apply seccomp filters in conjunction with no*new_privs, and only to syscalls that an application is \_known* to need."
 
 ### 3.2 [HIGH] `RulesetStatus::PartiallyEnforced` is silently accepted
 

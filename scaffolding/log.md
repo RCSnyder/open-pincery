@@ -1,5 +1,19 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — G0b.1 follow-up: AC-29 env contract fix for OPEN_PINCERY_SANDBOX_FLOOR — 2026-04-24T00:20Z
+
+- **Gate**: PASS (CI rerun pending at commit time). Prior CI run `24865048319` failed only `tests/env_example_test.rs::ac_29_every_source_env_var_is_in_env_example_or_allowlisted` with `Missing: ["OPEN_PINCERY_SANDBOX_FLOOR"]`.
+- **Fix**: Added `OPEN_PINCERY_SANDBOX_FLOOR` documentation block to `.env.example` (default strict, relaxed semantics, and explicit pairing requirement with `OPEN_PINCERY_ALLOW_UNSAFE=true`). Also updated the unsafe opt-in comment to mention this pairing so operators see the two-key requirement in one place.
+- **Changed**:
+  - `.env.example`
+- **Not touched**:
+  - `src/runtime/sandbox/preflight.rs`
+  - `src/main.rs`
+  - any runtime behavior
+- **Concerns**: Local terminal sessions intermittently return exit code 130 due a host console exhaustion issue (`bash ... too many consoles in use`), so local cargo test output is unreliable in this session; CI is authoritative for final proof.
+- **Retries**: 1 (single CI failure, then fix).
+- **Next**: G0b.2 wiring into `main.rs` (exit code 4 + startup event emission) once CI is green.
+
 ## BUILD v9 — Slice G0b.1: kernel ABI floor preflight module (AC-84 scaffold) — 2026-04-23T11:00Z
 
 - **Gate**: PASS locally (`get_errors` clean). Linux-cfg body validated by CI `cargo test` job (unit tests live inside the `#[cfg(target_os="linux")]` module, so clippy/cargo-test on Linux exercises them end-to-end).
@@ -183,7 +197,7 @@
   - `src/bin/pincery_init.rs`: +`InitError::ApplyPolicy`/`VerifyPolicy` variants; +`apply_no_new_privs`, `verify_no_new_privs`, `apply_policy` functions; `run()` now calls `apply_policy(&policy)?`; module doc scope updated to name G0a.3a's step.
   - `tests/pincery_init_skeleton_test.rs`: +`skeleton_applies_no_new_privs_before_exec` case; module doc rewritten to list coverage by slice instead of the G0a.2-specific preamble.
 - **Changed**: one syscall now fires inside the wrapper before exec; one new integration test; no dep changes.
-- **Not touched**: `RealSandbox::run`, `build_bwrap_args`, `SandboxProfile::default` (still `landlock=false` interim), the three `#[ignore]`d landlock tests, the parent-side `pre_exec` landlock install. Those move in G0a.3g/h. No seccomp, setres*id, or landlock logic exists yet in the wrapper — only the TODO anchors that fix the load-bearing order.
+- **Not touched**: `RealSandbox::run`, `build_bwrap_args`, `SandboxProfile::default` (still `landlock=false` interim), the three `#[ignore]`d landlock tests, the parent-side `pre_exec` landlock install. Those move in G0a.3g/h. No seccomp, setres\*id, or landlock logic exists yet in the wrapper — only the TODO anchors that fix the load-bearing order.
 - **Concerns / follow-ups**:
   - `libc::prctl` is called via varargs (`c_ulong` on x86_64 = `u64`); if we ever build the wrapper on a 32-bit target the `1u64` literals will need narrowing. Recorded; no action this slice — CI and readiness T-G0a-1 both pin to x86_64 Linux.
   - The verify step is belt-and-braces (kernels ≥ 3.5 always honor this), but it establishes the "apply → verify" symmetry G0a.3e reuses for `FullyEnforced`. Keeping the pattern early avoids an asymmetric pipeline later.
@@ -193,7 +207,7 @@
 ## BUILD v9 — Slice G0a.2: `pincery-init` binary skeleton (AC-83, layer 2 of 3) — 2026-04-23T03:00Z
 
 - **Gate**: PASS (verification ladder; CI is the authoritative runner — local MSYS shell is console-handle-exhausted).
-- **What this slice ships**: the `pincery-init` exec wrapper as a dedicated `[[bin]]` target, parsing `--policy-fd <N> -- <user_argv...>`, reading the inherited memfd to EOF, deserializing into `SandboxInitPolicy` via `serde_json`, logging a structured one-line summary to stderr, then `execvp`-ing the user argv. **No restrictions are installed yet** — prctl / seccomp / landlock / setres*id are all G0a.3.
+- **What this slice ships**: the `pincery-init` exec wrapper as a dedicated `[[bin]]` target, parsing `--policy-fd <N> -- <user_argv...>`, reading the inherited memfd to EOF, deserializing into `SandboxInitPolicy` via `serde_json`, logging a structured one-line summary to stderr, then `execvp`-ing the user argv. **No restrictions are installed yet** — prctl / seccomp / landlock / setres\*id are all G0a.3.
 - **Architectural context**: Lays the G0a.3 substrate. Once the skeleton is proven to parse + exec cleanly end-to-end, G0a.3 slots the six-step policy-application pipeline (T-G0a-6 order) between `log_policy_summary` and `exec_user_argv`, wires `build_bwrap_args` to `--ro-bind` the binary + dup2 the memfd, and removes the parent-side `pre_exec` landlock install. Keeping G0a.2 restriction-free means the four-case G0a.3 suite can regress additions independently.
 - **Evidence**:
   - Compile-check: `get_errors` clean across `src/bin/pincery_init.rs`, `tests/pincery_init_skeleton_test.rs`, `Cargo.toml`. Local `cargo check` blocked by MSYS console limit (same symptom as G0a.1) — CI is the authoritative compile + test gate.

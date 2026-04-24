@@ -45,8 +45,8 @@ Non-negotiable statements that must be true in the shipped Slice G0a:
   marking bincode v1 unmaintained, and v2 is a breaking API rewrite
   that would add a new direct dep for one IPC boundary). Shape:
   `{ landlock_rx_paths: Vec<PathBuf>, landlock_rwx_paths: Vec<PathBuf>,
-  seccomp_bpf: Vec<u8>, target_uid: u32, target_gid: u32,
-  require_fully_enforced: bool, user_argv: Vec<String> }`.
+seccomp_bpf: Vec<u8>, target_uid: u32, target_gid: u32,
+require_fully_enforced: bool, user_argv: Vec<String> }`.
 - **T-G0a-5** Policy IPC uses a memfd (`memfd_create("pincery-init-policy", 0)`,
   **not** CLOEXEC). Parent writes the serde_json-serialized policy
   bytes, `lseek(0)`, passes the fd as `--policy-fd 3` in the user argv
