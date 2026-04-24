@@ -1,5 +1,36 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — Slice G0b.2: startup preflight wiring + exit-4 contract (AC-84) — 2026-04-24T03:10Z
+
+- **Gate**: PASS locally (`get_errors` clean on touched files). Linux runtime behavior is CI-authoritative because this workstation runs Windows and `#[cfg(target_os = "linux")]` tests compile but do not execute here.
+- **What this slice ships**:
+  - `src/main.rs` now runs kernel-floor preflight immediately after logging init and before config/DB bootstrap. Any preflight failure exits process code `4` (distinct startup failure class).
+  - `src/runtime/sandbox/preflight.rs` now exposes `enforce_kernel_floor_at_startup()` which wraps `assert_kernel_floor` and emits startup events:
+    - pass: `sandbox_kernel_floor_ok` (info)
+    - relaxed pass: `sandbox_floor_relaxed` (warn)
+    - fail: `sandbox_kernel_floor_unmet` (error) + `Err(4)`
+  - Added Linux-only integration test file `tests/sandbox_preflight_test.rs` asserting fail-closed behavior for `OPEN_PINCERY_SANDBOX_FLOOR=relaxed` without `OPEN_PINCERY_ALLOW_UNSAFE=true` (expects exit 4 and `sandbox_kernel_floor_unmet` in stderr logs).
+  - Added two unit tests in `preflight.rs` for startup wrapper return semantics (`Err(4)` on floor failure, `Ok(())` on relaxed-success path).
+  - Updated operator docs:
+    - `preferences.md`: new "Sandbox Runtime Floor (v9 / AC-84)" section.
+    - `DELIVERY.md`: new "System Requirements (v9 Sandbox Floor)" section.
+- **Changed**:
+  - `src/main.rs`
+  - `src/runtime/sandbox/preflight.rs`
+  - `tests/sandbox_preflight_test.rs` (new)
+  - `preferences.md`
+  - `DELIVERY.md`
+  - `scaffolding/log.md`
+- **Not touched**:
+  - `src/bin/pincery_init.rs`
+  - `src/runtime/sandbox/bwrap.rs`
+  - any AC-85/86/87/88 behavior.
+- **Concerns**:
+  - Windows local run showed `sandbox_preflight_test` as 0 executed tests (expected under `#[cfg(target_os = "linux")]`). CI is required for authoritative proof.
+  - Added `sandbox_kernel_floor_ok` as an info event to aid startup observability; scope-required events (`sandbox_kernel_floor_unmet`, `sandbox_floor_relaxed`) are unchanged.
+- **Retries**: 0.
+- **Next**: G0c (AC-85) — enforce `FullyEnforced` as non-optional in production path and reject partial landlock status outside audit mode.
+
 ## BUILD v9 — G0b.1 follow-up: AC-29 env contract fix for OPEN_PINCERY_SANDBOX_FLOOR — 2026-04-24T00:20Z
 
 - **Gate**: PASS (CI rerun pending at commit time). Prior CI run `24865048319` failed only `tests/env_example_test.rs::ac_29_every_source_env_var_is_in_env_example_or_allowlisted` with `Missing: ["OPEN_PINCERY_SANDBOX_FLOOR"]`.

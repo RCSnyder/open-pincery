@@ -35,6 +35,15 @@ A multi-agent platform runtime implementing the Open Pincery architecture: event
 - **Agent management**: PATCH to rename or enable/disable agents; DELETE to soft-delete (sets `is_enabled=false, disabled_reason='deleted'`; disabled agents cannot wake)
 - **Docker deployment**: Multi-stage Dockerfile with health check, docker-compose.yml with app + postgres
 
+## System Requirements (v9 Sandbox Floor)
+
+- Linux kernel with Landlock ABI >= 6 (Linux >= 6.7)
+- seccomp-bpf enabled (`CONFIG_SECCOMP_FILTER`)
+- cgroup v2 mounted (`/sys/fs/cgroup/cgroup.controllers` present)
+- bubblewrap (`bwrap`) >= 0.8.0 on `$PATH`
+
+At startup the server performs a fail-closed preflight for these requirements. If unmet, startup aborts with exit code 4 and emits `sandbox_kernel_floor_unmet`. Operators can opt into reduced compatibility with `OPEN_PINCERY_SANDBOX_FLOOR=relaxed` only when paired with `OPEN_PINCERY_ALLOW_UNSAFE=true`; this emits `sandbox_floor_relaxed` at startup.
+
 ## v2 Changes (from v1)
 
 - AC-11: Graceful shutdown via CancellationToken + `with_graceful_shutdown`

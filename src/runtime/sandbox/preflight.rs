@@ -335,6 +335,47 @@ pub fn assert_kernel_floor(
     }
 }
 
+/// Run the kernel-floor startup gate with explicit logging and
+/// process-exit semantics expected by AC-84.
+///
+/// Returns `Ok(())` when startup should continue, or `Err(4)` when
+/// startup must abort due to unmet kernel prerequisites.
+pub fn enforce_kernel_floor_at_startup() -> Result<(), i32> {
+    run_startup_preflight_with(&RealKernelProbe, &FloorEnv::from_env())
+}
+
+fn run_startup_preflight_with(probe: &dyn KernelProbe, env: &FloorEnv) -> Result<(), i32> {
+    match assert_kernel_floor(probe, env) {
+        Ok(FloorOutcome::Passed { landlock_abi }) => {
+            tracing::info!(
+                event = "sandbox_kernel_floor_ok",
+                landlock_abi,
+                strict_floor = LANDLOCK_ABI_FLOOR,
+                "Kernel sandbox floor preflight passed"
+            );
+            Ok(())
+        }
+        Ok(FloorOutcome::Relaxed { landlock_abi }) => {
+            tracing::warn!(
+                event = "sandbox_floor_relaxed",
+                landlock_abi,
+                strict_floor = LANDLOCK_ABI_FLOOR,
+                relaxed_floor = LANDLOCK_ABI_RELAXED_FLOOR,
+                "Kernel floor relaxed via OPEN_PINCERY_SANDBOX_FLOOR=relaxed"
+            );
+            Ok(())
+        }
+        Err(error) => {
+            tracing::error!(
+                event = "sandbox_kernel_floor_unmet",
+                error = %error,
+                "Kernel sandbox floor preflight failed"
+            );
+            Err(4)
+        }
+    }
+}
+
 /// Production probe — binds to real kernel/filesystem/process
 /// primitives. All probe methods are side-effect-free.
 pub struct RealKernelProbe;
@@ -720,5 +761,25 @@ mod tests {
         let _ = probe.unprivileged_userns_allowed();
         let _ = probe.bwrap_version();
         let _ = probe.is_root();
+    }
+
+    #[test]
+    fn startup_preflight_returns_exit_4_on_failure() {
+        let probe = StubKernelProbe {
+            landlock_abi: Some(5),
+            ..StubKernelProbe::compliant()
+        };
+        let rc = run_startup_preflight_with(&probe, &strict_env());
+        assert_eq!(rc, Err(4));
+    }
+
+    #[test]
+    fn startup_preflight_accepts_relaxed_with_allow_unsafe() {
+        let probe = StubKernelProbe {
+            landlock_abi: Some(1),
+            ..StubKernelProbe::compliant()
+        };
+        let rc = run_startup_preflight_with(&probe, &relaxed_env());
+        assert_eq!(rc, Ok(()));
     }
 }

@@ -20,6 +20,11 @@ async fn main() {
     // Init tracing (human-readable by default; LOG_FORMAT=json for structured output)
     open_pincery::observability::logging::init_logging();
 
+    #[cfg(target_os = "linux")]
+    if let Err(code) = runtime::sandbox::preflight::enforce_kernel_floor_at_startup() {
+        std::process::exit(code);
+    }
+
     let config = config::Config::from_env().expect("Failed to load configuration");
     let pool = db::create_pool(&config.database_url)
         .await

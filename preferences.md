@@ -66,6 +66,12 @@ Defaults are open-source, self-hostable, and aligned with the current spec.
 - **MCP servers require authentication.** Discovered MCP endpoints are registered but not bound to agents without human approval. Credentials flow through the standard vault/proxy path.
 - **Inter-agent messages are logged with cross-user attribution.** If agent A (owned by user X) messages agent B (owned by user Y), both sides are recorded with owner IDs.
 
+### Sandbox Runtime Floor (v9 / AC-84)
+
+- Linux hosts running the server must support Landlock ABI >= 6 (Linux >= 6.7), seccomp-bpf, cgroup v2, and bubblewrap >= 0.8.0.
+- Startup is fail-closed: unmet kernel floor exits the server with code 4 and logs `sandbox_kernel_floor_unmet`.
+- Emergency compatibility mode is opt-in only: `OPEN_PINCERY_SANDBOX_FLOOR=relaxed` requires `OPEN_PINCERY_ALLOW_UNSAFE=true` and logs `sandbox_floor_relaxed`.
+
 ## Quality Bar
 
 Three tiers. Pick the right one in `scaffolding/scope.md`. When in doubt, go one tier up.
