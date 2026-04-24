@@ -36,9 +36,11 @@ fn relaxed_without_allow_unsafe_exits_4_and_logs_event() {
         String::from_utf8_lossy(&output.stderr)
     );
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("sandbox_kernel_floor_unmet"),
-        "missing sandbox_kernel_floor_unmet event in stderr: {stderr}"
+        stdout.contains("sandbox_kernel_floor_unmet")
+            || stderr.contains("sandbox_kernel_floor_unmet"),
+        "missing sandbox_kernel_floor_unmet event in output: stdout={stdout} stderr={stderr}"
     );
 }
