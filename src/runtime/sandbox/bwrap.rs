@@ -55,6 +55,67 @@ pub(super) struct PinceryInitWiring {
 /// mounted inside every bwrap sandbox. Kept in one place so the
 /// argv rewrite and the `--ro-bind` flag can never disagree.
 const SANDBOX_INIT_PATH: &str = "/sandbox/init";
+const DEFAULT_SANDBOX_UID: u32 = 65534;
+const DEFAULT_SANDBOX_GID: u32 = 65534;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SandboxIdentity {
+    uid: u32,
+    gid: u32,
+}
+
+impl Default for SandboxIdentity {
+    fn default() -> Self {
+        Self {
+            uid: DEFAULT_SANDBOX_UID,
+            gid: DEFAULT_SANDBOX_GID,
+        }
+    }
+}
+
+fn parse_optional_id(raw: Option<&str>, env_key: &str) -> Result<Option<u32>, String> {
+    let Some(raw) = raw else { return Ok(None) };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let parsed = trimmed
+        .parse::<u32>()
+        .map_err(|e| format!("{env_key}={raw:?} is not a valid u32: {e}"))?;
+    Ok(Some(parsed))
+}
+
+fn resolve_sandbox_identity_from_raw(
+    uid_raw: Option<&str>,
+    gid_raw: Option<&str>,
+    allow_unsafe: bool,
+) -> Result<SandboxIdentity, String> {
+    let uid =
+        parse_optional_id(uid_raw, "OPEN_PINCERY_SANDBOX_UID")?.unwrap_or(DEFAULT_SANDBOX_UID);
+    let gid =
+        parse_optional_id(gid_raw, "OPEN_PINCERY_SANDBOX_GID")?.unwrap_or(DEFAULT_SANDBOX_GID);
+
+    if uid == 0 && !allow_unsafe {
+        return Err(
+            "OPEN_PINCERY_SANDBOX_UID=0 requires OPEN_PINCERY_ALLOW_UNSAFE=true (refusing to run)"
+                .into(),
+        );
+    }
+    if gid == 0 && !allow_unsafe {
+        return Err(
+            "OPEN_PINCERY_SANDBOX_GID=0 requires OPEN_PINCERY_ALLOW_UNSAFE=true (refusing to run)"
+                .into(),
+        );
+    }
+
+    Ok(SandboxIdentity { uid, gid })
+}
+
+fn resolve_sandbox_identity(allow_unsafe: bool) -> Result<SandboxIdentity, String> {
+    let uid_raw = std::env::var("OPEN_PINCERY_SANDBOX_UID").ok();
+    let gid_raw = std::env::var("OPEN_PINCERY_SANDBOX_GID").ok();
+    resolve_sandbox_identity_from_raw(uid_raw.as_deref(), gid_raw.as_deref(), allow_unsafe)
+}
 
 /// Resolve the on-host path of the `pincery-init` binary.
 ///
@@ -81,11 +142,10 @@ pub(super) fn pincery_init_bin_path() -> Result<PathBuf, String> {
 }
 
 /// Build the `SandboxInitPolicy` that the in-sandbox wrapper will
-/// apply. G0a.3g only exercises the landlock layer — seccomp stays
-/// on bwrap's `--seccomp <fd>` path, and the privilege drop is a
-/// no-op because `target_uid`/`target_gid` match the wrapper's
-/// inherited euid/egid (bwrap without an explicit `--uid` preserves
-/// the caller's uid inside the userns).
+/// apply. Seccomp still stays on bwrap's `--seccomp <fd>` path;
+/// AC-86 sets the policy target uid/gid to the same identity bwrap
+/// applies with `--uid` / `--gid` so the wrapper can re-assert the
+/// drop as defense-in-depth.
 ///
 /// `user_argv` is populated with `["sh", "-c", cmd]` to match the
 /// bwrap argv tail. `pincery-init::run_inner` execvps from
@@ -94,20 +154,26 @@ pub(super) fn pincery_init_bin_path() -> Result<PathBuf, String> {
 /// `parse_args` reject the CLI form with `user argv after '--'
 /// must be non-empty`, which is what G0a.3g's first CI run tripped
 /// on).
-fn build_init_policy(cwd: &Path, cmd: &str, mode: SandboxMode) -> SandboxInitPolicy {
+fn build_init_policy_with_identity(
+    cwd: &Path,
+    cmd: &str,
+    mode: SandboxMode,
+    identity: SandboxIdentity,
+) -> SandboxInitPolicy {
     let landlock = LandlockProfile::default_for_cwd(cwd);
-    // SAFETY: libc getters with no arguments; cannot fail.
-    let uid = unsafe { libc::geteuid() };
-    let gid = unsafe { libc::getegid() };
     SandboxInitPolicy {
         landlock_rx_paths: landlock.rx_paths,
         landlock_rwx_paths: landlock.rwx_paths,
         seccomp_bpf: Vec::new(),
-        target_uid: uid,
-        target_gid: gid,
+        target_uid: identity.uid,
+        target_gid: identity.gid,
         require_fully_enforced: matches!(mode, SandboxMode::Enforce),
         user_argv: vec!["sh".into(), "-c".into(), cmd.into()],
     }
+}
+
+fn build_init_policy(cwd: &Path, cmd: &str, mode: SandboxMode) -> SandboxInitPolicy {
+    build_init_policy_with_identity(cwd, cmd, mode, SandboxIdentity::default())
 }
 
 fn landlock_abi_below_required_floor() -> Option<String> {
@@ -188,6 +254,24 @@ impl RealSandbox {
         seccomp_fd: Option<std::os::fd::RawFd>,
         init_wiring: Option<&PinceryInitWiring>,
     ) -> Vec<String> {
+        Self::build_bwrap_args_with_identity(
+            cwd,
+            command,
+            deny_net,
+            seccomp_fd,
+            init_wiring,
+            SandboxIdentity::default(),
+        )
+    }
+
+    fn build_bwrap_args_with_identity(
+        cwd: &str,
+        command: &str,
+        deny_net: bool,
+        seccomp_fd: Option<std::os::fd::RawFd>,
+        init_wiring: Option<&PinceryInitWiring>,
+        identity: SandboxIdentity,
+    ) -> Vec<String> {
         let mut args: Vec<String> = vec![
             // Clean up if the parent dies mid-execution.
             "--die-with-parent".into(),
@@ -195,6 +279,12 @@ impl RealSandbox {
             // imply `--share-net`-toggleable semantics; we prefer
             // explicit per-axis flags so the posture is auditable.
             "--unshare-user".into(),
+            "--uid".into(),
+            identity.uid.to_string(),
+            "--gid".into(),
+            identity.gid.to_string(),
+            "--cap-drop".into(),
+            "ALL".into(),
             "--unshare-pid".into(),
             "--unshare-ipc".into(),
             "--unshare-uts".into(),
@@ -343,6 +433,11 @@ impl ToolExecutor for RealSandbox {
             }
         };
 
+        let sandbox_identity = match resolve_sandbox_identity(self.sandbox.allow_unsafe) {
+            Ok(identity) => identity,
+            Err(reason) => return ExecResult::Err(reason),
+        };
+
         // AC-53 / Slice A2b.4b: seccomp-bpf layer.
         //
         // Built BEFORE spawn because the fd number must land in the
@@ -461,7 +556,12 @@ impl ToolExecutor for RealSandbox {
                             ));
                         }
                     };
-                    let policy = build_init_policy(&cwd, &cmd.command, self.sandbox.mode);
+                    let policy = build_init_policy_with_identity(
+                        &cwd,
+                        &cmd.command,
+                        self.sandbox.mode,
+                        sandbox_identity,
+                    );
                     let policy_bytes = match policy.to_bytes() {
                         Ok(b) => b,
                         Err(e) => {
@@ -491,12 +591,13 @@ impl ToolExecutor for RealSandbox {
                 (None, None)
             };
 
-        let bwrap_args = Self::build_bwrap_args(
+        let bwrap_args = Self::build_bwrap_args_with_identity(
             &cwd_str,
             &cmd.command,
             profile.deny_net,
             seccomp_fd_arg,
             init_wiring.as_ref(),
+            sandbox_identity,
         );
 
         let mut command = tokio::process::Command::new("bwrap");
@@ -605,6 +706,36 @@ mod tests {
                 "missing required bwrap flag {flag}: {args:?}"
             );
         }
+    }
+
+    #[test]
+    fn bwrap_args_drop_to_nobody_and_clear_capabilities() {
+        let args = RealSandbox::build_bwrap_args("/tmp/work", "echo hi", true, None, None);
+
+        assert!(
+            args.windows(2).any(|w| w == ["--uid", "65534"]),
+            "AC-86 requires bwrap to run every sandbox as uid 65534: {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|w| w == ["--gid", "65534"]),
+            "AC-86 requires bwrap to run every sandbox as gid 65534: {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|w| w == ["--cap-drop", "ALL"]),
+            "AC-86 requires bwrap to drop every capability: {args:?}"
+        );
+
+        let uid_idx = args.iter().position(|a| a == "--uid").expect("--uid");
+        let gid_idx = args.iter().position(|a| a == "--gid").expect("--gid");
+        let cap_idx = args
+            .iter()
+            .position(|a| a == "--cap-drop")
+            .expect("--cap-drop");
+        let sep = args.iter().position(|a| a == "--").expect("-- separator");
+        assert!(
+            uid_idx < sep && gid_idx < sep && cap_idx < sep,
+            "uid/gid/cap-drop must be parsed by bwrap, not forwarded to sh: {args:?}"
+        );
     }
 
     #[test]
@@ -755,6 +886,43 @@ mod tests {
             policy.require_fully_enforced,
             "enforce mode must make pincery-init reject partial Landlock enforcement"
         );
+    }
+
+    #[test]
+    fn init_policy_targets_nobody_for_ac86_defense_in_depth() {
+        let policy = build_init_policy(Path::new("/tmp/work"), "true", SandboxMode::Enforce);
+        assert_eq!(policy.target_uid, 65534, "AC-86 target uid must be nobody");
+        assert_eq!(
+            policy.target_gid, 65534,
+            "AC-86 target gid must be nogroup/nobody"
+        );
+    }
+
+    #[test]
+    fn sandbox_identity_accepts_nonzero_env_overrides() {
+        let identity = resolve_sandbox_identity_from_raw(Some("1001"), Some("1002"), false)
+            .expect("nonzero override should be accepted");
+        assert_eq!(
+            identity,
+            SandboxIdentity {
+                uid: 1001,
+                gid: 1002
+            }
+        );
+    }
+
+    #[test]
+    fn sandbox_identity_rejects_uid_zero_without_allow_unsafe() {
+        let err = resolve_sandbox_identity_from_raw(Some("0"), Some("0"), false)
+            .expect_err("uid 0 must be rejected without allow_unsafe");
+        assert!(err.contains("OPEN_PINCERY_SANDBOX_UID=0"), "{err}");
+    }
+
+    #[test]
+    fn sandbox_identity_allows_uid_zero_with_allow_unsafe() {
+        let identity = resolve_sandbox_identity_from_raw(Some("0"), Some("0"), true)
+            .expect("allow_unsafe should permit explicit root override");
+        assert_eq!(identity, SandboxIdentity { uid: 0, gid: 0 });
     }
 
     #[test]

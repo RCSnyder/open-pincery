@@ -84,7 +84,9 @@ use serde::{Deserialize, Serialize};
 ///   requested.
 /// - `target_uid` / `target_gid`: applied via
 ///   `setresgid -> setgroups(0, NULL) -> setresuid` as defense-in-
-///   depth on top of bwrap's `--uid`/`--gid` flags (AC-86).
+///   depth on top of bwrap's `--uid`/`--gid` flags (AC-86). The
+///   wrapper then clears all capability sets with `capset(empty)` as
+///   defense-in-depth on top of bwrap's `--cap-drop ALL`.
 /// - `require_fully_enforced`: when `true`, the wrapper requests
 ///   `CompatLevel::HardRequirement` and must observe
 ///   `RestrictionStatus { ruleset: FullyEnforced, no_new_privs: true }`

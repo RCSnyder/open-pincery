@@ -15,6 +15,9 @@
 //!   `setresgid -> setgroups(0, NULL) -> setresuid` with
 //!   `getresuid`/`getresgid` verification. Short-circuits when already
 //!   at target (host-test accommodation; does not fire inside bwrap).
+//! - G0d / AC-86 (this slice): clear the effective, permitted, and
+//!   inheritable capability sets with `capset(empty)` as defense-in-
+//!   depth on top of bwrap's `--cap-drop ALL`.
 //! - G0a.3c (shipped): install seccomp filter via
 //!   `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &sock_fprog)`.
 //!   Verifies install via `/proc/self/status`'s `Seccomp:` line.
@@ -266,12 +269,10 @@ mod linux {
     /// - Host-level integration tests (which cannot obtain
     ///   `CAP_SETUID`) set `target_uid == geteuid()` so the step is
     ///   skipped and the rest of the pipeline still gets exercised.
-    /// - In the real bwrap path (G0a.3g) the wrapper is namespace-
-    ///   root (`euid == 0`) and the target is a non-zero unprivileged
-    ///   uid, so the short-circuit does NOT fire and the full drop
-    ///   runs. This is the only path that actually matters for
-    ///   AC-86's privilege isolation; the host-test short-circuit is
-    ///   purely a testability accommodation.
+    /// - In the real AC-86 bwrap path, bwrap applies `--uid`/`--gid`
+    ///   before execing the wrapper, so the short-circuit can fire.
+    ///   It still verifies all real/effective/saved uid+gid slots
+    ///   before continuing.
     ///
     /// `setgroups(0, NULL)` is skipped alongside the uid/gid change
     /// in the short-circuit case because it also requires
@@ -281,16 +282,16 @@ mod linux {
         let cur_uid = unsafe { libc::geteuid() };
         let cur_gid = unsafe { libc::getegid() };
 
-        if cur_uid == policy.target_uid && cur_gid == policy.target_gid {
+        let gid: libc::gid_t = policy.target_gid;
+        let uid: libc::uid_t = policy.target_uid;
+
+        if cur_uid == uid && cur_gid == gid {
             eprintln!(
                 "pincery-init: drop_privs short-circuit (already at \
                  uid={cur_uid} gid={cur_gid})"
             );
-            return Ok(());
+            return verify_uid_gid_slots(uid, gid);
         }
-
-        let gid: libc::gid_t = policy.target_gid;
-        let uid: libc::uid_t = policy.target_uid;
 
         // Step 1: setresgid(gid, gid, gid). Must precede setresuid.
         // SAFETY: libc FFI; return value is checked.
@@ -326,10 +327,10 @@ mod linux {
             )));
         }
 
-        // Belt-and-braces verify: all three uid slots match the
-        // target. This catches a kernel that silently dropped a
-        // component (which should never happen, but fail loudly if
-        // it does).
+        verify_uid_gid_slots(uid, gid)
+    }
+
+    fn verify_uid_gid_slots(uid: libc::uid_t, gid: libc::gid_t) -> Result<(), InitError> {
         let mut ruid: libc::uid_t = libc::uid_t::MAX;
         let mut euid: libc::uid_t = libc::uid_t::MAX;
         let mut suid: libc::uid_t = libc::uid_t::MAX;
@@ -361,6 +362,77 @@ mod linux {
         if rgid != gid || egid != gid || sgid != gid {
             return Err(InitError::VerifyPolicy(format!(
                 "gid slots mismatch after setresgid: r={rgid} e={egid} s={sgid} want={gid}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    #[repr(C)]
+    struct CapUserHeader {
+        version: u32,
+        pid: i32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CapUserData {
+        effective: u32,
+        permitted: u32,
+        inheritable: u32,
+    }
+
+    fn proc_status_value(name: &str) -> Result<String, InitError> {
+        let status = std::fs::read_to_string("/proc/self/status")
+            .map_err(|e| InitError::VerifyPolicy(format!("read /proc/self/status: {e}")))?;
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .map(str::trim)
+            .map(str::to_string)
+            .ok_or_else(|| InitError::VerifyPolicy(format!("no {name} line in /proc/self/status")))
+    }
+
+    fn apply_empty_capabilities() -> Result<(), InitError> {
+        const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+        let mut header = CapUserHeader {
+            version: LINUX_CAPABILITY_VERSION_3,
+            pid: 0,
+        };
+        let mut data = [
+            CapUserData {
+                effective: 0,
+                permitted: 0,
+                inheritable: 0,
+            },
+            CapUserData {
+                effective: 0,
+                permitted: 0,
+                inheritable: 0,
+            },
+        ];
+
+        // SAFETY: `capset(2)` reads the fixed-size header and two V3
+        // data records. Both point at stack locals that outlive the
+        // syscall, and the kernel copies the values before returning.
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_capset,
+                &mut header as *mut CapUserHeader,
+                data.as_mut_ptr(),
+            )
+        };
+        if rc != 0 {
+            return Err(InitError::ApplyPolicy(format!(
+                "capset(empty): {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        let cap_eff = proc_status_value("CapEff:")?;
+        if cap_eff != "0000000000000000" {
+            return Err(InitError::VerifyPolicy(format!(
+                "effective capabilities not empty after capset(empty): CapEff={cap_eff}"
             )));
         }
 
@@ -698,6 +770,7 @@ mod linux {
     fn apply_policy(policy: &SandboxInitPolicy) -> Result<(), InitError> {
         apply_no_new_privs()?;
         apply_drop_privs(policy)?;
+        apply_empty_capabilities()?;
         let landlock_status = apply_landlock(policy)?;
         apply_seccomp(policy)?;
         verify_no_new_privs()?;

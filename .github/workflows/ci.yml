@@ -119,6 +119,7 @@ jobs:
               # so target/ is shared. --test-threads=1 matches production
               # because tempdirs + procfs probes are not thread-safe.
               cargo test --test sandbox_real_smoke --test sandbox_landlock_test \
+                         --test sandbox_uid_drop_test \
                          --test sandbox_seccomp_test --test sandbox_cgroup_test \
                          --test sandbox_preflight_test \
                          --no-fail-fast \
