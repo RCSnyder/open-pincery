@@ -9,6 +9,12 @@
 use std::process::Command;
 
 fn server_bin() -> std::path::PathBuf {
+    if let Some(path) = option_env!("CARGO_BIN_EXE_open-pincery") {
+        return std::path::PathBuf::from(path);
+    }
+    if let Some(path) = option_env!("CARGO_BIN_EXE_open_pincery") {
+        return std::path::PathBuf::from(path);
+    }
     if let Ok(path) = std::env::var("CARGO_BIN_EXE_open-pincery") {
         return std::path::PathBuf::from(path);
     }
