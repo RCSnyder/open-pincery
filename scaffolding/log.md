@@ -1,5 +1,13 @@
 # Open Pincery — Experiment Log
 
+## VERIFY v9 — Slice G0b / AC-84 final CI verification — 2026-04-27T21:43Z
+
+- **Gate**: PASS (attempt 2).
+- **Evidence**: GitHub Actions PR run `25021024624` completed successfully on head commit `d23b0e0`: `rustfmt`, `clippy`, `cargo test`, `cargo deny`, and privileged `sandbox real-bwrap smoke` all passed. The sandbox job exported `OPEN_PINCERY_RUN_AC84_POSITIVE=1`, ran `tests/sandbox_preflight_test.rs`, and all four AC-84 process tests passed (`relaxed_with_allow_unsafe_logs_warning_before_config_bootstrap`, `relaxed_without_allow_unsafe_exits_4_and_logs_event`, `relaxed_without_allow_unsafe_text_logging_still_names_event`, `strict_compliant_floor_logs_ok_before_config_bootstrap`). TLA+ model check run `25021024666` also passed.
+- **Changes**: Fixed the CI-only test harness issue by resolving the `open-pincery` server binary path through Cargo's compile-time `CARGO_BIN_EXE_open-pincery` value; prior attempt `25020730470` failed only because `sandbox_preflight_test.rs` read that value as a runtime env var.
+- **Retries**: 1.
+- **Next**: AC-84 VERIFY is closed; proceed to G0c / AC-85 (`FullyEnforced` or refuse) after normal context recovery.
+
 ## VERIFY v9 — Slice G0b / AC-84 conditional verification — 2026-04-27T00:00Z
 
 - **Gate**: CONDITIONAL_PASS_PENDING_CI (attempt 1).

@@ -79,8 +79,9 @@ Debian/Ubuntu `unprivileged_userns_clone=1` for non-root callers, and
 `bwrap >= 0.8.0`. AC-84 proof is `src/runtime/sandbox/preflight.rs`
 unit coverage plus `tests/sandbox_preflight_test.rs`; positive process
 tests are intentionally gated by `OPEN_PINCERY_RUN_AC84_POSITIVE=1` in
-the privileged `sandbox-smoke` CI job. Linux CI/devshell evidence remains
-required before VERIFY closes this slice.
+the privileged `sandbox-smoke` CI job. VERIFY closed on GitHub Actions
+run `25021024624`, where the privileged sandbox job ran all four
+`sandbox_preflight_test.rs` process tests with the positive-evidence gate enabled.
 
 ## Key Links — AC → Design → Test → Proof
 
