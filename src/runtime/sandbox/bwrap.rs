@@ -281,6 +281,7 @@ impl RealSandbox {
             // imply `--share-net`-toggleable semantics; we prefer
             // explicit per-axis flags so the posture is auditable.
             "--unshare-user".into(),
+            "--disable-userns".into(),
             "--uid".into(),
             identity.uid.to_string(),
             "--gid".into(),
@@ -696,6 +697,7 @@ mod tests {
         for flag in [
             "--die-with-parent",
             "--unshare-user",
+            "--disable-userns",
             "--unshare-pid",
             "--unshare-ipc",
             "--unshare-uts",
@@ -726,6 +728,10 @@ mod tests {
             args.windows(2).any(|w| w == ["--cap-drop", "ALL"]),
             "AC-86 requires bwrap to drop every capability: {args:?}"
         );
+        assert!(
+            args.iter().any(|a| a == "--disable-userns"),
+            "AC-86 requires nested user namespace creation to be disabled: {args:?}"
+        );
 
         let uid_idx = args.iter().position(|a| a == "--uid").expect("--uid");
         let gid_idx = args.iter().position(|a| a == "--gid").expect("--gid");
@@ -733,10 +739,14 @@ mod tests {
             .iter()
             .position(|a| a == "--cap-drop")
             .expect("--cap-drop");
+        let disable_userns_idx = args
+            .iter()
+            .position(|a| a == "--disable-userns")
+            .expect("--disable-userns");
         let sep = args.iter().position(|a| a == "--").expect("-- separator");
         assert!(
-            uid_idx < sep && gid_idx < sep && cap_idx < sep,
-            "uid/gid/cap-drop must be parsed by bwrap, not forwarded to sh: {args:?}"
+            uid_idx < sep && gid_idx < sep && cap_idx < sep && disable_userns_idx < sep,
+            "uid/gid/cap-drop/disable-userns must be parsed by bwrap, not forwarded to sh: {args:?}"
         );
     }
 
