@@ -1,5 +1,13 @@
 # Open Pincery — Experiment Log
 
+## VERIFY v9 — Slice G0c / AC-85 final CI verification — 2026-04-27T22:41Z
+
+- **Gate**: PASS (attempt 3).
+- **Evidence**: Local Windows-host ladder passed before push: `cargo fmt --all -- --check`, `cargo check --all-targets` with `CARGO_TARGET_DIR=target/local-check`, `git diff --check`, and `cargo test --test sandbox_landlock_test -- --list` (0 Linux tests on Windows, expected). GitHub Actions PR run `25023247961` completed successfully on head commit `f28039c`: `rustfmt`, `clippy`, `cargo test`, `cargo deny`, and privileged `sandbox real-bwrap smoke` all passed. The privileged sandbox job included `tests/sandbox_landlock_test.rs`, proving the real bwrap + `pincery-init` path, enforced rejection of forced partial Landlock in `enforce` mode, and audit-mode `sandbox_partial_enforcement` continuation. TLA+ model check run `25023247965` also passed.
+- **Changes**: AC-85 is implemented by `src/runtime/sandbox/landlock.rs` (`LandlockCompatibility`, `CompatLevel::HardRequirement`, full `RestrictionStatus` validation including `no_new_privs`), `src/bin/pincery_init.rs` (strict vs best-effort install selection, `_exit(125)` verify path, audit partial event), `src/runtime/sandbox/bwrap.rs` (mode-aware `require_fully_enforced`, parent ABI-floor refusal in `enforce`, audit downgrade), `src/runtime/sandbox/init_policy.rs` docs, and `tests/sandbox_landlock_test.rs` AC-85 real-sandbox cases. `scaffolding/scope.md` verification references were reconciled to the implemented tests.
+- **Retries**: 2. CI run `25022992250` found Linux-only `RestrictionStatus` construction errors in tests; run `25023128608` then passed cargo test + sandbox smoke but failed clippy's duplicate-branch lint; both were fixed in follow-up commits before the final green run.
+- **Next**: AC-85 VERIFY is closed; proceed to G0d / AC-86 (UID/capability drop in bwrap) after normal context recovery.
+
 ## VERIFY v9 — Slice G0b / AC-84 final CI verification — 2026-04-27T21:43Z
 
 - **Gate**: PASS (attempt 2).
