@@ -68,6 +68,20 @@ require_fully_enforced: bool, user_argv: Vec<String> }`.
   proves the architectural substrate (wrapper + IPC + in-sandbox install
   - fail-closed exit 125) is sound.
 
+**RECONCILED 2026-04-27:** AC-84 / Slice G0b has since landed. The
+server now runs `enforce_kernel_floor_at_startup()` from `src/main.rs`
+before config loading, DB bootstrap, or listener bind. The landed floor is
+Landlock ABI >= 6 in strict mode, ABI >= 1 only under
+`OPEN_PINCERY_SANDBOX_FLOOR=relaxed` plus
+`OPEN_PINCERY_ALLOW_UNSAFE=true`, seccomp-bpf, cgroup v2,
+`/proc/sys/user/max_user_namespaces > 0` for all callers,
+Debian/Ubuntu `unprivileged_userns_clone=1` for non-root callers, and
+`bwrap >= 0.8.0`. AC-84 proof is `src/runtime/sandbox/preflight.rs`
+unit coverage plus `tests/sandbox_preflight_test.rs`; positive process
+tests are intentionally gated by `OPEN_PINCERY_RUN_AC84_POSITIVE=1` in
+the privileged `sandbox-smoke` CI job. Linux CI/devshell evidence remains
+required before VERIFY closes this slice.
+
 ## Key Links — AC → Design → Test → Proof
 
 - **AC-83** (`pincery-init` exec wrapper):

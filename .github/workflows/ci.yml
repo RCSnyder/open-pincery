@@ -111,6 +111,7 @@ jobs:
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
                 | sh -s -- -y --default-toolchain 1.88.0 --profile minimal
               export PATH=/tmp/cargo/bin:$PATH
+              export OPEN_PINCERY_RUN_AC84_POSITIVE=1
               bwrap --version
               # Sanity-check: bwrap actually creates a user+pid ns.
               bwrap --unshare-user --unshare-pid --dev-bind / / /bin/true
@@ -119,6 +120,7 @@ jobs:
               # because tempdirs + procfs probes are not thread-safe.
               cargo test --test sandbox_real_smoke --test sandbox_landlock_test \
                          --test sandbox_seccomp_test --test sandbox_cgroup_test \
+                         --test sandbox_preflight_test \
                          --no-fail-fast \
                          -- --nocapture --test-threads=1
             ' | tee "$OUT"

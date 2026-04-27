@@ -1,5 +1,20 @@
 # Open Pincery — Experiment Log
 
+## VERIFY v9 — Slice G0b / AC-84 conditional verification — 2026-04-27T00:00Z
+
+- **Gate**: CONDITIONAL_PASS_PENDING_CI (attempt 1).
+- **Evidence**: Independent VERIFY confirmed static traceability from AC-84 to `src/main.rs`, `src/runtime/sandbox/preflight.rs`, `tests/sandbox_preflight_test.rs`, and `.github/workflows/ci.yml`; `get_errors` is clean on touched Rust/test/CI files. The verifier could not produce trustworthy local command output because this Windows host's terminal returned blank output even for trivial commands, and Linux-gated runtime behavior cannot be proven on Windows.
+- **Changes verified**: Strict Landlock ABI floor, relaxed-mode double opt-in, exit-code-4 failure path, split userns clone gate vs `max_user_namespaces` quota, root quota rejection, positive process tests gated into privileged `sandbox-smoke` CI.
+- **Retries**: 0.
+- **Next**: Run the privileged Linux `sandbox-smoke` job or devshell command with `OPEN_PINCERY_RUN_AC84_POSITIVE=1`; only then close VERIFY and proceed to G0c / AC-85.
+
+## RECONCILE — 2026-04-27T00:00Z
+
+- **Structural drift fixed**: AC-84 / Slice G0b docs now match the implemented kernel ABI floor preflight: startup wiring in `src/main.rs`, strict Landlock ABI >= 6, relaxed ABI >= 1 only with `OPEN_PINCERY_ALLOW_UNSAFE=true`, no bwrap-only fallback, split Debian/Ubuntu `unprivileged_userns_clone` gate from upstream `max_user_namespaces`, root bypass limited to the Debian/Ubuntu clone gate, and `tests/sandbox_preflight_test.rs` positive evidence gated in privileged Linux CI.
+- **REVIEW state**: AC-84 review-fix reconciliation records the pass verdict after the userns-quota regression and CI wiring changes. No AC-85 / G0c behavior is authorized or documented as landed.
+- **Documents updated**: `scaffolding/scope.md`, `scaffolding/design.md`, `scaffolding/readiness.md`, `scaffolding/log.md`.
+- **VERIFY remaining**: Linux CI/devshell evidence is still required for final VERIFY, including `sandbox_preflight_test` in the privileged `sandbox-smoke` job with `OPEN_PINCERY_RUN_AC84_POSITIVE=1`.
+
 ## BUILD v9 — Slice G0b.2: startup preflight wiring + exit-4 contract (AC-84) — 2026-04-24T03:10Z
 
 - **Gate**: PASS locally (`get_errors` clean on touched files). Linux runtime behavior is CI-authoritative because this workstation runs Windows and `#[cfg(target_os = "linux")]` tests compile but do not execute here.

@@ -79,9 +79,9 @@ pub const LANDLOCK_ABI_RELAXED_FLOOR: u32 = 1;
 pub const BWRAP_MIN_VERSION: (u32, u32, u32) = (0, 8, 0);
 
 /// Abstraction over the five kernel primitives the preflight
-/// probes for. Implementors must be side-effect-free on every
-/// method — `assert_kernel_floor` calls them in sequence and each
-/// probe is allowed to be invoked zero or multiple times.
+/// probes for. Implementors should keep each probe read-only and
+/// deterministic — `assert_kernel_floor` calls them in sequence and
+/// each probe is allowed to be invoked zero or multiple times.
 pub trait KernelProbe {
     /// Best Landlock ABI supported by the running kernel, or
     /// `None` if the `landlock_create_ruleset` syscall returns
@@ -100,13 +100,16 @@ pub trait KernelProbe {
     /// a unified cgroup v2 hierarchy.
     fn cgroup_v2_mounted(&self) -> bool;
 
-    /// Whether the running kernel allows unprivileged user
-    /// namespace creation. The source of truth is
-    /// `/proc/sys/kernel/unprivileged_userns_clone` (Debian/Ubuntu
-    /// patch) or the Linux kernel default (`userns.enabled`).
-    /// Root-owned processes bypass the check, so `is_root() == true`
-    /// short-circuits this requirement to `true` inside the preflight.
-    fn unprivileged_userns_allowed(&self) -> bool;
+    /// Whether the Debian/Ubuntu-specific unprivileged-userns gate
+    /// allows non-root callers to create user namespaces. Upstream
+    /// kernels do not expose this file; absence is treated as allowed.
+    /// Root-owned processes bypass this gate.
+    fn unprivileged_userns_clone_allowed(&self) -> bool;
+
+    /// Whether the upstream user namespace quota is positive. Root
+    /// does NOT bypass this requirement because `max_user_namespaces=0`
+    /// prevents even root-started bwrap from creating a user namespace.
+    fn userns_quota_available(&self) -> bool;
 
     /// Best `bwrap --version` detected on `$PATH`, parsed as
     /// `(major, minor, patch)`. `None` means either bwrap is not
@@ -114,9 +117,7 @@ pub trait KernelProbe {
     fn bwrap_version(&self) -> Option<(u32, u32, u32)>;
 
     /// Whether the running process is uid 0 (real uid). Used to
-    /// short-circuit the `unprivileged_userns_allowed` requirement
-    /// — root can always `unshare(CLONE_NEWUSER)` regardless of
-    /// the sysctl.
+    /// short-circuit the Debian/Ubuntu unprivileged-userns gate.
     fn is_root(&self) -> bool;
 }
 
@@ -232,8 +233,10 @@ impl std::fmt::Display for FloorError {
             Self::UnprivilegedUsernsDisabled => write!(
                 f,
                 "Unprivileged user namespaces are disabled \
-                 (/proc/sys/kernel/unprivileged_userns_clone = 0) and \
-                 the caller is not root. bwrap cannot create its \
+                  (/proc/sys/kernel/unprivileged_userns_clone = 0 or \
+                  /proc/sys/user/max_user_namespaces = 0/unreadable). \
+                  Non-root callers require unprivileged_userns_clone=1; \
+                  all callers require max_user_namespaces > 0. bwrap cannot create its \
                  sandbox namespace."
             ),
             Self::BwrapMissing => write!(
@@ -314,8 +317,10 @@ pub fn assert_kernel_floor(
         return Err(FloorError::CgroupV2NotMounted);
     }
 
-    // Step 5: unprivileged userns OR root.
-    if !probe.is_root() && !probe.unprivileged_userns_allowed() {
+    // Step 5: userns quota AND (Debian/Ubuntu unprivileged gate OR root).
+    if !probe.userns_quota_available()
+        || (!probe.is_root() && !probe.unprivileged_userns_clone_allowed())
+    {
         return Err(FloorError::UnprivilegedUsernsDisabled);
     }
 
@@ -426,23 +431,20 @@ impl KernelProbe for RealKernelProbe {
         std::path::Path::new("/sys/fs/cgroup/cgroup.controllers").exists()
     }
 
-    fn unprivileged_userns_allowed(&self) -> bool {
-        // Source of truth differs by distro:
-        //   - Debian/Ubuntu: /proc/sys/kernel/unprivileged_userns_clone
-        //   - Vanilla kernel / Fedora: always `1` unless sysctl
-        //     `user.max_user_namespaces == 0`.
-        // We read the Debian/Ubuntu file when present and treat any
-        // other case as "allowed" — false negatives on vanilla
-        // kernels that have userns disabled via max_user_namespaces
-        // would surface as a bwrap spawn failure later, which the
-        // operator can diagnose from the bwrap stderr.
-        let path = "/proc/sys/kernel/unprivileged_userns_clone";
-        match std::fs::read_to_string(path) {
-            Ok(s) => s.trim() == "1",
-            // File absent → not a Debian-patched kernel → assume
-            // default-allowed. This matches upstream kernel behavior.
-            Err(_) => true,
+    fn unprivileged_userns_clone_allowed(&self) -> bool {
+        match std::fs::read_to_string(UNPRIVILEGED_USERNS_CLONE_PATH) {
+            Ok(s) => parse_zero_one_sysctl(&s).unwrap_or(false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Err(_) => false,
         }
+    }
+
+    fn userns_quota_available(&self) -> bool {
+        let max_namespaces = match std::fs::read_to_string(MAX_USER_NAMESPACES_PATH) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        userns_quota_available_from_sysctl(Some(&max_namespaces))
     }
 
     fn bwrap_version(&self) -> Option<(u32, u32, u32)> {
@@ -464,6 +466,27 @@ impl KernelProbe for RealKernelProbe {
         // SAFETY: pure getter.
         unsafe { libc::getuid() == 0 }
     }
+}
+
+const UNPRIVILEGED_USERNS_CLONE_PATH: &str = "/proc/sys/kernel/unprivileged_userns_clone";
+const MAX_USER_NAMESPACES_PATH: &str = "/proc/sys/user/max_user_namespaces";
+
+fn parse_zero_one_sysctl(raw: &str) -> Option<bool> {
+    match raw.trim() {
+        "0" => Some(false),
+        "1" => Some(true),
+        _ => None,
+    }
+}
+
+fn parse_max_user_namespaces(raw: &str) -> Option<bool> {
+    raw.trim().parse::<u64>().ok().map(|limit| limit > 0)
+}
+
+fn userns_quota_available_from_sysctl(max_user_namespaces: Option<&str>) -> bool {
+    max_user_namespaces
+        .and_then(parse_max_user_namespaces)
+        .unwrap_or(false)
 }
 
 /// Parse `bubblewrap X.Y.Z` or `X.Y.Z` into a version triple.
@@ -503,7 +526,8 @@ mod tests {
         landlock_abi: Option<u32>,
         seccomp_available: bool,
         cgroup_v2_mounted: bool,
-        unprivileged_userns_allowed: bool,
+        unprivileged_userns_clone_allowed: bool,
+        userns_quota_available: bool,
         bwrap_version: Option<(u32, u32, u32)>,
         is_root: bool,
     }
@@ -516,7 +540,8 @@ mod tests {
                 landlock_abi: Some(LANDLOCK_ABI_FLOOR),
                 seccomp_available: true,
                 cgroup_v2_mounted: true,
-                unprivileged_userns_allowed: true,
+                unprivileged_userns_clone_allowed: true,
+                userns_quota_available: true,
                 bwrap_version: Some(BWRAP_MIN_VERSION),
                 is_root: false,
             }
@@ -533,8 +558,11 @@ mod tests {
         fn cgroup_v2_mounted(&self) -> bool {
             self.cgroup_v2_mounted
         }
-        fn unprivileged_userns_allowed(&self) -> bool {
-            self.unprivileged_userns_allowed
+        fn unprivileged_userns_clone_allowed(&self) -> bool {
+            self.unprivileged_userns_clone_allowed
+        }
+        fn userns_quota_available(&self) -> bool {
+            self.userns_quota_available
         }
         fn bwrap_version(&self) -> Option<(u32, u32, u32)> {
             self.bwrap_version
@@ -654,7 +682,8 @@ mod tests {
     #[test]
     fn userns_disabled_non_root_is_rejected() {
         let probe = StubKernelProbe {
-            unprivileged_userns_allowed: false,
+            unprivileged_userns_clone_allowed: false,
+            userns_quota_available: true,
             is_root: false,
             ..StubKernelProbe::compliant()
         };
@@ -666,13 +695,29 @@ mod tests {
 
     #[test]
     fn userns_disabled_but_root_passes() {
-        // Root can unshare(CLONE_NEWUSER) regardless of the sysctl.
+        // Root can unshare(CLONE_NEWUSER) regardless of the Debian/Ubuntu
+        // unprivileged_userns_clone sysctl.
         let probe = StubKernelProbe {
-            unprivileged_userns_allowed: false,
+            unprivileged_userns_clone_allowed: false,
+            userns_quota_available: true,
             is_root: true,
             ..StubKernelProbe::compliant()
         };
         assert!(assert_kernel_floor(&probe, &strict_env()).is_ok());
+    }
+
+    #[test]
+    fn userns_quota_disabled_is_rejected_even_for_root() {
+        let probe = StubKernelProbe {
+            unprivileged_userns_clone_allowed: true,
+            userns_quota_available: false,
+            is_root: true,
+            ..StubKernelProbe::compliant()
+        };
+        assert_eq!(
+            assert_kernel_floor(&probe, &strict_env()),
+            Err(FloorError::UnprivilegedUsernsDisabled)
+        );
     }
 
     #[test]
@@ -725,6 +770,28 @@ mod tests {
     }
 
     #[test]
+    fn userns_sysctls_allow_when_debian_gate_absent_and_namespace_quota_positive() {
+        assert!(userns_quota_available_from_sysctl(Some("1024\n")));
+    }
+
+    #[test]
+    fn userns_sysctls_reject_when_max_user_namespaces_is_zero() {
+        assert!(!userns_quota_available_from_sysctl(Some("0\n")));
+    }
+
+    #[test]
+    fn userns_sysctls_reject_when_debian_gate_disables_userns() {
+        assert_eq!(parse_zero_one_sysctl("0\n"), Some(false));
+    }
+
+    #[test]
+    fn userns_sysctls_reject_malformed_or_missing_quota() {
+        assert!(!userns_quota_available_from_sysctl(Some("not-a-number")));
+        assert_eq!(parse_zero_one_sysctl("maybe\n"), None);
+        assert!(!userns_quota_available_from_sysctl(None));
+    }
+
+    #[test]
     fn floor_env_from_env_reads_relaxed_and_allow_unsafe() {
         // Shield test against concurrent env writes: serialise via
         // a simple pair of set/unset and rely on --test-threads=1
@@ -758,7 +825,8 @@ mod tests {
         let _ = probe.landlock_abi();
         let _ = probe.seccomp_available();
         let _ = probe.cgroup_v2_mounted();
-        let _ = probe.unprivileged_userns_allowed();
+        let _ = probe.unprivileged_userns_clone_allowed();
+        let _ = probe.userns_quota_available();
         let _ = probe.bwrap_version();
         let _ = probe.is_root();
     }

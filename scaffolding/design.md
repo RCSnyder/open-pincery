@@ -2440,7 +2440,7 @@ network_blocked   { tool_call_id, destination_host, destination_port, protocol }
 | ---------------------------------- | ------------------------ | ------------------------------------------------------------ | ------------------------------------------------------- |
 | `bubblewrap` binary                | Namespace isolation      | Missing / ns disabled → exec refuses, `sandbox_unavailable`  | Live on ubuntu-24.04 CI; ignored on non-Linux           |
 | `libseccomp` / `seccompiler` crate | Syscall allowlist        | Profile load fails → exec refuses                            | Unit: load profile + assert denied syscalls error       |
-| `landlock` crate                   | FS confinement           | Kernel <5.13 → warn + fall-back, emit `landlock_unavailable` | Live; skip if unsupported; CI enforces supported kernel |
+| Landlock ABI + `landlock` crate     | FS confinement + IPC floor | Startup preflight fails closed if ABI < 6 in strict mode; relaxed mode only downgrades to ABI >= 1 with `OPEN_PINCERY_ALLOW_UNSAFE=true`; no bwrap-only fallback | Live in privileged sandbox-smoke; AC-84 positive process tests run with `OPEN_PINCERY_RUN_AC84_POSITIVE=1` |
 | `slirp4netns`                      | Egress proxy + allowlist | Missing → exec refuses                                       | Live: allowed host succeeds, denied host blocks         |
 | `cgroups-rs`                       | Resource limits          | cgroup v2 not mounted → exec refuses                         | Live: small OOM / PID thresholds                        |
 | Postgres                           | Tenancy enforcement      | Middleware bypass → lint fails CI                            | Live: 5×5 isolation matrix + SQLi probes                |
@@ -2462,7 +2462,7 @@ network_blocked   { tool_call_id, destination_host, destination_port, protocol }
 
 ### Open Questions
 
-- **Landlock kernel floor.** ubuntu-24.04 runner ships kernel 6.8+ (landlock v3 available). `SECURITY.md` documents a self-hoster minimum of 5.13; older kernels fall back to bwrap-only with a warning event.
+- **Landlock kernel floor.** Resolved by AC-84 / Slice G0b: strict startup requires Landlock ABI >= 6 (Linux >= 6.7), seccomp-bpf, cgroup v2, `/proc/sys/user/max_user_namespaces > 0`, Debian/Ubuntu `unprivileged_userns_clone=1` for non-root callers, and bubblewrap >= 0.8.0 before config loading, DB bootstrap, or listener bind. `OPEN_PINCERY_SANDBOX_FLOOR=relaxed` only downgrades Landlock to ABI >= 1 when paired with `OPEN_PINCERY_ALLOW_UNSAFE=true`; there is no bwrap-only fallback. Linux CI/devshell evidence remains the VERIFY proof path.
 - **slirp4netns vs nftables.** v9 uses slirp4netns (unprivileged, userspace). nftables is a v10 opt-in for performance at scale. No BUILD impact.
 - **Session refresh vs rotation.** v9 uses sliding expiration + an explicit `POST /api/sessions/refresh`. Refresh-token rotation (separate short access + long refresh) deferred to v11 with OAuth integration.
 
