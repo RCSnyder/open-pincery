@@ -39,10 +39,31 @@
 
 use std::path::{Path, PathBuf};
 
-pub use landlock::RulesetStatus;
 use landlock::{
-    Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI,
+    Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr,
+    RulesetCreatedAttr, ABI,
 };
+pub use landlock::{RestrictionStatus, RulesetStatus};
+
+/// How strictly unsupported Landlock features should be handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LandlockCompatibility {
+    /// Best-effort mode: use whatever the kernel can enforce and let
+    /// the caller inspect `RestrictionStatus` afterward.
+    BestEffort,
+    /// Production enforce mode: unsupported requested features are a
+    /// hard error, and partial ruleset status is rejected.
+    HardRequirement,
+}
+
+impl LandlockCompatibility {
+    fn compat_level(self) -> CompatLevel {
+        match self {
+            Self::BestEffort => CompatLevel::BestEffort,
+            Self::HardRequirement => CompatLevel::HardRequirement,
+        }
+    }
+}
 
 /// Fixed set of host paths that need read+execute access for stock
 /// glibc programs to load and run inside the sandbox. Ordered for
@@ -120,10 +141,12 @@ pub fn landlock_supported() -> bool {
 
 /// Build and apply a landlock ruleset to the calling thread.
 ///
-/// MUST be called from within a `pre_exec` closure (after `fork(2)`,
-/// before `execve(2)`) so it restricts the child process but not the
-/// parent. Returns the final [`RulesetStatus`] on success, or a
-/// string error describing what failed.
+/// MUST be called from a short-lived child path such as `pincery-init`
+/// after bwrap has finished namespace and mount setup. Landlock is
+/// inherited across `execve(2)`, so the wrapper can restrict itself
+/// and then exec the user command without affecting the parent.
+/// Returns the final [`RestrictionStatus`] on success, or a string
+/// error describing what failed.
 ///
 /// We use `ABI::V1` for maximum kernel compatibility (5.13+). V3
 /// adds file-truncation handling but is not required for the
@@ -137,19 +160,23 @@ pub fn landlock_supported() -> bool {
 ///
 /// ## Return value
 ///
-/// `RulesetStatus::FullyEnforced` means the kernel honored every
-/// access bit we requested. `RulesetStatus::PartiallyEnforced`
-/// means the kernel supports landlock but not every bit — harmless
-/// under V1 but callers wanting strict safety (see
-/// `SandboxInitPolicy::require_fully_enforced`) should reject it.
-/// `NotEnforced` is converted to an `Err` internally since it
-/// indicates the ruleset never took effect.
-pub fn install_landlock(profile: &LandlockProfile) -> Result<RulesetStatus, String> {
+/// `RestrictionStatus { ruleset: FullyEnforced, no_new_privs: true }`
+/// means the kernel honored every access bit we requested and set
+/// no-new-privileges. `RulesetStatus::PartiallyEnforced` means the
+/// kernel supports landlock but not every bit; it is only accepted
+/// with [`LandlockCompatibility::BestEffort`]. `NotEnforced` is
+/// converted to an `Err` internally since it indicates the ruleset
+/// never took effect.
+pub fn install_landlock(
+    profile: &LandlockProfile,
+    compatibility: LandlockCompatibility,
+) -> Result<RestrictionStatus, String> {
     let abi = ABI::V1;
     let access_all = AccessFs::from_all(abi);
     let access_read = AccessFs::from_read(abi);
 
     let mut ruleset = Ruleset::default()
+        .set_compatibility(compatibility.compat_level())
         .handle_access(access_all)
         .map_err(|e| format!("landlock handle_access failed: {e}"))?
         .create()
@@ -177,14 +204,25 @@ pub fn install_landlock(profile: &LandlockProfile) -> Result<RulesetStatus, Stri
         .restrict_self()
         .map_err(|e| format!("landlock restrict_self failed: {e}"))?;
 
-    match status.ruleset {
-        // Either fully or partially is acceptable here - partial
-        // means the kernel supports landlock but not at every access
-        // bit we asked for, which is harmless given V1's narrow
-        // surface. Callers that require strict enforcement compare
-        // the returned status against `RulesetStatus::FullyEnforced`.
-        RulesetStatus::FullyEnforced | RulesetStatus::PartiallyEnforced => Ok(status.ruleset),
-        RulesetStatus::NotEnforced => {
+    validate_restriction_status(status, compatibility)
+}
+
+fn validate_restriction_status(
+    status: RestrictionStatus,
+    compatibility: LandlockCompatibility,
+) -> Result<RestrictionStatus, String> {
+    match (&status.ruleset, status.no_new_privs, compatibility) {
+        (RulesetStatus::FullyEnforced, true, _) => Ok(status),
+        (RulesetStatus::FullyEnforced, false, LandlockCompatibility::BestEffort) => Ok(status),
+        (RulesetStatus::FullyEnforced, false, LandlockCompatibility::HardRequirement) => Err(
+            "landlock FullyEnforced but no_new_privs=false under HardRequirement compatibility"
+                .into(),
+        ),
+        (RulesetStatus::PartiallyEnforced, _, LandlockCompatibility::BestEffort) => Ok(status),
+        (RulesetStatus::PartiallyEnforced, _, LandlockCompatibility::HardRequirement) => {
+            Err("landlock partially enforced under HardRequirement compatibility".into())
+        }
+        (RulesetStatus::NotEnforced, _, _) => {
             Err("landlock not enforced (kernel returned NotEnforced status)".into())
         }
     }
@@ -239,5 +277,49 @@ mod tests {
         // with various kernels) and CI. We're just pinning that the
         // probe is side-effect-free and returns *something*.
         let _ = landlock_supported();
+    }
+
+    #[test]
+    fn best_effort_accepts_partially_enforced_status() {
+        let status = RestrictionStatus {
+            ruleset: RulesetStatus::PartiallyEnforced,
+            no_new_privs: true,
+        };
+        let result = validate_restriction_status(status, LandlockCompatibility::BestEffort)
+            .expect("best-effort should accept partial status");
+        assert_eq!(result.ruleset, RulesetStatus::PartiallyEnforced);
+        assert!(result.no_new_privs);
+    }
+
+    #[test]
+    fn hard_requirement_rejects_partially_enforced_status() {
+        let result = validate_restriction_status(
+            RestrictionStatus {
+                ruleset: RulesetStatus::PartiallyEnforced,
+                no_new_privs: true,
+            },
+            LandlockCompatibility::HardRequirement,
+        );
+        let error = result.expect_err("partial status must be rejected");
+        assert!(
+            error.contains("partially enforced"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn hard_requirement_rejects_missing_no_new_privs() {
+        let result = validate_restriction_status(
+            RestrictionStatus {
+                ruleset: RulesetStatus::FullyEnforced,
+                no_new_privs: false,
+            },
+            LandlockCompatibility::HardRequirement,
+        );
+        let error = result.expect_err("missing no_new_privs must be rejected");
+        assert!(
+            error.contains("no_new_privs=false"),
+            "unexpected error: {error}"
+        );
     }
 }

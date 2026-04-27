@@ -31,6 +31,7 @@ use crate::config::{ResolvedSandboxMode, SandboxMode};
 use super::cgroup::CgroupGuard;
 use super::init_policy::SandboxInitPolicy;
 use super::landlock_layer::LandlockProfile;
+use super::preflight::{KernelProbe, RealKernelProbe, LANDLOCK_ABI_FLOOR};
 use super::{is_rejected_pattern, ExecResult, SandboxProfile, ShellCommand, ToolExecutor};
 
 /// AC-83 / Slice G0a.3g: parameters needed to splice `pincery-init`
@@ -93,7 +94,7 @@ pub(super) fn pincery_init_bin_path() -> Result<PathBuf, String> {
 /// `parse_args` reject the CLI form with `user argv after '--'
 /// must be non-empty`, which is what G0a.3g's first CI run tripped
 /// on).
-fn build_init_policy(cwd: &Path, cmd: &str) -> SandboxInitPolicy {
+fn build_init_policy(cwd: &Path, cmd: &str, mode: SandboxMode) -> SandboxInitPolicy {
     let landlock = LandlockProfile::default_for_cwd(cwd);
     // SAFETY: libc getters with no arguments; cannot fail.
     let uid = unsafe { libc::geteuid() };
@@ -104,8 +105,19 @@ fn build_init_policy(cwd: &Path, cmd: &str) -> SandboxInitPolicy {
         seccomp_bpf: Vec::new(),
         target_uid: uid,
         target_gid: gid,
-        require_fully_enforced: false,
+        require_fully_enforced: matches!(mode, SandboxMode::Enforce),
         user_argv: vec!["sh".into(), "-c".into(), cmd.into()],
+    }
+}
+
+fn landlock_abi_below_required_floor() -> Option<String> {
+    let probe = RealKernelProbe;
+    match probe.landlock_abi() {
+        Some(found) if found >= LANDLOCK_ABI_FLOOR => None,
+        Some(found) => Some(format!(
+            "Landlock ABI {found} is below required ABI {LANDLOCK_ABI_FLOOR}"
+        )),
+        None => Some("Landlock unsupported: landlock_create_ruleset returned ENOSYS".into()),
     }
 }
 
@@ -388,6 +400,24 @@ impl ToolExecutor for RealSandbox {
         // from it during startup.
         let (_init_policy_fd, init_wiring): (Option<OwnedFd>, Option<PinceryInitWiring>) =
             if profile.landlock {
+                if let Some(reason) = landlock_abi_below_required_floor() {
+                    match self.sandbox.mode {
+                        SandboxMode::Enforce => {
+                            return ExecResult::Err(format!(
+                                "landlock ABI floor unmet (enforce mode, failing closed): {reason}"
+                            ));
+                        }
+                        SandboxMode::Audit | SandboxMode::Disabled => {
+                            tracing::warn!(
+                                target = "sandbox.landlock",
+                                event = "sandbox_partial_enforcement",
+                                reason = %reason,
+                                mode = ?self.sandbox.mode,
+                                "landlock ABI below strict floor; proceeding in audit/disabled mode"
+                            );
+                        }
+                    }
+                }
                 if !super::landlock_layer::landlock_supported() {
                     match self.sandbox.mode {
                         SandboxMode::Enforce => {
@@ -431,7 +461,7 @@ impl ToolExecutor for RealSandbox {
                             ));
                         }
                     };
-                    let policy = build_init_policy(&cwd, &cmd.command);
+                    let policy = build_init_policy(&cwd, &cmd.command, self.sandbox.mode);
                     let policy_bytes = match policy.to_bytes() {
                         Ok(b) => b,
                         Err(e) => {
@@ -716,5 +746,23 @@ mod tests {
         let resolved = pincery_init_bin_path().expect("env override must resolve");
         assert_eq!(resolved, PathBuf::from("/opt/custom/pincery-init"));
         std::env::remove_var("PINCERY_INIT_BIN_PATH");
+    }
+
+    #[test]
+    fn init_policy_requires_fully_enforced_in_enforce_mode() {
+        let policy = build_init_policy(Path::new("/tmp/work"), "true", SandboxMode::Enforce);
+        assert!(
+            policy.require_fully_enforced,
+            "enforce mode must make pincery-init reject partial Landlock enforcement"
+        );
+    }
+
+    #[test]
+    fn init_policy_allows_partial_enforcement_in_audit_mode() {
+        let policy = build_init_policy(Path::new("/tmp/work"), "true", SandboxMode::Audit);
+        assert!(
+            !policy.require_fully_enforced,
+            "audit mode must let pincery-init proceed and report sandbox_partial_enforcement"
+        );
     }
 }

@@ -85,11 +85,12 @@ use serde::{Deserialize, Serialize};
 /// - `target_uid` / `target_gid`: applied via
 ///   `setresgid -> setgroups(0, NULL) -> setresuid` as defense-in-
 ///   depth on top of bwrap's `--uid`/`--gid` flags (AC-86).
-/// - `require_fully_enforced`: when `true`, the wrapper must observe
+/// - `require_fully_enforced`: when `true`, the wrapper requests
+///   `CompatLevel::HardRequirement` and must observe
 ///   `RestrictionStatus { ruleset: FullyEnforced, no_new_privs: true }`
-///   or `_exit(125)` with a `not_fully_enforced` error JSON.
-///   Today's v9 default is `false`; AC-85 flips the production
-///   default to `true`.
+///   or `_exit(125)` with a `not_fully_enforced` error JSON. Enforce
+///   mode sets this to `true`; Audit mode sets it to `false` so the
+///   wrapper can emit `sandbox_partial_enforcement` and proceed.
 /// - `user_argv`: the argv the wrapper `execvp`s after all
 ///   restrictions are in place. First element is the program name
 ///   (same semantics as `execvp(3)`). Must be non-empty.

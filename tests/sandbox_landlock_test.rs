@@ -31,6 +31,7 @@
 use std::time::Duration;
 
 use open_pincery::config::{ResolvedSandboxMode, SandboxMode};
+use open_pincery::runtime::sandbox::preflight::{KernelProbe, RealKernelProbe, LANDLOCK_ABI_FLOOR};
 use open_pincery::runtime::sandbox::{
     bwrap::RealSandbox, ExecResult, SandboxProfile, ShellCommand, ToolExecutor,
 };
@@ -52,6 +53,14 @@ fn landlock_available() -> bool {
     open_pincery::runtime::sandbox::landlock_layer::landlock_supported()
 }
 
+fn strict_landlock_floor_available() -> bool {
+    let probe = RealKernelProbe;
+    probe
+        .landlock_abi()
+        .map(|abi| abi >= LANDLOCK_ABI_FLOOR)
+        .unwrap_or(false)
+}
+
 fn preconditions_met() -> bool {
     if !bwrap_available() {
         eprintln!("skipping: bwrap not on PATH");
@@ -59,6 +68,10 @@ fn preconditions_met() -> bool {
     }
     if !landlock_available() {
         eprintln!("skipping: kernel does not support landlock (need >= 5.13)");
+        return false;
+    }
+    if !strict_landlock_floor_available() {
+        eprintln!("skipping: Landlock ABI below AC-84/AC-85 strict floor {LANDLOCK_ABI_FLOOR}");
         return false;
     }
     // AC-83 / Slice G0a.3g: point RealSandbox at the cargo-built
@@ -73,6 +86,13 @@ fn preconditions_met() -> bool {
 fn enforce_sandbox() -> RealSandbox {
     RealSandbox::new(ResolvedSandboxMode {
         mode: SandboxMode::Enforce,
+        allow_unsafe: false,
+    })
+}
+
+fn audit_sandbox() -> RealSandbox {
+    RealSandbox::new(ResolvedSandboxMode {
+        mode: SandboxMode::Audit,
         allow_unsafe: false,
     })
 }
@@ -224,5 +244,75 @@ async fn landlock_disabled_via_profile_permits_writes() {
             );
         }
         other => panic!("expected Ok, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn enforce_mode_rejects_forced_partial_landlock() {
+    if !preconditions_met() {
+        return;
+    }
+    let mut cmd = ShellCommand::new("echo should-not-run");
+    cmd.env
+        .insert("OPEN_PINCERY_ALLOW_UNSAFE".into(), "true".into());
+    cmd.env
+        .insert("OPEN_PINCERY_INIT_FORCE_PARTIAL".into(), "1".into());
+
+    let result = enforce_sandbox().run(&cmd, &landlock_profile()).await;
+    match result {
+        ExecResult::Ok {
+            stdout,
+            stderr,
+            exit_code,
+        } => {
+            assert_eq!(
+                exit_code, 125,
+                "enforce mode must fail closed when pincery-init observes partial Landlock; stdout={stdout:?} stderr={stderr:?}"
+            );
+            assert!(
+                stderr.contains("FullyEnforced") || stderr.contains("PartiallyEnforced"),
+                "stderr should name the full-enforcement failure: {stderr:?}"
+            );
+            assert!(
+                !stdout.contains("should-not-run"),
+                "user command ran despite partial Landlock: {stdout:?}"
+            );
+        }
+        other => panic!("expected wrapper exit 125, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn audit_mode_reports_forced_partial_landlock_and_proceeds() {
+    if !preconditions_met() {
+        return;
+    }
+    let mut cmd = ShellCommand::new("echo audit-continued");
+    cmd.env
+        .insert("OPEN_PINCERY_ALLOW_UNSAFE".into(), "true".into());
+    cmd.env
+        .insert("OPEN_PINCERY_INIT_FORCE_PARTIAL".into(), "1".into());
+
+    let result = audit_sandbox().run(&cmd, &landlock_profile()).await;
+    match result {
+        ExecResult::Ok {
+            stdout,
+            stderr,
+            exit_code,
+        } => {
+            assert_eq!(
+                exit_code, 0,
+                "audit mode should proceed after reporting partial Landlock; stderr={stderr:?}"
+            );
+            assert!(
+                stdout.contains("audit-continued"),
+                "user command did not continue in audit mode: {stdout:?}"
+            );
+            assert!(
+                stderr.contains("sandbox_partial_enforcement"),
+                "audit mode should report sandbox_partial_enforcement: {stderr:?}"
+            );
+        }
+        other => panic!("expected audit mode to proceed, got {other:?}"),
     }
 }

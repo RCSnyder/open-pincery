@@ -24,8 +24,9 @@
 //!   `landlock_*` syscalls. Gate on at least one rx/rwx path.
 //! - G0a.3e (shipped): if `policy.require_fully_enforced` is
 //!   `true`, verify that every requested layer actually enforced:
-//!   landlock status is `RulesetStatus::FullyEnforced`, seccomp
-//!   mode in `/proc/self/status` is `2`, `NoNewPrivs` is `1`.
+//!   landlock status is `RestrictionStatus { ruleset: FullyEnforced,
+//!   no_new_privs: true }`, seccomp mode in `/proc/self/status` is
+//!   `2`, `NoNewPrivs` is `1`.
 //!   Fails closed with `InitError::VerifyPolicy` otherwise.
 //! - G0a.3f (this slice): structured JSON error channel on
 //!   `--error-fd N` (optional). Any pre-exec `InitError` is
@@ -500,8 +501,8 @@ mod linux {
     ///
     /// `Ok(Some(status))` when the ruleset was installed —
     /// `G0a.3e`'s verify step compares `status` against
-    /// `RulesetStatus::FullyEnforced`. `Ok(None)` when install was
-    /// skipped (empty policy).
+    /// `RestrictionStatus { ruleset: FullyEnforced, no_new_privs: true }`.
+    /// `Ok(None)` when install was skipped (empty policy).
     ///
     /// ## Test-only PartiallyEnforced override
     ///
@@ -509,8 +510,8 @@ mod linux {
     /// a kernel that actually downgrades to `PartiallyEnforced`,
     /// setting both `OPEN_PINCERY_ALLOW_UNSAFE=true` AND
     /// `OPEN_PINCERY_INIT_FORCE_PARTIAL=1` makes this function
-    /// return `Ok(Some(RulesetStatus::PartiallyEnforced))` after the
-    /// real install. The two-flag gate matches the existing
+    /// return `Ok(Some(RestrictionStatus { ruleset: PartiallyEnforced,
+    /// .. }))` after the real install. The two-flag gate matches the existing
     /// `ResolvedSandboxMode` unsafe-opt-in pattern (see `config.rs`)
     /// so the knob cannot be armed by a single env-var typo in
     /// production.
@@ -541,10 +542,10 @@ mod linux {
     /// call.
     fn apply_landlock(
         policy: &SandboxInitPolicy,
-    ) -> Result<Option<open_pincery::runtime::sandbox::landlock_layer::RulesetStatus>, InitError>
+    ) -> Result<Option<open_pincery::runtime::sandbox::landlock_layer::RestrictionStatus>, InitError>
     {
         use open_pincery::runtime::sandbox::landlock_layer::{
-            install_landlock, LandlockProfile, RulesetStatus,
+            install_landlock, LandlockCompatibility, LandlockProfile, RulesetStatus,
         };
 
         if policy.landlock_rx_paths.is_empty() && policy.landlock_rwx_paths.is_empty() {
@@ -557,7 +558,12 @@ mod linux {
             rwx_paths: policy.landlock_rwx_paths.clone(),
         };
 
-        let mut status = install_landlock(&profile)
+        let compatibility = if policy.require_fully_enforced {
+            LandlockCompatibility::HardRequirement
+        } else {
+            LandlockCompatibility::BestEffort
+        };
+        let mut status = install_landlock(&profile, compatibility)
             .map_err(|e| InitError::ApplyPolicy(format!("landlock: {e}")))?;
 
         // Test-only override: force a PartiallyEnforced observation
@@ -577,7 +583,17 @@ mod linux {
                 "pincery-init: OPEN_PINCERY_INIT_FORCE_PARTIAL override active \
                  (landlock status downgraded to PartiallyEnforced for test)"
             );
-            status = RulesetStatus::PartiallyEnforced;
+            status.ruleset = RulesetStatus::PartiallyEnforced;
+        }
+
+        if !policy.require_fully_enforced
+            && (status.ruleset != RulesetStatus::FullyEnforced || !status.no_new_privs)
+        {
+            eprintln!(
+                "pincery-init: event=sandbox_partial_enforcement \
+                 landlock_ruleset_status={:?} no_new_privs={} require_fully_enforced=false",
+                status.ruleset, status.no_new_privs
+            );
         }
 
         Ok(Some(status))
@@ -585,17 +601,16 @@ mod linux {
 
     /// Verify that every layer the policy requested is actually
     /// FullyEnforced. Step 5 of the T-G0a-6 pipeline. No-op when
-    /// `policy.require_fully_enforced` is `false` (v9 default; AC-85
-    /// flips this to `true` for production).
+    /// `policy.require_fully_enforced` is `false` (Audit mode).
     ///
     /// When `require_fully_enforced` is `true`, all three checks run
     /// and ALL must pass:
     ///
     /// 1. Landlock: if `policy.landlock_rx_paths` or
     ///    `landlock_rwx_paths` is non-empty, `landlock_status` must
-    ///    be `Some(RulesetStatus::FullyEnforced)`. Anything else
-    ///    (including `None`, meaning the apply short-circuited)
-    ///    fails.
+    ///    be `Some(RestrictionStatus { ruleset: FullyEnforced,
+    ///    no_new_privs: true })`. Anything else (including `None`,
+    ///    meaning the apply short-circuited) fails.
     /// 2. Seccomp: if `policy.seccomp_bpf` is non-empty,
     ///    `/proc/self/status`'s `Seccomp:` line must read `2`
     ///    (filter mode). This re-reads /proc rather than trusting a
@@ -611,7 +626,7 @@ mod linux {
     /// (G0a.3f) can surface a structured `not_fully_enforced` event.
     fn verify_fully_enforced(
         policy: &SandboxInitPolicy,
-        landlock_status: Option<open_pincery::runtime::sandbox::landlock_layer::RulesetStatus>,
+        landlock_status: Option<open_pincery::runtime::sandbox::landlock_layer::RestrictionStatus>,
     ) -> Result<(), InitError> {
         use open_pincery::runtime::sandbox::landlock_layer::RulesetStatus;
 
@@ -623,11 +638,13 @@ mod linux {
             !policy.landlock_rx_paths.is_empty() || !policy.landlock_rwx_paths.is_empty();
         if landlock_requested {
             match landlock_status {
-                Some(RulesetStatus::FullyEnforced) => {}
-                Some(other) => {
+                Some(status)
+                    if status.ruleset == RulesetStatus::FullyEnforced && status.no_new_privs => {}
+                Some(status) => {
                     return Err(InitError::VerifyPolicy(format!(
-                        "landlock not FullyEnforced: status={other:?} \
-                         (require_fully_enforced=true)"
+                        "landlock not FullyEnforced with no_new_privs=true: \
+                         ruleset={:?} no_new_privs={} (require_fully_enforced=true)",
+                        status.ruleset, status.no_new_privs
                     )));
                 }
                 None => {
