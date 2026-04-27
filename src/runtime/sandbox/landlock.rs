@@ -211,20 +211,36 @@ fn validate_restriction_status(
     status: RestrictionStatus,
     compatibility: LandlockCompatibility,
 ) -> Result<RestrictionStatus, String> {
-    match (&status.ruleset, status.no_new_privs, compatibility) {
-        (RulesetStatus::FullyEnforced, true, _) => Ok(status),
-        (RulesetStatus::FullyEnforced, false, LandlockCompatibility::BestEffort) => Ok(status),
-        (RulesetStatus::FullyEnforced, false, LandlockCompatibility::HardRequirement) => Err(
+    validate_restriction_parts(&status.ruleset, status.no_new_privs, compatibility).map(|()| status)
+}
+
+fn validate_restriction_parts(
+    ruleset: &RulesetStatus,
+    no_new_privs: bool,
+    compatibility: LandlockCompatibility,
+) -> Result<(), String> {
+    if ruleset == &RulesetStatus::FullyEnforced && no_new_privs {
+        Ok(())
+    } else if ruleset == &RulesetStatus::FullyEnforced
+        && !no_new_privs
+        && compatibility == LandlockCompatibility::BestEffort
+    {
+        Ok(())
+    } else if ruleset == &RulesetStatus::FullyEnforced && !no_new_privs {
+        Err(
             "landlock FullyEnforced but no_new_privs=false under HardRequirement compatibility"
                 .into(),
-        ),
-        (RulesetStatus::PartiallyEnforced, _, LandlockCompatibility::BestEffort) => Ok(status),
-        (RulesetStatus::PartiallyEnforced, _, LandlockCompatibility::HardRequirement) => {
-            Err("landlock partially enforced under HardRequirement compatibility".into())
-        }
-        (RulesetStatus::NotEnforced, _, _) => {
-            Err("landlock not enforced (kernel returned NotEnforced status)".into())
-        }
+        )
+    } else if ruleset == &RulesetStatus::PartiallyEnforced
+        && compatibility == LandlockCompatibility::BestEffort
+    {
+        Ok(())
+    } else if ruleset == &RulesetStatus::PartiallyEnforced {
+        Err("landlock partially enforced under HardRequirement compatibility".into())
+    } else if ruleset == &RulesetStatus::NotEnforced {
+        Err("landlock not enforced (kernel returned NotEnforced status)".into())
+    } else {
+        Err(format!("unknown landlock ruleset status: {ruleset:?}"))
     }
 }
 
@@ -281,23 +297,19 @@ mod tests {
 
     #[test]
     fn best_effort_accepts_partially_enforced_status() {
-        let status = RestrictionStatus {
-            ruleset: RulesetStatus::PartiallyEnforced,
-            no_new_privs: true,
-        };
-        let result = validate_restriction_status(status, LandlockCompatibility::BestEffort)
-            .expect("best-effort should accept partial status");
-        assert_eq!(result.ruleset, RulesetStatus::PartiallyEnforced);
-        assert!(result.no_new_privs);
+        validate_restriction_parts(
+            &RulesetStatus::PartiallyEnforced,
+            true,
+            LandlockCompatibility::BestEffort,
+        )
+        .expect("best-effort should accept partial status");
     }
 
     #[test]
     fn hard_requirement_rejects_partially_enforced_status() {
-        let result = validate_restriction_status(
-            RestrictionStatus {
-                ruleset: RulesetStatus::PartiallyEnforced,
-                no_new_privs: true,
-            },
+        let result = validate_restriction_parts(
+            &RulesetStatus::PartiallyEnforced,
+            true,
             LandlockCompatibility::HardRequirement,
         );
         let error = result.expect_err("partial status must be rejected");
@@ -309,11 +321,9 @@ mod tests {
 
     #[test]
     fn hard_requirement_rejects_missing_no_new_privs() {
-        let result = validate_restriction_status(
-            RestrictionStatus {
-                ruleset: RulesetStatus::FullyEnforced,
-                no_new_privs: false,
-            },
+        let result = validate_restriction_parts(
+            &RulesetStatus::FullyEnforced,
+            false,
             LandlockCompatibility::HardRequirement,
         );
         let error = result.expect_err("missing no_new_privs must be rejected");
