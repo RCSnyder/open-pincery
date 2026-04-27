@@ -219,18 +219,15 @@ fn validate_restriction_parts(
     no_new_privs: bool,
     compatibility: LandlockCompatibility,
 ) -> Result<(), String> {
-    if ruleset == &RulesetStatus::FullyEnforced && no_new_privs {
-        Ok(())
-    } else if ruleset == &RulesetStatus::FullyEnforced
-        && !no_new_privs
-        && compatibility == LandlockCompatibility::BestEffort
-    {
-        Ok(())
-    } else if ruleset == &RulesetStatus::FullyEnforced && !no_new_privs {
-        Err(
-            "landlock FullyEnforced but no_new_privs=false under HardRequirement compatibility"
-                .into(),
-        )
+    if ruleset == &RulesetStatus::FullyEnforced {
+        if no_new_privs || compatibility == LandlockCompatibility::BestEffort {
+            Ok(())
+        } else {
+            Err(
+                "landlock FullyEnforced but no_new_privs=false under HardRequirement compatibility"
+                    .into(),
+            )
+        }
     } else if ruleset == &RulesetStatus::PartiallyEnforced
         && compatibility == LandlockCompatibility::BestEffort
     {
