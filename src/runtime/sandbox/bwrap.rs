@@ -172,6 +172,7 @@ fn build_init_policy_with_identity(
     }
 }
 
+#[cfg(test)]
 fn build_init_policy(cwd: &Path, cmd: &str, mode: SandboxMode) -> SandboxInitPolicy {
     build_init_policy_with_identity(cwd, cmd, mode, SandboxIdentity::default())
 }
@@ -247,6 +248,7 @@ impl RealSandbox {
     /// `-- sh -c <cmd>` to
     /// `-- /sandbox/init --policy-fd N -- sh -c <cmd>`. When `None`
     /// the argv tail is the pre-G0a shape (direct `sh -c <cmd>`).
+    #[cfg(test)]
     fn build_bwrap_args(
         cwd: &str,
         command: &str,
