@@ -2284,7 +2284,7 @@ v9 adds 23 acceptance criteria (AC-53..AC-75) across security, auth, credential 
 
 Three new subsystems join the existing runtime:
 
-1. **`src/runtime/sandbox/`** — layered Linux sandbox (AC-53 + AC-72). `SandboxedExecutor` wraps v6's `ProcessExecutor`. Every tool exec composes six layers in a fixed order: Bubblewrap namespaces → cgroup v2 setup → landlock ruleset → seccomp-bpf allowlist → uid/cap drop → slirp4netns egress proxy with allowlist. Each layer is a sub-module with its own failure mode and unit test; the `compose` entry point fails closed — any layer refusing to initialize aborts the exec with a `sandbox_unavailable` error before any user code runs.
+1. **`src/runtime/sandbox/`** — layered Linux sandbox (AC-53 + AC-72). `SandboxedExecutor` wraps v6's `ProcessExecutor`. Every tool exec composes six layers in a fixed order: Bubblewrap namespaces + nested-userns disable → cgroup v2 setup → landlock ruleset → seccomp-bpf allowlist → uid/cap drop → slirp4netns egress proxy with allowlist. Each layer is a sub-module with its own failure mode and unit test; the `compose` entry point fails closed — any layer refusing to initialize aborts the exec with a `sandbox_unavailable` error before any user code runs.
 2. **`src/runtime/secret_proxy.rs`** — out-of-process credential resolver (AC-71). Agent process has zero read access to the vault key; it forwards tool requests with `PLACEHOLDER:<name>` tokens intact to a unix-socket endpoint (`$XDG_RUNTIME_DIR/pincery-secret.sock` by default). The proxy resolves placeholders and delivers plaintext to the sandboxed child via one of three injection modes (env, stdin, header). The `http_get` tool proxies the outbound HTTP call itself rather than exposing the credential to the agent at all.
 3. **`src/tenancy.rs`** — workspace-scoped query middleware (AC-65). Every API handler resolves the session's `workspace_id` and passes it to a new `ScopedPool::query(workspace_id, sql, params)` helper; every query injects `AND workspace_id = $1` at the binding site. A lint test greps `src/api/` for bare `sqlx::query*!?` invocations and fails the build on any hit.
 
@@ -2309,7 +2309,7 @@ src/
       redaction.rs                # AC-74 tracing/event redaction layer
     sandbox/
       mod.rs                      # SandboxedExecutor entry + compose()
-      bwrap.rs                    # Bubblewrap wrapper (--unshare-all, bind mounts)
+      bwrap.rs                    # Bubblewrap wrapper (namespaces, --disable-userns, uid/gid/cap drop, bind mounts)
       seccomp.rs                  # seccompiler allowlist loader
       landlock.rs                 # landlock ruleset builder
       cgroup.rs                   # cgroup v2 write helpers (cgroups-rs)
@@ -2438,7 +2438,7 @@ network_blocked   { tool_call_id, destination_host, destination_port, protocol }
 
 | Integration                        | Purpose                    | Failure mode                                                                                                                                                     | Test strategy                                                                                              |
 | ---------------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `bubblewrap` binary                | Namespace isolation        | Missing / ns disabled → exec refuses, `sandbox_unavailable`                                                                                                      | Live on ubuntu-24.04 CI; ignored on non-Linux                                                              |
+| `bubblewrap` binary                | Namespace isolation        | Missing / ns disabled → exec refuses, `sandbox_unavailable`; nested userns not disabled → AC-86 smoke fails                                                       | Live on ubuntu-24.04 CI; AC-86 smoke asserts uid/gid/caps and `unshare -U` denial; ignored on non-Linux     |
 | `libseccomp` / `seccompiler` crate | Syscall allowlist          | Profile load fails → exec refuses                                                                                                                                | Unit: load profile + assert denied syscalls error                                                          |
 | Landlock ABI + `landlock` crate    | FS confinement + IPC floor | Startup preflight fails closed if ABI < 6 in strict mode; relaxed mode only downgrades to ABI >= 1 with `OPEN_PINCERY_ALLOW_UNSAFE=true`; no bwrap-only fallback | Live in privileged sandbox-smoke; AC-84 positive process tests run with `OPEN_PINCERY_RUN_AC84_POSITIVE=1` |
 | `slirp4netns`                      | Egress proxy + allowlist   | Missing → exec refuses                                                                                                                                           | Live: allowed host succeeds, denied host blocks                                                            |

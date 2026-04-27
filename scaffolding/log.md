@@ -1,5 +1,13 @@
 # Open Pincery — Experiment Log
 
+## VERIFY v9 — Slice G0d / AC-86 final CI verification — 2026-04-27T23:24Z
+
+- **Gate**: PASS (attempt 3).
+- **Evidence**: Local Windows-host ladder passed before the final push: `cargo fmt --all -- --check`, `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`, `cargo test --lib -- --test-threads=1`, `cargo test --test env_example_test -- --test-threads=1`, `cargo test --test sandbox_uid_drop_test -- --list` (0 Linux tests on Windows, expected), and `git diff --check`. GitHub Actions PR run `25024663538` completed successfully on head commit `caf110d`: `rustfmt`, `clippy`, `cargo test`, `cargo deny`, and privileged `sandbox real-bwrap smoke` all passed. The privileged sandbox job ran `tests/sandbox_uid_drop_test.rs`, proving uid `65534`, gid `65534`, empty `CapEff`, nested `unshare -U` denial, and UID 0 override refusal without `OPEN_PINCERY_ALLOW_UNSAFE=true`. TLA+ run `25024663540` also passed.
+- **Changes**: AC-86 is implemented by `src/runtime/sandbox/bwrap.rs` (`--disable-userns`, `--uid 65534`, `--gid 65534`, `--cap-drop ALL`, non-zero UID/GID env overrides, UID/GID 0 unsafe gate), `src/bin/pincery_init.rs` (defense-in-depth `setresuid` / `setresgid` / `setgroups` / `capset(empty)` with `/proc/self/status` verification), `src/runtime/sandbox/init_policy.rs` docs, `.env.example` operator documentation for `OPEN_PINCERY_SANDBOX_UID` / `_GID`, `.github/workflows/ci.yml` privileged smoke coverage, and `tests/sandbox_uid_drop_test.rs` real-bwrap proof.
+- **Retries**: 2. CI run `25024352875` found Linux-only dead-code warnings for default helper wrappers after production switched to identity-aware helpers; run `25024468128` then proved uid/gid/caps but showed nested `unshare -U` was still allowed and `env_example_test` was missing the new UID/GID knobs. Both were fixed in follow-up commits before the final green run.
+- **Next**: AC-86 VERIFY is closed; proceed to G0e / AC-87 (Landlock IPC scoping) after normal context recovery.
+
 ## VERIFY v9 — Slice G0c / AC-85 final CI verification — 2026-04-27T22:41Z
 
 - **Gate**: PASS (attempt 3).
