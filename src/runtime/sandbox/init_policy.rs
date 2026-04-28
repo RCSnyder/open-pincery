@@ -72,6 +72,10 @@ pub const LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET: u64 = 1 << 0;
 pub const LANDLOCK_SCOPE_SIGNAL: u64 = 1 << 1;
 /// All IPC scopes AC-87 requires in production enforce mode.
 pub const LANDLOCK_SCOPE_ALL: u64 = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL;
+/// Minimum Landlock ABI that supports audit logging control flags.
+pub const LANDLOCK_AUDIT_ABI_FLOOR: u32 = 7;
+/// Landlock ABI-7 flag enabling denied-access logs after execve.
+pub const LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON: u32 = 1 << 1;
 
 /// Policy bytes crossed from parent -> pincery-init via a memfd.
 ///
@@ -92,6 +96,11 @@ pub const LANDLOCK_SCOPE_ALL: u64 = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLO
 ///   kernel's Landlock ABI (only allowed in audit / relaxed-floor
 ///   posture). Production enforce mode sends both abstract UNIX
 ///   socket and signal scopes (AC-87).
+/// - `landlock_restrict_flags`: ABI-7 `landlock_restrict_self` flags
+///   requested by the parent. AC-88 currently uses only
+///   `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON`, and only when the
+///   parent observed Landlock ABI >= 7. `0` preserves enforcement
+///   on ABI 6 while degrading audit visibility.
 /// - `seccomp_bpf`: a raw `sock_filter[]` byte blob already produced
 ///   by `seccompiler`. The wrapper passes it straight to
 ///   `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ...)` after
@@ -116,6 +125,7 @@ pub struct SandboxInitPolicy {
     pub landlock_rx_paths: Vec<PathBuf>,
     pub landlock_rwx_paths: Vec<PathBuf>,
     pub landlock_scopes: u64,
+    pub landlock_restrict_flags: u32,
     pub seccomp_bpf: Vec<u8>,
     pub target_uid: u32,
     pub target_gid: u32,
@@ -183,6 +193,7 @@ mod tests {
                 PathBuf::from("/tmp/workspace-abc123"),
             ],
             landlock_scopes: LANDLOCK_SCOPE_ALL,
+            landlock_restrict_flags: LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON,
             // A nonempty but syntactically arbitrary BPF blob stands
             // in for a real seccompiler output — round-trip does not
             // interpret it.
@@ -212,6 +223,7 @@ mod tests {
             landlock_rx_paths: vec![],
             landlock_rwx_paths: vec![],
             landlock_scopes: 0,
+            landlock_restrict_flags: 0,
             seccomp_bpf: vec![],
             target_uid: 0,
             target_gid: 0,
@@ -254,6 +266,15 @@ mod tests {
             a.to_bytes().unwrap(),
             b.to_bytes().unwrap(),
             "changing one field must change the serialized bytes"
+        );
+    }
+
+    #[test]
+    fn ac88_audit_flag_is_part_of_policy_contract() {
+        let policy = sample_policy();
+        assert_eq!(
+            policy.landlock_restrict_flags, LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON,
+            "AC-88 audit logging flag must cross the parent-to-wrapper policy boundary"
         );
     }
 }

@@ -1,3 +1,215 @@
+# Readiness: Open Pincery — v9 Phase G0f (AC-88 Kernel Audit Integration)
+
+> This addendum covers AC-88 only. It was produced after AC-87 VERIFY
+> closed and before BUILD began for Slice G0f. RECONCILE on
+> 2026-04-28 updated this top section to match the implemented and
+> reviewed Slice G0f shape. Historical G0a / v7 / v8 readiness records
+> below are preserved verbatim as prior context and are not re-opened by
+> this admission gate.
+
+## Verdict
+
+READY for Slice G0f / AC-88. Reconciled after REVIEW: no Critical or
+Required findings remain, and the current implementation preserves the
+AC-84 / AC-87 Landlock ABI >= 6 enforcement floor while degrading only
+audit visibility below ABI 7.
+
+AC-83 through AC-87 have landed according to the experiment log: the
+current sandbox path already has the parent -> wrapper
+`SandboxInitPolicy` boundary, `RealSandbox` policy construction,
+`pincery-init` in-sandbox restriction application, raw Landlock scope
+syscalls in `src/runtime/sandbox/landlock.rs`, `src/observability/` as
+the observability module root, and `models::event::append_event` as the
+append-only event-log write seam. AC-88 is therefore an additive
+audit-visibility slice.
+
+## Truths
+
+- **T-AC88-1** AC-88 does not change the enforcement floor shipped by
+  AC-84 / AC-87: strict startup still requires Landlock ABI >= 6, and
+  ABI < 7 only degrades audit-log availability. It must not disable
+  Landlock, relax `require_fully_enforced`, or fall back to the old
+  parent-side `pre_exec` install path.
+- **T-AC88-2** `SandboxInitPolicy` remains the only parent ->
+  `pincery-init` IPC type boundary. It now carries
+  `landlock_restrict_flags: u32`. `RealSandbox` sets
+  `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON` only when
+  `KernelProbe::landlock_abi() >= 7`; ABI 6 sends `0` so enforcement
+  continues without audit flag support.
+- **T-AC88-3** `pincery-init` applies Landlock through
+  `install_landlock_with_restrict_flags`. When a nonzero restrict flag
+  is requested, `src/runtime/sandbox/landlock.rs` uses the narrow raw
+  filesystem ruleset path needed to pass
+  `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON`, then preserves AC-85
+  FullyEnforced validation.
+- **T-AC88-4** Audit collection is per shell invocation, not a
+  long-lived background daemon. `invocation_audit_source_from_end()`
+  tries Linux audit netlink first and then falls back to an audit log
+  file opened from EOF. The fallback path is
+  `OPEN_PINCERY_LANDLOCK_AUDIT_LOG` when set, otherwise
+  `/var/log/audit/audit.log`.
+- **T-AC88-5** `src/observability/landlock_audit.rs` translates parsed
+  `AUDIT_LANDLOCK_*` denial records into append-only
+  `landlock_denied` events through `models::event::append_event`. The
+  canonical JSON payload includes the required `{tool_name, agent_id,
+  denied_path, requested_access, syscall}` fields plus `wake_id`,
+  sampled `correlation_pids`, audit `pid`, audit `ppid`/`parent_pid`,
+  and audit timestamp when available.
+- **T-AC88-6** Kernel audit records must be correlated to real runtime
+  context before event emission. The implementation correlates against
+  sampled process-tree PIDs from `RealSandbox`, parsed audit `pid`,
+  parsed `ppid` / `parent_pid`, and the tool invocation start/finish
+  timestamp window. Missing or stale correlation never emits a fake
+  `landlock_denied` event.
+- **T-AC88-7** `append_landlock_denials_within` polls for bounded
+  delayed delivery and continues after each append until the overall
+  window expires or a post-append quiet period elapses. This is the
+  runtime proof path for audit records that arrive shortly after the
+  sandboxed process exits.
+- **T-AC88-8** On ABI < 7, or when no readable audit source is
+  available, the system emits a one-time structured
+  `audit_log_unavailable` warning with the observed ABI/source failure
+  reason. Sandbox enforcement continues. Agent-scoped events are
+  appended only when a real `{agent_id, wake_id, tool_name}` context
+  exists.
+- **T-AC88-9** `tests/landlock_audit_test.rs` includes deterministic
+  parser, EOF fallback, ABI 6 fallback, delayed polling, parent-PID
+  correlation, timestamp-window rejection/acceptance, uncorrelated
+  rejection, and live tests gated by explicit ABI/source preconditions.
+  `src/observability/landlock_audit_netlink.rs` contains deterministic
+  `nlmsghdr` fixture coverage for netlink decoding.
+- **T-AC88-10** The deployment path forwards the audit-log fallback
+  override into the app container. `docker-compose.yml` passes
+  `OPEN_PINCERY_LANDLOCK_AUDIT_LOG` via optional `${VAR:-}`
+  interpolation, so AC-88's file fallback is configurable in Docker
+  deployments and not only in local host runs.
+
+## Key Links
+
+- **L-AC88-1** [AC-88] -> `SandboxInitPolicy` in
+  `src/runtime/sandbox/init_policy.rs` + `RealSandbox` policy builder in
+  `src/runtime/sandbox/bwrap.rs` -> unit coverage for ABI 6/7 policy
+  construction -> runtime proof that ABI 7 policies request the audit
+  flag while ABI 6 emits `audit_log_unavailable` and keeps enforcement.
+- **L-AC88-2** [AC-88] -> raw Landlock syscall support in
+  `src/runtime/sandbox/landlock.rs` + `pincery-init::apply_landlock` in
+  `src/bin/pincery_init.rs` -> unit coverage of the UAPI flag and raw
+  path-beneath layout -> runtime proof that denied filesystem access can
+  produce kernel audit material on ABI >= 7.
+- **L-AC88-3** [AC-88] -> `src/observability/mod.rs`,
+  `src/observability/landlock_audit.rs`, and
+  `src/observability/landlock_audit_netlink.rs` -> deterministic parser
+  aliases, EOF file fallback, and `nlmsghdr` decode tests -> runtime
+  proof that parsed denied path/access/syscall fields match fixture and
+  live records.
+- **L-AC88-4** [AC-88] -> `ExecResult::Ok { audit_pids }` in
+  `src/runtime/sandbox/mod.rs`, process-tree PID sampling in
+  `src/runtime/sandbox/bwrap.rs`, and tool invocation timestamps in
+  `src/runtime/tools.rs` -> tests for parent PID correlation and
+  timestamp-window rejection -> runtime proof that stale PID reuse is
+  rejected.
+- **L-AC88-5** [AC-88] -> `models::event::append_event` in
+  `src/models/event.rs` -> `append_landlock_denied_event` and
+  `append_landlock_denials_within` in
+  `src/observability/landlock_audit.rs` -> event-log assertions in
+  `tests/landlock_audit_test.rs` -> runtime proof that correlated
+  `landlock_denied` appears in the agent event log for a denied open.
+- **L-AC88-6** [AC-88] -> ABI/source fallback in
+  `audit_log_unavailable_for_abi` and
+  `invocation_audit_source_from_end` -> deterministic ABI 6 test and
+  live precondition tests -> proof that unavailable audit visibility is
+  explicit and does not disable the sandbox.
+- **L-AC88-7** [AC-88] -> `OPEN_PINCERY_LANDLOCK_AUDIT_LOG` fallback
+  configuration in `.env.example` and `docker-compose.yml` ->
+  `tests/env_example_test.rs` source-to-example coverage and
+  `tests/compose_env_test.rs` optional forwarded-var contract plus
+  gated `docker compose config` fixture -> proof that the fallback path
+  remains operator-configurable in the deployment container.
+
+## Acceptance Criteria Coverage
+
+| AC ID | Build Slice | Test / Proof | Runtime Verification | Status |
+| ----- | ----------- | ------------ | -------------------- | ------ |
+| AC-88 | G0f: audit flag in policy + raw Landlock restrict flag + per-invocation audit source/parser + correlated event emission + deployment env forwarding | `tests/landlock_audit_test.rs`; `src/observability/landlock_audit_netlink.rs` unit fixture; `src/runtime/sandbox/{init_policy,bwrap,landlock}.rs` unit coverage; `tests/compose_env_test.rs`; `tests/env_example_test.rs` | Local deterministic tests cover parser aliases, EOF fallback, bounded two-record delayed polling, parent-PID correlation, timestamp-window rejection/acceptance, uncorrelated rejection, and ABI 6 audit-unavailable fallback. Linux live tests run when ABI >= 7 and a readable audit source exists; otherwise they skip with explicit evidence while sandbox enforcement remains active. Compose proof covers `OPEN_PINCERY_LANDLOCK_AUDIT_LOG` forwarding with a gated `COMPOSE_AVAILABLE=1` `docker compose config` fixture, and env example coverage keeps the operator-facing knob documented. | Implemented and reviewed |
+
+## Scope Reduction Risks
+
+- **Landlock flag silently omitted**: Guarded by
+  `SandboxInitPolicy.landlock_restrict_flags`, ABI 7 policy tests, and
+  the raw `install_landlock_with_restrict_flags` path in
+  `src/runtime/sandbox/landlock.rs`.
+- **Audit reader without event correlation**: Guarded by process-tree PID
+  sampling, audit `ppid` / `parent_pid`, invocation timestamp windows,
+  and rejection of uncorrelated records before `append_event`.
+- **Fixture-only success**: Deterministic tests always run; live audit
+  tests remain ABI/source gated and print explicit skip evidence when
+  the host cannot provide ABI 7 or audit read access.
+- **ABI < 7 treated as sandbox failure**: Guarded by ABI 6 fallback tests
+  and `audit_log_unavailable_for_abi(Some(6))` proving
+  `sandbox_still_enforced = true`.
+- **Log-only implementation**: Guarded by event-log assertions for
+  `landlock_denied`; tracing warnings are only for unavailable audit
+  visibility.
+- **Fake startup event context**: Guarded by code path: startup/source
+  unavailability is a structured warning unless a real agent/tool
+  context exists.
+- **Operator override not reaching deployment**: Guarded by
+  `tests/compose_env_test.rs`, which asserts
+  `OPEN_PINCERY_LANDLOCK_AUDIT_LOG` is forwarded through
+  `docker-compose.yml` and rendered by the live compose fixture.
+
+## Clarifications Needed
+
+- None blocking.
+- `audit_log_unavailable` remains a structured warning for startup or
+  source failures unless BUILD has a real agent context. Fake agent IDs
+  remain forbidden.
+- Live audit capture may require `CAP_AUDIT_READ`, auditd/journald
+  configuration, or read permission on `/var/log/audit/audit.log` or
+  `OPEN_PINCERY_LANDLOCK_AUDIT_LOG`. This affects the runtime proof
+  environment, not the pass/fail meaning of AC-88.
+
+## Build Order
+
+1. **G0f.1 - Policy and ABI gate.** Implemented via
+   `SandboxInitPolicy.landlock_restrict_flags` and
+   `landlock_restrict_flags_for_abi` in `RealSandbox`.
+2. **G0f.2 - Raw Landlock restrict flag.** Implemented via
+   `install_landlock_with_restrict_flags` and `pincery-init` policy
+   application.
+3. **G0f.3 - Audit parser/source abstraction.** Implemented in
+   `src/observability/landlock_audit.rs` plus Linux netlink source in
+   `src/observability/landlock_audit_netlink.rs`.
+4. **G0f.4 - Context correlation and event append.** Implemented via
+   sampled process-tree PIDs, audit parent PID parsing, timestamp-window
+   filtering, and append-only `landlock_denied` events.
+5. **G0f.5 - Runtime proofs.** Implemented in
+   `tests/landlock_audit_test.rs`; live Linux proofs are gated and
+   deterministic proofs always run.
+6. **G0f.6 - Deployment env proof.** Implemented by forwarding
+  `OPEN_PINCERY_LANDLOCK_AUDIT_LOG` in `docker-compose.yml` and
+  guarding it with `tests/compose_env_test.rs` plus env-example
+  coverage.
+
+## Complexity Exceptions
+
+- `src/observability/landlock_audit.rs` is allowed up to 450 lines for
+  this slice because it contains the source abstraction, parser,
+  correlation rules, bounded polling, and event bridge in one cohesive
+  module. The Linux-specific netlink framing code is split into
+  `src/observability/landlock_audit_netlink.rs`. Split further if the
+  audit module grows past 450 lines or mixes unrelated concerns.
+- The narrow raw Landlock filesystem ruleset helper in
+  `src/runtime/sandbox/landlock.rs` is permitted because the safe crate
+  API cannot pass `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON`. It remains
+  isolated to the kernel-interface layer and covered by Linux-only and
+  deterministic tests.
+- Linux live audit proof may be CI/kernel-permission gated. This is not
+  a scope reduction when deterministic parser/fallback tests always run
+  and the live gate is explicit and evidenced.
+
+---
+
 # Readiness: Open Pincery — v9 Phase G0a (AC-83 `pincery-init` Exec Wrapper)
 
 > This addendum supersedes per-slice readiness for Phase G0a only. It was

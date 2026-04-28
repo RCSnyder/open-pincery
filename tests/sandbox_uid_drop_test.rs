@@ -101,6 +101,7 @@ async fn real_sandbox_runs_as_nobody_with_empty_effective_caps() {
             stdout,
             stderr,
             exit_code,
+            ..
         } => {
             assert_eq!(exit_code, 0, "identity probe failed; stderr={stderr:?}");
             assert!(

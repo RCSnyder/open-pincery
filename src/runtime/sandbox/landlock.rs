@@ -1,21 +1,24 @@
-//! AC-53 / Slice A2b.4c: landlock LSM filesystem ruleset (layer 4 of 6).
+//! AC-53 / Phase G0: Landlock filesystem, IPC-scope, and audit controls.
 //!
 //! ## What this slice ships
 //!
-//! Installs a path-based filesystem capability ruleset on the bwrap
-//! child via a `pre_exec` hook, restricting reads/writes to a small
-//! set of known-safe paths. Production profile: read+execute on
-//! standard rootfs paths (`/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`,
-//! `/etc`), read+write+execute on the per-call cwd workspace.
+//! Installs Landlock from `pincery-init` after bwrap has finished mount
+//! namespace setup, restricting reads/writes to a small set of known-safe
+//! paths. Production profile: read+execute on standard rootfs paths
+//! (`/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/etc`, `/sys`),
+//! read+write+execute on `/proc`, `/dev`, and the per-call cwd workspace.
 //!
-//! ## Why pre_exec
+//! ## Why pincery-init
 //!
-//! Landlock applies to the calling thread/task and survives
-//! `execve(2)`. We install it AFTER `fork(2)` but BEFORE
-//! `execve(bwrap)`, so:
+//! Landlock applies to the calling thread/task, survives `execve(2)`,
+//! and is inherited by descendants. Installing it in the parent-side
+//! `pre_exec` hook restricted bwrap itself and broke its mount setup;
+//! installing it inside `pincery-init` keeps the parent and bwrap setup
+//! unrestricted while still constraining the user command and descendants.
 //!
 //! - The parent (pincery) is not restricted.
-//! - The bwrap child + its `sh` descendant inherit the restrictions.
+//! - bwrap can complete namespace setup before Landlock is applied.
+//! - The shell command and its descendants inherit the restrictions.
 //!
 //! ## Inode semantics
 //!
@@ -29,31 +32,84 @@
 //!
 //! ## Mode semantics
 //!
-//! Kernel landlock has no audit/log mode in ABI v1-v3. In Audit
-//! mode we still install enforce-style if the kernel supports it;
-//! on failure (kernel < 5.13) we log and proceed. In Enforce mode,
-//! unavailability fails closed - mirrors the cgroup + seccomp
-//! posture.
+//! Kernel Landlock has no permissive audit mode. In Audit mode we still
+//! install enforce-style if the kernel supports it; on failure (kernel
+//! < 5.13) we log and proceed. In Enforce mode, unavailability fails
+//! closed. AC-88 additionally requests the ABI-7 denied-operation audit
+//! flag when available; ABI 6 keeps enforcement and degrades only audit
+//! visibility.
 
 #![cfg(target_os = "linux")]
 
+use std::ffi::CString;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 pub use crate::runtime::sandbox::init_policy::{
-    LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET, LANDLOCK_SCOPE_ALL, LANDLOCK_SCOPE_SIGNAL,
+    LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON, LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET,
+    LANDLOCK_SCOPE_ALL, LANDLOCK_SCOPE_SIGNAL,
 };
+pub use landlock::RulesetStatus;
 use landlock::{
     Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr,
     RulesetCreatedAttr, ABI,
 };
-pub use landlock::{RestrictionStatus, RulesetStatus};
+
+const LANDLOCK_RULE_PATH_BENEATH: u32 = 1;
+const LANDLOCK_ACCESS_FS_EXECUTE: u64 = 1 << 0;
+const LANDLOCK_ACCESS_FS_WRITE_FILE: u64 = 1 << 1;
+const LANDLOCK_ACCESS_FS_READ_FILE: u64 = 1 << 2;
+const LANDLOCK_ACCESS_FS_READ_DIR: u64 = 1 << 3;
+const LANDLOCK_ACCESS_FS_REMOVE_DIR: u64 = 1 << 4;
+const LANDLOCK_ACCESS_FS_REMOVE_FILE: u64 = 1 << 5;
+const LANDLOCK_ACCESS_FS_MAKE_CHAR: u64 = 1 << 6;
+const LANDLOCK_ACCESS_FS_MAKE_DIR: u64 = 1 << 7;
+const LANDLOCK_ACCESS_FS_MAKE_REG: u64 = 1 << 8;
+const LANDLOCK_ACCESS_FS_MAKE_SOCK: u64 = 1 << 9;
+const LANDLOCK_ACCESS_FS_MAKE_FIFO: u64 = 1 << 10;
+const LANDLOCK_ACCESS_FS_MAKE_BLOCK: u64 = 1 << 11;
+const LANDLOCK_ACCESS_FS_MAKE_SYM: u64 = 1 << 12;
+const LANDLOCK_ACCESS_FS_V1_READ: u64 =
+    LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
+const LANDLOCK_ACCESS_FS_V1_ALL: u64 = LANDLOCK_ACCESS_FS_V1_READ
+    | LANDLOCK_ACCESS_FS_WRITE_FILE
+    | LANDLOCK_ACCESS_FS_REMOVE_DIR
+    | LANDLOCK_ACCESS_FS_REMOVE_FILE
+    | LANDLOCK_ACCESS_FS_MAKE_CHAR
+    | LANDLOCK_ACCESS_FS_MAKE_DIR
+    | LANDLOCK_ACCESS_FS_MAKE_REG
+    | LANDLOCK_ACCESS_FS_MAKE_SOCK
+    | LANDLOCK_ACCESS_FS_MAKE_FIFO
+    | LANDLOCK_ACCESS_FS_MAKE_BLOCK
+    | LANDLOCK_ACCESS_FS_MAKE_SYM;
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct LandlockRestrictionStatus {
+    pub ruleset: RulesetStatus,
+    pub no_new_privs: bool,
+}
+
+impl From<landlock::RestrictionStatus> for LandlockRestrictionStatus {
+    fn from(status: landlock::RestrictionStatus) -> Self {
+        Self {
+            ruleset: status.ruleset,
+            no_new_privs: status.no_new_privs,
+        }
+    }
+}
 
 #[repr(C)]
 struct RawRulesetAttr {
     handled_access_fs: u64,
     handled_access_net: u64,
     scoped: u64,
+}
+
+#[repr(C)]
+struct RawPathBeneathAttr {
+    allowed_access: u64,
+    parent_fd: i32,
 }
 
 /// How strictly unsupported Landlock features should be handled.
@@ -181,7 +237,19 @@ pub fn landlock_supported() -> bool {
 pub fn install_landlock(
     profile: &LandlockProfile,
     compatibility: LandlockCompatibility,
-) -> Result<RestrictionStatus, String> {
+) -> Result<LandlockRestrictionStatus, String> {
+    install_landlock_with_restrict_flags(profile, compatibility, 0)
+}
+
+pub fn install_landlock_with_restrict_flags(
+    profile: &LandlockProfile,
+    compatibility: LandlockCompatibility,
+    restrict_flags: u32,
+) -> Result<LandlockRestrictionStatus, String> {
+    if restrict_flags != 0 {
+        return install_landlock_raw(profile, compatibility, restrict_flags);
+    }
+
     let abi = ABI::V1;
     let access_all = AccessFs::from_all(abi);
     let access_read = AccessFs::from_read(abi);
@@ -218,6 +286,147 @@ pub fn install_landlock(
     validate_restriction_status(status, compatibility)
 }
 
+fn install_landlock_raw(
+    profile: &LandlockProfile,
+    compatibility: LandlockCompatibility,
+    restrict_flags: u32,
+) -> Result<LandlockRestrictionStatus, String> {
+    let attr = RawRulesetAttr {
+        handled_access_fs: LANDLOCK_ACCESS_FS_V1_ALL,
+        handled_access_net: 0,
+        scoped: 0,
+    };
+    let ruleset_fd = create_ruleset(&attr, "filesystem")?;
+
+    for path in &profile.rx_paths {
+        let path_fd = match open_path_fd(path) {
+            Ok(fd) => fd,
+            Err(_) => continue,
+        };
+        add_path_rule(&ruleset_fd, &path_fd, LANDLOCK_ACCESS_FS_V1_READ, path)?;
+    }
+    for path in &profile.rwx_paths {
+        let path_fd = open_path_fd(path)?;
+        add_path_rule(&ruleset_fd, &path_fd, LANDLOCK_ACCESS_FS_V1_ALL, path)?;
+    }
+
+    restrict_ruleset(&ruleset_fd, restrict_flags, "filesystem")?;
+    let no_new_privs = no_new_privs_enabled()?;
+    let ruleset = RulesetStatus::FullyEnforced;
+    validate_restriction_parts(&ruleset, no_new_privs, compatibility)?;
+    Ok(LandlockRestrictionStatus {
+        ruleset,
+        no_new_privs,
+    })
+}
+
+fn create_ruleset(attr: &RawRulesetAttr, label: &str) -> Result<OwnedFd, String> {
+    // SAFETY: `attr` points to a C-compatible value valid for the
+    // duration of the syscall; size matches the struct we pass.
+    let raw_fd = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            attr as *const RawRulesetAttr,
+            std::mem::size_of::<RawRulesetAttr>(),
+            0u32,
+        )
+    };
+    if raw_fd < 0 {
+        return Err(format!(
+            "landlock create {label} ruleset failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let raw_fd: i32 = raw_fd
+        .try_into()
+        .map_err(|_| format!("landlock {label} ruleset fd out of range: {raw_fd}"))?;
+    // SAFETY: `raw_fd` is a fresh kernel-allocated fd with no owner.
+    Ok(unsafe { OwnedFd::from_raw_fd(raw_fd) })
+}
+
+fn open_path_fd(path: &Path) -> Result<OwnedFd, String> {
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| format!("landlock path contains interior NUL: {}", path.display()))?;
+    // SAFETY: path is a valid NUL-terminated C string; flags request
+    // an O_PATH fd suitable for LANDLOCK_RULE_PATH_BENEATH.
+    let raw_fd = unsafe { libc::open(c_path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+    if raw_fd < 0 {
+        return Err(format!(
+            "landlock open path {} failed: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: `raw_fd` is a fresh kernel-allocated fd with no owner.
+    Ok(unsafe { OwnedFd::from_raw_fd(raw_fd) })
+}
+
+fn add_path_rule(
+    ruleset_fd: &OwnedFd,
+    path_fd: &OwnedFd,
+    allowed_access: u64,
+    path: &Path,
+) -> Result<(), String> {
+    let attr = RawPathBeneathAttr {
+        allowed_access,
+        parent_fd: path_fd.as_raw_fd(),
+    };
+    // SAFETY: fds are live and owned by the caller; `attr` points to
+    // the packed UAPI struct for the duration of the syscall.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_add_rule,
+            ruleset_fd.as_raw_fd(),
+            LANDLOCK_RULE_PATH_BENEATH,
+            &attr as *const RawPathBeneathAttr,
+            0u32,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "landlock add_rule({}) failed: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ))
+    }
+}
+
+fn restrict_ruleset(ruleset_fd: &OwnedFd, flags: u32, label: &str) -> Result<(), String> {
+    // SAFETY: pure kernel syscall on a valid ruleset fd. The wrapper
+    // has already set no_new_privs and is single-threaded here.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_restrict_self,
+            ruleset_fd.as_raw_fd(),
+            flags,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "landlock restrict {label} ruleset failed: {}",
+            std::io::Error::last_os_error()
+        ))
+    }
+}
+
+fn no_new_privs_enabled() -> Result<bool, String> {
+    // SAFETY: pure getter; return value is 0 or 1 on success,
+    // negative on error.
+    let rc = unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0u64, 0u64, 0u64, 0u64) };
+    match rc {
+        1 => Ok(true),
+        0 => Ok(false),
+        _ => Err(format!(
+            "prctl(PR_GET_NO_NEW_PRIVS) failed: {}",
+            std::io::Error::last_os_error()
+        )),
+    }
+}
+
 /// Install ABI-6 Landlock IPC scopes on the calling thread.
 ///
 /// `landlock = 0.4` only exposes Landlock features available as of
@@ -236,55 +445,16 @@ pub fn install_landlock_scopes(scopes: u64) -> Result<(), String> {
         handled_access_net: 0,
         scoped: scopes,
     };
-
-    // SAFETY: `attr` points to a plain C-compatible value valid for
-    // the duration of the syscall; size matches the struct we pass.
-    let raw_fd = unsafe {
-        libc::syscall(
-            libc::SYS_landlock_create_ruleset,
-            &attr as *const RawRulesetAttr,
-            std::mem::size_of::<RawRulesetAttr>(),
-            0u32,
-        )
-    };
-    if raw_fd < 0 {
-        return Err(format!(
-            "landlock create scoped ruleset failed: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-
-    let raw_fd: i32 = raw_fd
-        .try_into()
-        .map_err(|_| format!("landlock scoped ruleset fd out of range: {raw_fd}"))?;
-    // SAFETY: `raw_fd` is a fresh kernel-allocated fd with no owner.
-    let ruleset_fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-
-    // SAFETY: pure kernel syscall on a valid ruleset fd. The wrapper
-    // has already set no_new_privs and is single-threaded at this
-    // point, matching the existing filesystem Landlock apply path.
-    let rc = unsafe {
-        libc::syscall(
-            libc::SYS_landlock_restrict_self,
-            ruleset_fd.as_raw_fd(),
-            0u32,
-        )
-    };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(format!(
-            "landlock restrict scoped ruleset failed: {}",
-            std::io::Error::last_os_error()
-        ))
-    }
+    let ruleset_fd = create_ruleset(&attr, "scoped")?;
+    restrict_ruleset(&ruleset_fd, 0, "scoped")
 }
 
 fn validate_restriction_status(
-    status: RestrictionStatus,
+    status: landlock::RestrictionStatus,
     compatibility: LandlockCompatibility,
-) -> Result<RestrictionStatus, String> {
-    validate_restriction_parts(&status.ruleset, status.no_new_privs, compatibility).map(|()| status)
+) -> Result<LandlockRestrictionStatus, String> {
+    validate_restriction_parts(&status.ruleset, status.no_new_privs, compatibility)
+        .map(|()| status.into())
 }
 
 fn validate_restriction_parts(
@@ -371,6 +541,23 @@ mod tests {
             LANDLOCK_SCOPE_ALL,
             LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL
         );
+    }
+
+    #[test]
+    fn ac88_audit_flag_matches_kernel_uapi_bit() {
+        assert_eq!(LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON, 1 << 1);
+    }
+
+    #[test]
+    fn raw_v1_access_masks_match_crate_v1_shape() {
+        let abi = ABI::V1;
+        assert_eq!(LANDLOCK_ACCESS_FS_V1_ALL, AccessFs::from_all(abi).bits());
+        assert_eq!(LANDLOCK_ACCESS_FS_V1_READ, AccessFs::from_read(abi).bits());
+    }
+
+    #[test]
+    fn raw_path_beneath_attr_matches_kernel_c_layout() {
+        assert_eq!(std::mem::size_of::<RawPathBeneathAttr>(), 16);
     }
 
     #[test]

@@ -2516,3 +2516,168 @@ New event types added by the audit pass:
 - `deposit_attempt { deposit_token_id, outcome, source_ip }` — AC-56 hardening
 
 Every new event type is registered in `src/models/events.rs` and enumerated in `tests/event_type_lint.rs`.
+
+### v9 G0f Design Reconciliation - AC-88 Landlock Audit Integration
+
+This addendum records the implemented AC-88 shape after Slice G0f REVIEW.
+It narrows the original "background reader" design to the per-invocation
+reader that the code actually uses. That is intentional: per-invocation
+source creation gives the audit bridge a real `{agent_id, wake_id,
+tool_name}` context, bounded timestamps, and sampled process-tree PIDs
+before any `landlock_denied` event can be appended.
+
+#### Architecture Delta
+
+AC-88 adds four cooperating pieces:
+
+1. **Policy flag plumbing**: `src/runtime/sandbox/init_policy.rs` adds
+   `landlock_restrict_flags: u32`, `LANDLOCK_AUDIT_ABI_FLOOR = 7`, and
+   `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON`. `RealSandbox` sets the flag
+   only when the probed Landlock ABI is >= 7. ABI 6 keeps filesystem and
+   IPC-scope enforcement active while audit visibility degrades.
+2. **Raw Landlock restrict path**: `src/runtime/sandbox/landlock.rs`
+   exposes `install_landlock_with_restrict_flags`. When flags are
+   nonzero it builds the filesystem ruleset through raw Landlock syscalls
+   so `pincery-init` can pass `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON`.
+3. **Per-invocation audit source**: `src/runtime/tools.rs` creates an
+   audit source around each shell invocation. The source tries Linux
+   audit netlink first, then falls back to a file reader opened at EOF.
+   The fallback path is `OPEN_PINCERY_LANDLOCK_AUDIT_LOG` when set,
+   otherwise `/var/log/audit/audit.log`.
+4. **Correlation and append bridge**:
+   `src/observability/landlock_audit.rs` parses audit records, rejects
+   uncorrelated records, and appends `landlock_denied` only through
+   `models::event::append_event`. Correlation uses sampled process-tree
+   PIDs from `RealSandbox`, audit `pid`, audit `ppid` / `parent_pid`, and
+   the shell invocation start/finish timestamp window to reject stale PID
+   reuse.
+
+#### Directory Structure Delta
+
+```text
+src/
+  observability/
+    landlock_audit.rs          # NEW - parser, source abstraction, correlation, event bridge
+    landlock_audit_netlink.rs  # NEW - Linux NETLINK_AUDIT reader + nlmsghdr fixture decoder
+    mod.rs                     # MODIFIED - registers both AC-88 modules
+  runtime/
+    sandbox/
+      init_policy.rs           # MODIFIED - landlock_restrict_flags + ABI/flag constants
+      bwrap.rs                 # MODIFIED - ABI-gated flag plumbing + process-tree PID sampling
+      landlock.rs              # MODIFIED - raw restrict_self flag path
+      mod.rs                   # MODIFIED - ExecResult::Ok includes audit_pids
+    tools.rs                   # MODIFIED - per-shell audit source + bounded append polling
+  bin/
+    pincery_init.rs            # MODIFIED - applies Landlock with restrict flags
+docker-compose.yml             # MODIFIED - forwards OPEN_PINCERY_LANDLOCK_AUDIT_LOG to app container
+tests/
+  landlock_audit_test.rs       # NEW - deterministic + gated live AC-88 proof
+  compose_env_test.rs          # MODIFIED - deployment env forwarding proof for audit-log fallback
+.env.example                   # MODIFIED - OPEN_PINCERY_LANDLOCK_AUDIT_LOG docs
+```
+
+#### Interfaces
+
+```rust
+// src/runtime/sandbox/init_policy.rs
+pub const LANDLOCK_AUDIT_ABI_FLOOR: u32 = 7;
+pub const LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON: u32 = 1 << 1;
+
+pub struct SandboxInitPolicy {
+    pub landlock_scopes: u64,
+    pub landlock_restrict_flags: u32,
+    // existing fields unchanged
+}
+
+// src/runtime/sandbox/mod.rs
+pub enum ExecResult {
+    Ok { stdout: String, stderr: String, exit_code: i32, audit_pids: Vec<u32> },
+    Timeout,
+    Rejected(String),
+    Err(String),
+}
+
+// src/observability/landlock_audit.rs
+pub struct LandlockAuditRecord {
+    pub pid: Option<u32>,
+    pub parent_pid: Option<u32>,
+    pub audit_epoch_millis: Option<u128>,
+    pub denied_path: String,
+    pub requested_access: String,
+    pub syscall: String,
+}
+
+pub struct LandlockAuditContext {
+    pub agent_id: Uuid,
+    pub wake_id: Option<Uuid>,
+    pub tool_name: String,
+    pub audit_pids: Vec<u32>,
+    pub invocation_started_at_millis: Option<u128>,
+    pub invocation_finished_at_millis: Option<u128>,
+}
+
+pub trait AuditRecordSource {
+    fn read_available_records(&mut self) -> io::Result<Vec<String>>;
+}
+
+pub async fn append_landlock_denials_within<S>(
+    pool: &PgPool,
+    context: &LandlockAuditContext,
+    source: &mut S,
+    window: Duration,
+) -> Result<usize, AppError>
+where
+    S: AuditRecordSource + ?Sized;
+```
+
+`landlock_denied` event payloads include the required AC fields
+`tool_name`, `agent_id`, `denied_path`, `requested_access`, and
+`syscall`, plus `wake_id`, `correlation_pids`, `audit_pid`,
+`audit_parent_pid`, and `audit_epoch_millis` when available.
+
+#### External Integrations
+
+| Integration | Failure mode | Error handling | Test strategy |
+| ----------- | ------------ | -------------- | ------------- |
+| Linux audit netlink (`NETLINK_AUDIT`, `AUDIT_NLGRP_READLOG`) | Missing capability, unavailable audit subsystem, bind/read failure | Fall back to audit log file opened from EOF; if fallback also fails, emit one-time `audit_log_unavailable` warning and continue sandbox enforcement | Deterministic `nlmsghdr` fixture decoder in `landlock_audit_netlink.rs`; live test skips with explicit evidence when source unavailable |
+| Audit log file fallback | File missing, unreadable, or no records written by auditd/journald | `invocation_audit_source_from_end` reports the combined netlink/file failure; shell tool still executes under Landlock | EOF fallback unit test proves old records are not replayed; env var `OPEN_PINCERY_LANDLOCK_AUDIT_LOG` allows alternate fixture/source path; `tests/compose_env_test.rs` proves the override reaches the deployed app container |
+| Landlock ABI 7 audit flag | Kernel reports ABI < 7 | `landlock_restrict_flags = 0`; emit one-time `audit_log_unavailable`; keep ABI >= 6 enforcement active | ABI 6 deterministic fallback test; Linux live tests skip below ABI 7 with explicit evidence |
+
+No new Rust crate dependency is added for AC-88. Netlink and raw
+Landlock calls use the existing Linux `libc` dependency.
+
+#### Observability
+
+- `landlock_denied`: appended to the agent event log only after real
+  runtime correlation. `source = "runtime"`, `tool_name = "shell"`,
+  `wake_id` is present when available, and the JSON payload carries the
+  denial and correlation fields above.
+- `audit_log_unavailable`: a one-time structured tracing warning when
+  ABI < 7 or no audit source is readable. It is not faked as an agent
+  event without a real agent context.
+
+#### Test Strategy
+
+| Proof | Coverage |
+| ----- | -------- |
+| Parser aliases | `tests/landlock_audit_test.rs` parses `path`/`name`/`denied_path`, `requested_access`/`requested`/`accesses`, `syscall` aliases, and ignores non-Landlock records |
+| EOF fallback | File source opens at EOF and reads only records appended after source creation |
+| Bounded delayed polling | `append_landlock_denials_within` appends two delayed correlated records, continuing after the first append until quiet period or total window |
+| Correlation | Tests cover process PID, audit `ppid`, `parent_pid`, stale/post-invocation PID reuse rejection, untimestamped live-context rejection, and uncorrelated append refusal |
+| Netlink decoding | `landlock_audit_netlink.rs` decodes deterministic `nlmsghdr` payload frames without a live audit subsystem |
+| Live Linux proof | Gated by bwrap availability, Landlock ABI >= 7, and readable audit netlink/log source; skips print explicit evidence when unavailable |
+| Compose env forwarding | `tests/compose_env_test.rs` asserts `docker-compose.yml` forwards `OPEN_PINCERY_LANDLOCK_AUDIT_LOG` via `${VAR:-}` and the gated `COMPOSE_AVAILABLE=1` `docker compose config` fixture renders the supplied audit-log path |
+
+#### Complexity Exceptions
+
+`src/observability/landlock_audit.rs` is allowed up to 450 lines for
+AC-88 because it deliberately keeps parser, source abstraction,
+correlation, bounded polling, and append bridge together. Linux netlink
+framing is split into `landlock_audit_netlink.rs`. If the audit module
+grows beyond 450 lines, split parser/correlation into separate files.
+
+#### Open Questions
+
+None. Live audit availability is an environment precondition, not an AC
+ambiguity. ABI < 7 degrades observability only; sandbox enforcement
+remains active.

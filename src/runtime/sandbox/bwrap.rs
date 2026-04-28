@@ -20,6 +20,8 @@
 #![cfg(target_os = "linux")]
 
 use async_trait::async_trait;
+use std::collections::{BTreeSet, HashSet};
+use std::fs;
 use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -29,7 +31,9 @@ use std::process::Stdio;
 use crate::config::{ResolvedSandboxMode, SandboxMode};
 
 use super::cgroup::CgroupGuard;
-use super::init_policy::SandboxInitPolicy;
+use super::init_policy::{
+    SandboxInitPolicy, LANDLOCK_AUDIT_ABI_FLOOR, LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON,
+};
 use super::landlock_layer::{LandlockProfile, LANDLOCK_SCOPE_ALL};
 use super::preflight::{KernelProbe, RealKernelProbe, LANDLOCK_ABI_FLOOR};
 use super::{is_rejected_pattern, ExecResult, SandboxProfile, ShellCommand, ToolExecutor};
@@ -160,12 +164,14 @@ fn build_init_policy_with_identity(
     mode: SandboxMode,
     identity: SandboxIdentity,
     landlock_scopes: u64,
+    landlock_restrict_flags: u32,
 ) -> SandboxInitPolicy {
     let landlock = LandlockProfile::default_for_cwd(cwd);
     SandboxInitPolicy {
         landlock_rx_paths: landlock.rx_paths,
         landlock_rwx_paths: landlock.rwx_paths,
         landlock_scopes,
+        landlock_restrict_flags,
         seccomp_bpf: Vec::new(),
         target_uid: identity.uid,
         target_gid: identity.gid,
@@ -182,6 +188,7 @@ fn build_init_policy(cwd: &Path, cmd: &str, mode: SandboxMode) -> SandboxInitPol
         mode,
         SandboxIdentity::default(),
         LANDLOCK_SCOPE_ALL,
+        landlock_restrict_flags_for_abi(Some(LANDLOCK_AUDIT_ABI_FLOOR)),
     )
 }
 
@@ -199,6 +206,29 @@ fn landlock_scope_bits_for_abi(landlock_abi: Option<u32>) -> u64 {
     match landlock_abi {
         Some(found) if found >= LANDLOCK_ABI_FLOOR => LANDLOCK_SCOPE_ALL,
         _ => 0,
+    }
+}
+
+fn landlock_restrict_flags_for_abi(landlock_abi: Option<u32>) -> u32 {
+    match landlock_abi {
+        Some(found) if found >= LANDLOCK_AUDIT_ABI_FLOOR => LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON,
+        _ => 0,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AuditLogUnavailableEvent {
+    landlock_abi: u32,
+    required_abi: u32,
+}
+
+fn landlock_audit_unavailable_event(landlock_abi: Option<u32>) -> Option<AuditLogUnavailableEvent> {
+    match landlock_abi {
+        Some(found) if found < LANDLOCK_AUDIT_ABI_FLOOR => Some(AuditLogUnavailableEvent {
+            landlock_abi: found,
+            required_abi: LANDLOCK_AUDIT_ABI_FLOOR,
+        }),
+        _ => None,
     }
 }
 
@@ -560,6 +590,19 @@ impl ToolExecutor for RealSandbox {
                         }
                     }
                 }
+                if let Some(audit_event) = landlock_audit_unavailable_event(landlock_abi) {
+                    if crate::observability::landlock_audit::audit_source_warning_should_emit_once()
+                    {
+                        tracing::warn!(
+                            target = "sandbox.landlock",
+                            event = "audit_log_unavailable",
+                            landlock_abi = audit_event.landlock_abi,
+                            required_abi = audit_event.required_abi,
+                            mode = ?self.sandbox.mode,
+                            "AC-88 Landlock audit logging unavailable on ABI below 7"
+                        );
+                    }
+                }
                 if !super::landlock_layer::landlock_supported() {
                     match self.sandbox.mode {
                         SandboxMode::Enforce => {
@@ -609,6 +652,7 @@ impl ToolExecutor for RealSandbox {
                         self.sandbox.mode,
                         sandbox_identity,
                         landlock_scope_bits_for_abi(landlock_abi),
+                        landlock_restrict_flags_for_abi(landlock_abi),
                     );
                     let policy_bytes = match policy.to_bytes() {
                         Ok(b) => b,
@@ -680,6 +724,11 @@ impl ToolExecutor for RealSandbox {
                 return ExecResult::Err(format!("bwrap spawn failed: {e}"));
             }
         };
+        let root_audit_pid = child.id();
+        let mut audit_pids = BTreeSet::new();
+        if let Some(pid) = root_audit_pid {
+            collect_process_tree_pids(pid, &mut audit_pids);
+        }
 
         // AC-53 / Slice A2b.4a: cgroup v2 resource caps.
         //
@@ -718,16 +767,67 @@ impl ToolExecutor for RealSandbox {
             },
         };
 
-        match tokio::time::timeout(profile.timeout, child.wait_with_output()).await {
+        let wait_result = tokio::time::timeout(profile.timeout, async {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let wait = child.wait_with_output();
+            tokio::pin!(wait);
+            loop {
+                tokio::select! {
+                    result = &mut wait => break result,
+                    _ = interval.tick() => {
+                        if let Some(pid) = root_audit_pid {
+                            collect_process_tree_pids(pid, &mut audit_pids);
+                        }
+                    }
+                }
+            }
+        })
+        .await;
+
+        match wait_result {
             Ok(Ok(out)) => ExecResult::Ok {
                 stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
                 stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
                 exit_code: out.status.code().unwrap_or(-1),
+                audit_pids: audit_pids.into_iter().collect(),
             },
             Ok(Err(e)) => ExecResult::Err(format!("wait failed: {e}")),
             Err(_elapsed) => ExecResult::Timeout,
         }
     }
+}
+
+fn collect_process_tree_pids(root_pid: u32, audit_pids: &mut BTreeSet<u32>) {
+    let mut pending = vec![root_pid];
+    let mut seen = HashSet::new();
+    while let Some(pid) = pending.pop() {
+        if !seen.insert(pid) {
+            continue;
+        }
+        audit_pids.insert(pid);
+        pending.extend(child_process_pids(pid));
+    }
+}
+
+fn child_process_pids(pid: u32) -> Vec<u32> {
+    let task_dir = format!("/proc/{pid}/task");
+    let Ok(tasks) = fs::read_dir(task_dir) else {
+        return Vec::new();
+    };
+
+    let mut children = Vec::new();
+    for task in tasks.flatten() {
+        let path = task.path().join("children");
+        let Ok(raw) = fs::read_to_string(path) else {
+            continue;
+        };
+        children.extend(
+            raw.split_whitespace()
+                .filter_map(|child| child.parse::<u32>().ok()),
+        );
+    }
+    children
 }
 
 #[cfg(test)]
@@ -961,6 +1061,32 @@ mod tests {
         assert_eq!(
             policy.landlock_scopes, LANDLOCK_SCOPE_ALL,
             "AC-87 requires the wrapper policy to request abstract-socket and signal scopes"
+        );
+    }
+
+    #[test]
+    fn init_policy_requests_ac88_audit_flag_on_abi7() {
+        let policy = build_init_policy_with_identity(
+            Path::new("/tmp/work"),
+            "true",
+            SandboxMode::Enforce,
+            SandboxIdentity::default(),
+            LANDLOCK_SCOPE_ALL,
+            landlock_restrict_flags_for_abi(Some(7)),
+        );
+        assert_eq!(
+            policy.landlock_restrict_flags, LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON,
+            "AC-88 requires ABI >= 7 policies to request denied-operation audit logging"
+        );
+    }
+
+    #[test]
+    fn landlock_audit_flag_drops_below_abi7() {
+        assert_eq!(landlock_restrict_flags_for_abi(Some(6)), 0);
+        assert_eq!(landlock_restrict_flags_for_abi(None), 0);
+        assert_eq!(
+            landlock_restrict_flags_for_abi(Some(7)),
+            LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON
         );
     }
 

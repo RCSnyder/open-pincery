@@ -122,6 +122,7 @@ fn init_policy_with_scopes(user_argv: Vec<String>) -> SandboxInitPolicy {
         ],
         landlock_rwx_paths: vec![PathBuf::from("/proc"), PathBuf::from("/tmp")],
         landlock_scopes: LANDLOCK_SCOPE_ALL,
+        landlock_restrict_flags: 0,
         seccomp_bpf: Vec::new(),
         target_uid: cur_uid,
         target_gid: cur_gid,
@@ -231,6 +232,7 @@ async fn landlock_scope_blocks_host_abstract_socket() {
             stdout,
             stderr,
             exit_code,
+            ..
         } => {
             assert_eq!(
                 exit_code, 0,

@@ -264,6 +264,7 @@ async fn enforce_mode_rejects_forced_partial_landlock() {
             stdout,
             stderr,
             exit_code,
+            ..
         } => {
             assert_eq!(
                 exit_code, 125,
@@ -299,6 +300,7 @@ async fn audit_mode_reports_forced_partial_landlock_and_proceeds() {
             stdout,
             stderr,
             exit_code,
+            ..
         } => {
             assert_eq!(
                 exit_code, 0,

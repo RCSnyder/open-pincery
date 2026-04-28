@@ -12,7 +12,11 @@ use super::sandbox::{ExecResult, SandboxProfile, ShellCommand, ToolExecutor};
 use super::vault::{SealedCredential, Vault};
 use crate::error::AppError;
 use crate::models::{credential, event};
+#[cfg(target_os = "linux")]
+use crate::observability::landlock_audit;
 use crate::observability::metrics as m;
+#[cfg(target_os = "linux")]
+use crate::runtime::sandbox::preflight::{KernelProbe, RealKernelProbe};
 
 /// AC-43 (v7): prefix tagging env-var values that must be resolved from
 /// the workspace credential vault before the child process is spawned.
@@ -186,7 +190,84 @@ pub async fn dispatch_tool(
                 Err(msg) => return ToolResult::Error(msg),
             };
 
-            execute_shell(executor, parsed.command, resolved_env).await
+            #[cfg(target_os = "linux")]
+            let mut audit_source = {
+                let landlock_abi = RealKernelProbe.landlock_abi();
+                if let Some(unavailable) =
+                    landlock_audit::audit_log_unavailable_for_abi(landlock_abi)
+                {
+                    if landlock_audit::audit_source_warning_should_emit_once() {
+                        warn!(
+                            event = landlock_audit::AUDIT_LOG_UNAVAILABLE_EVENT,
+                            landlock_abi = ?unavailable.landlock_abi,
+                            required_abi = unavailable.required_abi,
+                            reason = %unavailable.reason,
+                            tool = %name,
+                            "Landlock audit reader disabled; sandbox enforcement continues"
+                        );
+                    }
+                    None
+                } else {
+                    match landlock_audit::invocation_audit_source_from_end() {
+                        Ok(source) => Some(source),
+                        Err(e) => {
+                            if landlock_audit::audit_source_warning_should_emit_once() {
+                                warn!(
+                                    event = landlock_audit::AUDIT_LOG_UNAVAILABLE_EVENT,
+                                    error = %e,
+                                    tool = %name,
+                                    "Landlock audit source unavailable; sandbox enforcement continues"
+                                );
+                            }
+                            None
+                        }
+                    }
+                }
+            };
+
+            #[cfg(target_os = "linux")]
+            let invocation_started_at_millis = landlock_audit::current_epoch_millis();
+
+            let execution = execute_shell(executor, parsed.command, resolved_env).await;
+
+            #[cfg(target_os = "linux")]
+            let invocation_finished_at_millis = landlock_audit::current_epoch_millis();
+
+            #[cfg(target_os = "linux")]
+            if let Some(source) = audit_source.as_mut() {
+                let audit_context = landlock_audit::LandlockAuditContext {
+                    agent_id,
+                    wake_id: Some(wake_id),
+                    tool_name: name.clone(),
+                    audit_pids: execution.audit_pids.clone(),
+                    invocation_started_at_millis,
+                    invocation_finished_at_millis,
+                };
+                match landlock_audit::append_landlock_denials_within(
+                    pool,
+                    &audit_context,
+                    source,
+                    std::time::Duration::from_secs(2),
+                )
+                .await
+                {
+                    Ok(appended) if appended > 0 => {
+                        info!(count = appended, tool = %name, "Appended Landlock denial audit events");
+                    }
+                    Ok(_) => {}
+                    Err(e) if landlock_audit::audit_source_warning_should_emit_once() => {
+                        warn!(
+                            event = landlock_audit::AUDIT_LOG_UNAVAILABLE_EVENT,
+                            error = %e,
+                            tool = %name,
+                            "Landlock audit source unavailable; sandbox enforcement continues"
+                        );
+                    }
+                    Err(_) => {}
+                }
+            }
+
+            execution.result
         }
         "plan" => {
             let parsed: PlanArgs = match serde_json::from_str(args) {
@@ -367,11 +448,17 @@ async fn emit_credential_unresolved(
     }
 }
 
+struct ShellExecution {
+    result: ToolResult,
+    #[cfg(target_os = "linux")]
+    audit_pids: Vec<u32>,
+}
+
 async fn execute_shell(
     executor: &Arc<dyn ToolExecutor>,
     command: String,
     env: HashMap<String, String>,
-) -> ToolResult {
+) -> ShellExecution {
     let result = executor
         .run(&ShellCommand { command, env }, &SandboxProfile::default())
         .await;
@@ -381,6 +468,7 @@ async fn execute_shell(
             stdout,
             stderr,
             exit_code,
+            audit_pids: _audit_pids,
         } => {
             let combined = format!(
                 "exit_code: {}\nstdout:\n{}\nstderr:\n{}",
@@ -395,12 +483,26 @@ async fn execute_shell(
             } else {
                 combined
             };
-            ToolResult::Output(truncated)
+            ShellExecution {
+                result: ToolResult::Output(truncated),
+                #[cfg(target_os = "linux")]
+                audit_pids: _audit_pids,
+            }
         }
-        ExecResult::Timeout => ToolResult::Error("Shell execution timed out".into()),
-        ExecResult::Rejected(reason) => {
-            ToolResult::Error(format!("Shell execution rejected: {reason}"))
-        }
-        ExecResult::Err(e) => ToolResult::Error(format!("Shell execution failed: {e}")),
+        ExecResult::Timeout => ShellExecution {
+            result: ToolResult::Error("Shell execution timed out".into()),
+            #[cfg(target_os = "linux")]
+            audit_pids: Vec::new(),
+        },
+        ExecResult::Rejected(reason) => ShellExecution {
+            result: ToolResult::Error(format!("Shell execution rejected: {reason}")),
+            #[cfg(target_os = "linux")]
+            audit_pids: Vec::new(),
+        },
+        ExecResult::Err(e) => ShellExecution {
+            result: ToolResult::Error(format!("Shell execution failed: {e}")),
+            #[cfg(target_os = "linux")]
+            audit_pids: Vec::new(),
+        },
     }
 }

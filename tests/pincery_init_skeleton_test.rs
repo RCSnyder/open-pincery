@@ -154,6 +154,7 @@ fn sample_policy(user_argv: Vec<String>) -> SandboxInitPolicy {
         ],
         landlock_rwx_paths: vec![PathBuf::from("/proc"), PathBuf::from("/tmp")],
         landlock_scopes: 0,
+        landlock_restrict_flags: 0,
         seccomp_bpf: allow_all_seccomp_bytes(),
         target_uid: cur_uid,
         target_gid: cur_gid,

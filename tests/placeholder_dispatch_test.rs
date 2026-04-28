@@ -44,6 +44,7 @@ impl ToolExecutor for RecordingExecutor {
             stdout: String::new(),
             stderr: String::new(),
             exit_code: 0,
+            audit_pids: Vec::new(),
         }
     }
 }

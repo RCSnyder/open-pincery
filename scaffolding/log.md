@@ -1,5 +1,28 @@
 # Open Pincery — Experiment Log
 
+## VERIFY v9 — Slice G0f / AC-88 final verification — 2026-04-28T04:28Z
+
+- **Gate**: PASS (attempt 2). Attempt 1 failed only deployment readiness because `OPEN_PINCERY_LANDLOCK_AUDIT_LOG` was documented in `.env.example` but not forwarded by `docker-compose.yml`; the fix added compose forwarding plus static and live compose-config tests.
+- **Evidence**: Local Windows-host ladder passed after the verify fix: `cargo fmt --all -- --check`, `cargo check --all-targets --quiet`, `cargo clippy --all-targets -- -D warnings`, `cargo test --lib -- --test-threads=1` (66 passed), `cargo test --test landlock_audit_test -- --test-threads=1` (15 passed), `cargo test --test env_example_test -- --test-threads=1` (4 passed), `COMPOSE_AVAILABLE=1 cargo test --test compose_env_test -- --test-threads=1` (7 passed, including live `docker compose config` rendering), `git diff --check`, and `get_errors` on touched code/config/test files (clean). Linux devshell `cargo test --test landlock_audit_test -- --test-threads=1 --nocapture` passed 18/18; live ABI >= 7 audit proofs skipped with explicit evidence because Docker Desktop exposed Landlock ABI `Some(3)`, while deterministic Linux/netlink tests ran. Dependency audit evidence: `cargo audit` reported one medium `rsa` advisory (`RUSTSEC-2023-0071`, no fixed upgrade, via SQLx MySQL macro support) and no high/critical vulnerabilities; `cargo audit --ignore RUSTSEC-2023-0071` exited successfully with only the existing allowed `proc-macro-error` unmaintained warning.
+- **Changes**: AC-88 implemented ABI-gated `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON` policy plumbing, raw Landlock restrict-flag support, `pincery-init` integration, per-invocation audit source selection (netlink first, audit-log EOF fallback), real-context-only `landlock_denied` event appends, process-tree PID sampling, audit `ppid` / `parent_pid` correlation, invocation timestamp-window rejection, bounded delayed polling with post-append quiet period, deterministic netlink frame coverage, live ABI-gated audit tests, and compose forwarding for `OPEN_PINCERY_LANDLOCK_AUDIT_LOG`.
+- **Retries**: 1 verification retry. Review initially found delayed-audit, live proof, and netlink-fixture gaps; the second review passed with no Critical or Required findings. Verify then found the compose env forwarding gap, which was fixed and re-verified.
+- **Next**: Checkpoint AC-88 and, if CI push is requested/available, run the GitHub Actions PR workflow for Linux privileged proof on a kernel that may expose ABI >= 7.
+
+## RECONCILE — 2026-04-28T04:23Z
+
+- **Structural drift fixed**: AC-88 deployment readiness scaffolding now records that `OPEN_PINCERY_LANDLOCK_AUDIT_LOG` must be forwarded by `docker-compose.yml` into the app container and guarded by `tests/compose_env_test.rs`, including the live `COMPOSE_AVAILABLE=1` `docker compose config` fixture.
+- **Documents updated**: `scaffolding/design.md`, `scaffolding/readiness.md`, `scaffolding/log.md`.
+- **Evidence noted**: Read-only check found `docker-compose.yml` forwarding `OPEN_PINCERY_LANDLOCK_AUDIT_LOG: ${OPEN_PINCERY_LANDLOCK_AUDIT_LOG:-}` and `tests/compose_env_test.rs` covering the optional forwarded-var contract plus rendered compose fixture. User-provided re-verification says `compose_env_test` passed with `COMPOSE_AVAILABLE=1` and `env_example_test` passed.
+- **Next**: Continue normal post-verify handling for AC-88; no scope expansion or new acceptance criteria were introduced.
+
+## RECONCILE — 2026-04-28T04:04Z
+
+- **Structural drift fixed**: AC-88 / Slice G0f scaffolding now matches the current uncommitted implementation: ABI-gated `landlock_restrict_flags`, raw `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON` support in the Landlock kernel layer, per-invocation audit source selection (netlink first, audit-log EOF fallback via `OPEN_PINCERY_LANDLOCK_AUDIT_LOG`), real-context-only `landlock_denied` appends, process-tree PID sampling, audit `ppid` / `parent_pid` correlation, invocation timestamp-window rejection for stale PID reuse, bounded delayed polling with post-append quiet period, and deterministic netlink `nlmsghdr` fixture coverage.
+- **REVIEW state**: User-provided evidence says REVIEW passed with no Critical or Required findings; one stale source doc comment was fixed in `src/runtime/sandbox/mod.rs` before reconciliation.
+- **Documents updated**: `scaffolding/scope.md`, `scaffolding/design.md`, `scaffolding/readiness.md`, `scaffolding/log.md`.
+- **Evidence noted**: Local fmt/check/clippy passed; `landlock_audit_test` 15/15, lib tests 66/66, `env_example_test` 4/4 passed; Linux devshell `landlock_audit_test` 18/18 passed with ABI-gated live tests skipped on Landlock ABI Some(3) while deterministic Linux/netlink tests ran.
+- **Next**: VERIFY AC-88 after this reconciliation, then proceed with normal post-verify gate handling.
+
 ## VERIFY v9 — Slice G0e / AC-87 final CI verification — 2026-04-28T01:13Z
 
 - **Gate**: PASS (attempt 1).

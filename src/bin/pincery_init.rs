@@ -617,11 +617,13 @@ mod linux {
     /// call.
     fn apply_landlock(
         policy: &SandboxInitPolicy,
-    ) -> Result<Option<open_pincery::runtime::sandbox::landlock_layer::RestrictionStatus>, InitError>
-    {
+    ) -> Result<
+        Option<open_pincery::runtime::sandbox::landlock_layer::LandlockRestrictionStatus>,
+        InitError,
+    > {
         use open_pincery::runtime::sandbox::landlock_layer::{
-            install_landlock, install_landlock_scopes, LandlockCompatibility, LandlockProfile,
-            RulesetStatus,
+            install_landlock_scopes, install_landlock_with_restrict_flags, LandlockCompatibility,
+            LandlockProfile, RulesetStatus,
         };
 
         if policy.landlock_rx_paths.is_empty() && policy.landlock_rwx_paths.is_empty() {
@@ -639,8 +641,12 @@ mod linux {
         } else {
             LandlockCompatibility::BestEffort
         };
-        let mut status = install_landlock(&profile, compatibility)
-            .map_err(|e| InitError::ApplyPolicy(format!("landlock: {e}")))?;
+        let mut status = install_landlock_with_restrict_flags(
+            &profile,
+            compatibility,
+            policy.landlock_restrict_flags,
+        )
+        .map_err(|e| InitError::ApplyPolicy(format!("landlock: {e}")))?;
         install_landlock_scopes(policy.landlock_scopes)
             .map_err(|e| InitError::ApplyPolicy(format!("landlock scopes: {e}")))?;
 
@@ -704,7 +710,9 @@ mod linux {
     /// (G0a.3f) can surface a structured `not_fully_enforced` event.
     fn verify_fully_enforced(
         policy: &SandboxInitPolicy,
-        landlock_status: Option<open_pincery::runtime::sandbox::landlock_layer::RestrictionStatus>,
+        landlock_status: Option<
+            open_pincery::runtime::sandbox::landlock_layer::LandlockRestrictionStatus,
+        >,
     ) -> Result<(), InitError> {
         use open_pincery::runtime::sandbox::landlock_layer::RulesetStatus;
 
@@ -916,11 +924,12 @@ mod linux {
     fn log_policy_summary(policy: &SandboxInitPolicy) {
         eprintln!(
             "pincery-init: parsed policy rx_paths={} rwx_paths={} \
-             landlock_scopes={} seccomp_bytes={} target_uid={} target_gid={} \
+             landlock_scopes={} landlock_restrict_flags={} seccomp_bytes={} target_uid={} target_gid={} \
              require_fully_enforced={} user_argv_len={}",
             policy.landlock_rx_paths.len(),
             policy.landlock_rwx_paths.len(),
             policy.landlock_scopes,
+            policy.landlock_restrict_flags,
             policy.seccomp_bpf.len(),
             policy.target_uid,
             policy.target_gid,

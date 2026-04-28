@@ -126,6 +126,7 @@ async fn seccomp_enforce_kills_mount_syscall() {
             stdout,
             stderr,
             exit_code,
+            ..
         } => {
             if stdout.contains("NO_MOUNT_BIN") || exit_code == 77 {
                 eprintln!(

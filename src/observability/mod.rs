@@ -4,6 +4,9 @@
 //! Metrics recording requires calling `metrics::install_recorder()`; the
 //! `/metrics` HTTP server is optional via `METRICS_ADDR` env var.
 
+pub mod landlock_audit;
+#[cfg(target_os = "linux")]
+pub mod landlock_audit_netlink;
 pub mod logging;
 pub mod metrics;
 pub mod server;

@@ -47,6 +47,7 @@ services:
       # Observability (v3 — all optional).
       LOG_FORMAT: ${LOG_FORMAT:-}
       METRICS_ADDR: ${METRICS_ADDR:-}
+      OPEN_PINCERY_LANDLOCK_AUDIT_LOG: ${OPEN_PINCERY_LANDLOCK_AUDIT_LOG:-}
       RUST_LOG: ${RUST_LOG:-open_pincery=info}
       # Runtime tunables (optional; defaults are usually correct).
       MAX_PROMPT_CHARS: ${MAX_PROMPT_CHARS:-100000}

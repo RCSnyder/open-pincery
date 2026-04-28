@@ -101,13 +101,14 @@ pub struct SandboxProfile {
     /// by `ProcessExecutor`.
     pub seccomp: bool,
     /// AC-53 / Slice A2b.4c: landlock LSM filesystem ruleset. When
-    /// `true`, [`bwrap::RealSandbox`] installs a path-based capability
-    /// ruleset via a `pre_exec` hook on the bwrap child, restricting
+    /// `true`, [`bwrap::RealSandbox`] wires the `pincery-init` wrapper
+    /// into the bwrap argv so the wrapper installs a path-based
+    /// capability ruleset after namespace setup. The ruleset restricts
     /// reads to standard rootfs paths (`/usr`, `/bin`, `/sbin`,
-    /// `/lib`, `/lib64`, `/etc`) and reads+writes to the cwd
-    /// workspace. On kernels < 5.13 (no landlock support), Enforce
-    /// mode fails closed; Audit and Disabled modes log + proceed.
-    /// Ignored on non-Linux and by `ProcessExecutor`.
+    /// `/lib`, `/lib64`, `/etc`) and reads+writes to the cwd workspace.
+    /// On kernels < 5.13 (no landlock support), Enforce mode fails
+    /// closed; Audit and Disabled modes log + proceed. Ignored on
+    /// non-Linux and by `ProcessExecutor`.
     pub landlock: bool,
 }
 
@@ -140,6 +141,7 @@ pub enum ExecResult {
         stdout: String,
         stderr: String,
         exit_code: i32,
+        audit_pids: Vec<u32>,
     },
     Timeout,
     Rejected(String),
@@ -204,12 +206,14 @@ impl ToolExecutor for ProcessExecutor {
             Ok(c) => c,
             Err(e) => return ExecResult::Err(format!("spawn failed: {e}")),
         };
+        let audit_pids = child.id().into_iter().collect();
 
         match tokio::time::timeout(profile.timeout, child.wait_with_output()).await {
             Ok(Ok(out)) => ExecResult::Ok {
                 stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
                 stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
                 exit_code: out.status.code().unwrap_or(-1),
+                audit_pids,
             },
             Ok(Err(e)) => ExecResult::Err(format!("wait failed: {e}")),
             Err(_elapsed) => {
