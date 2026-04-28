@@ -1,5 +1,13 @@
 # Open Pincery — Experiment Log
 
+## VERIFY v9 — Slice G0f / AC-88 final CI evidence — 2026-04-28T12:25Z
+
+- **Gate**: PASS (attempt 3). AC-88 is now verified on the pushed repair head `f14d9c03139bc7728eca1b2f06ef7b5da80b1e7d`.
+- **Evidence**: GitHub Actions CI run `25034998114` completed successfully: `rustfmt`, `clippy`, `cargo test`, `cargo deny`, and privileged `sandbox real-bwrap smoke` all passed. The privileged smoke job completed `run AC-53 sandbox tests in privileged container` successfully. TLA+ model check run `25034998104` also completed successfully on the same head SHA. This replaces failed CI run `25033960641` on `185f59d`, which had exposed Linux-only test-pattern drift and clippy lints after the AC-88 checkpoint.
+- **Changes**: Final repair commit `f14d9c0` preserved AC-88 behavior and restored Linux CI by ignoring `audit_pids` in legacy `ExecResult::Ok` test patterns, removing duplicate Linux `cfg` attributes, removing the AC-88 audit-source needless return, and applying mechanical inline-format lint fixes.
+- **Retries**: 2 verification retries total after the initial AC-88 verification pass: one compose-env deployment-readiness fix before checkpointing, and one CI repair after the first push.
+- **Next**: AC-88 / Slice G0f is closed; proceed to the next approved v9 slice after normal context recovery.
+
 ## VERIFY v9 — Slice G0f / AC-88 CI repair — 2026-04-28T05:05Z
 
 - **Gate**: REPAIR (attempt 3 pending CI). GitHub Actions CI run `25033960641` on AC-88 commit `185f59d` failed in `clippy`, `cargo test`, and `sandbox real-bwrap smoke`; TLA+ run `25033960640` passed on the same head SHA.
