@@ -139,7 +139,7 @@ pub fn invocation_audit_source_from_end() -> io::Result<InvocationAuditSource> {
             Ok(source) => return Ok(InvocationAuditSource::Netlink(source)),
             Err(error) => error,
         };
-        return AuditLogFileSource::from_current_end(configured_audit_log_path())
+        AuditLogFileSource::from_current_end(configured_audit_log_path())
             .map(InvocationAuditSource::File)
             .map_err(|file_error| {
                 io::Error::new(
@@ -148,7 +148,7 @@ pub fn invocation_audit_source_from_end() -> io::Result<InvocationAuditSource> {
                         "audit netlink unavailable: {netlink_error}; audit log fallback unavailable: {file_error}"
                     ),
                 )
-            });
+            })
     }
 
     #[cfg(not(target_os = "linux"))]

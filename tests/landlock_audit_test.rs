@@ -409,8 +409,7 @@ fn live_audit_capture_preconditions_are_explicit() {
     let abi = RealKernelProbe.landlock_abi();
     if abi.unwrap_or(0) < LANDLOCK_AUDIT_ABI_FLOOR {
         eprintln!(
-            "AC-88 live audit capture skipped: Landlock ABI {:?} is below required ABI {}",
-            abi, LANDLOCK_AUDIT_ABI_FLOOR
+            "AC-88 live audit capture skipped: Landlock ABI {abi:?} is below required ABI {LANDLOCK_AUDIT_ABI_FLOOR}"
         );
         return;
     }
@@ -453,8 +452,7 @@ fn live_sandbox_preconditions_met() -> bool {
     let abi = RealKernelProbe.landlock_abi();
     if abi.unwrap_or(0) < LANDLOCK_AUDIT_ABI_FLOOR {
         eprintln!(
-            "AC-88 live sandbox proof skipped: Landlock ABI {:?} is below required ABI {}",
-            abi, LANDLOCK_AUDIT_ABI_FLOOR
+            "AC-88 live sandbox proof skipped: Landlock ABI {abi:?} is below required ABI {LANDLOCK_AUDIT_ABI_FLOOR}"
         );
         return false;
     }

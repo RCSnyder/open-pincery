@@ -133,6 +133,7 @@ async fn landlock_permits_normal_commands() {
             stdout,
             exit_code,
             stderr,
+            ..
         } => {
             assert_eq!(
                 exit_code, 0,

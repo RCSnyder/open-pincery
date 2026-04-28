@@ -1,5 +1,13 @@
 # Open Pincery — Experiment Log
 
+## VERIFY v9 — Slice G0f / AC-88 CI repair — 2026-04-28T05:05Z
+
+- **Gate**: REPAIR (attempt 3 pending CI). GitHub Actions CI run `25033960641` on AC-88 commit `185f59d` failed in `clippy`, `cargo test`, and `sandbox real-bwrap smoke`; TLA+ run `25033960640` passed on the same head SHA.
+- **Evidence**: Failure logs showed Linux-only compile drift from the new `ExecResult::Ok { audit_pids }` field in legacy sandbox test patterns plus clippy warnings that Windows did not surface. Repair checks passed locally with `cargo fmt --all -- --check`, `CARGO_TARGET_DIR=target/local-check cargo check --all-targets --quiet`, `CARGO_TARGET_DIR=target/local-check cargo clippy --all-targets -- -D warnings`, `get_errors` on touched Rust/test files, and `git diff --check` (CRLF warnings only). Linux devshell checks passed with `OPEN_PINCERY_DEVSHELL_IMAGE=open-pincery-devshell:v9-local OPEN_PINCERY_DEVSHELL_HOST_TARGET_DIR="$PWD/target/devshell" ./scripts/devshell.sh cargo clippy --all-targets -- -D warnings`, `./scripts/devshell.sh cargo test --test sandbox_real_smoke --test sandbox_landlock_test --test sandbox_seccomp_test --no-run`, and `./scripts/devshell.sh cargo test --test landlock_audit_test --no-run`. A full local Windows `cargo test --all` was attempted and stopped at DB-backed integration tests because `open_pincery_test` is not present on the workstation.
+- **Changes**: Ignored `audit_pids` in legacy `ExecResult::Ok` test patterns, removed duplicate Linux `cfg` attributes, removed a needless return in AC-88 audit source fallback, and applied mechanical inline-format-arg lint fixes exposed by Linux clippy.
+- **Retries**: 1 CI repair iteration after the AC-88 checkpoint push.
+- **Next**: Commit and push this repair, then capture the replacement GitHub Actions CI and TLA+ conclusions.
+
 ## VERIFY v9 — Slice G0f / AC-88 final verification — 2026-04-28T04:28Z
 
 - **Gate**: PASS (attempt 2). Attempt 1 failed only deployment readiness because `OPEN_PINCERY_LANDLOCK_AUDIT_LOG` was documented in `.env.example` but not forwarded by `docker-compose.yml`; the fix added compose forwarding plus static and live compose-config tests.

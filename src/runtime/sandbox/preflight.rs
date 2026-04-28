@@ -49,8 +49,6 @@
 //! Slice G0b.2 adds the wiring, the exit-4 translation, and
 //! documentation updates.
 
-#![cfg(target_os = "linux")]
-
 /// Minimum required Landlock ABI in strict (default) mode.
 ///
 /// ABI 6 landed in Linux 6.7. It adds IPC scoping primitives

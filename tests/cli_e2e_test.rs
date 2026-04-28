@@ -36,7 +36,7 @@ async fn test_pcy_cli_e2e_core_flow() {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let base_url = format!("http://{}", addr);
+    let base_url = format!("http://{addr}");
 
     let server = tokio::spawn(async move {
         let _ = axum::serve(
@@ -53,7 +53,7 @@ async fn test_pcy_cli_e2e_core_flow() {
         .unwrap();
     let mut ready = false;
     for _ in 0..40 {
-        if let Ok(resp) = probe.get(format!("{}/health", base_url)).send().await {
+        if let Ok(resp) = probe.get(format!("{base_url}/health")).send().await {
             if resp.status().is_success() {
                 ready = true;
                 break;

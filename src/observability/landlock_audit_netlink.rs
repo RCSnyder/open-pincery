@@ -1,7 +1,5 @@
 //! Linux audit netlink source for AC-88 Landlock denial records.
 
-#![cfg(target_os = "linux")]
-
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 

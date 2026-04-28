@@ -88,6 +88,7 @@ async fn real_sandbox_runs_trivial_true() {
             exit_code,
             stdout,
             stderr,
+            ..
         } => assert_eq!(
             exit_code, 0,
             "bwrap exited non-zero; stdout={stdout:?} stderr={stderr:?}"
@@ -111,6 +112,7 @@ async fn real_sandbox_echoes_expected_stdout() {
             stdout,
             exit_code,
             stderr,
+            ..
         } => {
             assert_eq!(
                 exit_code, 0,
@@ -193,6 +195,7 @@ async fn real_sandbox_denies_network_when_deny_net_is_true() {
             stdout,
             exit_code,
             stderr,
+            ..
         } => {
             assert_eq!(
                 exit_code, 0,

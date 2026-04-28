@@ -219,8 +219,7 @@ async fn landlock_scope_blocks_host_abstract_socket() {
     assert_host_can_connect(socket_name.as_bytes());
 
     let script = format!(
-        "printf probe | socat -t 1 - ABSTRACT-CONNECT:{} >/dev/null 2>&1 && echo abstract=connected || echo abstract=blocked",
-        socket_name
+        "printf probe | socat -t 1 - ABSTRACT-CONNECT:{socket_name} >/dev/null 2>&1 && echo abstract=connected || echo abstract=blocked"
     );
     let result = enforce_sandbox()
         .run(&ShellCommand::new(script), &scope_profile())

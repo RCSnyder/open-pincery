@@ -143,7 +143,7 @@ async fn ac40_add_list_revoke_round_trip() {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let base_url = format!("http://{}", addr);
+    let base_url = format!("http://{addr}");
     let _server = tokio::spawn(async move {
         let _ = axum::serve(
             listener,
@@ -159,7 +159,7 @@ async fn ac40_add_list_revoke_round_trip() {
         .unwrap();
     let mut ready = false;
     for _ in 0..40 {
-        if let Ok(r) = probe.get(format!("{}/health", base_url)).send().await {
+        if let Ok(r) = probe.get(format!("{base_url}/health")).send().await {
             if r.status().is_success() {
                 ready = true;
                 break;

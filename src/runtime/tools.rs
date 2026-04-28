@@ -470,10 +470,7 @@ async fn execute_shell(
             exit_code,
             audit_pids: _audit_pids,
         } => {
-            let combined = format!(
-                "exit_code: {}\nstdout:\n{}\nstderr:\n{}",
-                exit_code, stdout, stderr
-            );
+            let combined = format!("exit_code: {exit_code}\nstdout:\n{stdout}\nstderr:\n{stderr}");
             let truncated = if combined.len() > 50000 {
                 let mut boundary = 50000;
                 while boundary > 0 && !combined.is_char_boundary(boundary) {

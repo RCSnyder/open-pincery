@@ -80,6 +80,7 @@ async fn seccomp_permits_normal_commands() {
             stdout,
             exit_code,
             stderr,
+            ..
         } => {
             assert_eq!(exit_code, 0, "echo failed under seccomp; stderr={stderr:?}");
             assert!(
