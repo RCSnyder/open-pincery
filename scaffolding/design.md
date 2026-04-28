@@ -2310,8 +2310,9 @@ src/
     sandbox/
       mod.rs                      # SandboxedExecutor entry + compose()
       bwrap.rs                    # Bubblewrap wrapper (namespaces, --disable-userns, uid/gid/cap drop, bind mounts)
+      init_policy.rs              # parent -> pincery-init policy, including AC-87 landlock_scopes bitmap
       seccomp.rs                  # seccompiler allowlist loader
-      landlock.rs                 # landlock ruleset builder
+      landlock.rs                 # landlock filesystem ruleset + raw ABI-6 IPC scope installer
       cgroup.rs                   # cgroup v2 write helpers (cgroups-rs)
       netns.rs                    # slirp4netns proxy + egress allowlist plumbing
       profiles/
@@ -2347,6 +2348,7 @@ scripts/devshell.sh               # AC-75 Linux/macOS wrapper
 scripts/devshell.ps1              # AC-75 PowerShell wrapper
 tests/
   sandbox_escape_test.rs          # AC-53 12-payload matrix
+  landlock_scope_test.rs          # AC-87 abstract-socket + signal scope live proof
   sandbox_mode_test.rs            # AC-73 enforce/audit/disabled
   sandbox_perf_test.rs            # AC-73 p95 budget
   secret_proxy_test.rs            # AC-71 memory sweep
@@ -2440,7 +2442,7 @@ network_blocked   { tool_call_id, destination_host, destination_port, protocol }
 | ---------------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
 | `bubblewrap` binary                | Namespace isolation        | Missing / ns disabled → exec refuses, `sandbox_unavailable`; nested userns not disabled → AC-86 smoke fails                                                       | Live on ubuntu-24.04 CI; AC-86 smoke asserts uid/gid/caps and `unshare -U` denial; ignored on non-Linux     |
 | `libseccomp` / `seccompiler` crate | Syscall allowlist          | Profile load fails → exec refuses                                                                                                                                | Unit: load profile + assert denied syscalls error                                                          |
-| Landlock ABI + `landlock` crate    | FS confinement + IPC floor | Startup preflight fails closed if ABI < 6 in strict mode; relaxed mode only downgrades to ABI >= 1 with `OPEN_PINCERY_ALLOW_UNSAFE=true`; no bwrap-only fallback | Live in privileged sandbox-smoke; AC-84 positive process tests run with `OPEN_PINCERY_RUN_AC84_POSITIVE=1` |
+| Landlock ABI + `landlock` crate + raw ABI-6 syscalls | FS confinement + IPC floor | Startup preflight fails closed if ABI < 6 in strict mode; relaxed mode only downgrades to ABI >= 1 with `OPEN_PINCERY_ALLOW_UNSAFE=true`; no bwrap-only fallback. `landlock = 0.4` handles filesystem rules; `pincery-init` uses raw `landlock_create_ruleset` / `landlock_restrict_self` only for `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL`. | Live in privileged sandbox-smoke; AC-84 positive process tests run with `OPEN_PINCERY_RUN_AC84_POSITIVE=1`; AC-87 `tests/landlock_scope_test.rs` proves abstract-socket denial and signal EPERM on ABI >= 6 |
 | `slirp4netns`                      | Egress proxy + allowlist   | Missing → exec refuses                                                                                                                                           | Live: allowed host succeeds, denied host blocks                                                            |
 | `cgroups-rs`                       | Resource limits            | cgroup v2 not mounted → exec refuses                                                                                                                             | Live: small OOM / PID thresholds                                                                           |
 | Postgres                           | Tenancy enforcement        | Middleware bypass → lint fails CI                                                                                                                                | Live: 5×5 isolation matrix + SQLi probes                                                                   |
@@ -2449,7 +2451,7 @@ network_blocked   { tool_call_id, destination_host, destination_port, protocol }
 ### Observability
 
 - **Logs**: every sandbox layer failure → structured `error!` with `layer`, `kind`, `tool_call_id`. No plaintext credentials are ever logged (secret proxy scrubs at IPC boundary).
-- **New event types**: `sandbox_blocked`, `sandbox_would_block`, `sandbox_mode_changed`, `sandbox_mode_default`, `sandbox_self_test_failed`, `network_blocked`, `secret_injected`, `credential_plaintext_rejected`, `credential_requested`, `credential_deposited`, `credential_request_rejected`, `deposit_attempt`, `rate_limit_exceeded`.
+- **New event types**: `sandbox_blocked`, `sandbox_would_block`, `sandbox_mode_changed`, `sandbox_mode_default`, `sandbox_self_test_failed`, `sandbox_scope_unavailable`, `network_blocked`, `secret_injected`, `credential_plaintext_rejected`, `credential_requested`, `credential_deposited`, `credential_request_rejected`, `deposit_attempt`, `rate_limit_exceeded`.
 - **Counters (stdout / structured)**: `sandbox_exec_total{outcome}`, `egress_attempts_total{decision}`, `secret_resolutions_total{mode}`, `tenancy_queries_total{workspace_id}`.
 - **CLI verbs added**: `pcy session {list,revoke,refresh}`, `pcy user {add,list,set-role,delete}`, `pcy credential request {list,approve,reject}`, `pcy agent network {allow,list,revoke}`, `pcy events archive`, `pcy cost`.
 

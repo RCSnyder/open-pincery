@@ -202,6 +202,22 @@ fn landlock_scope_bits_for_abi(landlock_abi: Option<u32>) -> u64 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScopeUnavailableEvent {
+    landlock_abi: u32,
+    required_abi: u32,
+}
+
+fn landlock_scope_unavailable_event(landlock_abi: Option<u32>) -> Option<ScopeUnavailableEvent> {
+    match landlock_abi {
+        Some(found) if found < LANDLOCK_ABI_FLOOR => Some(ScopeUnavailableEvent {
+            landlock_abi: found,
+            required_abi: LANDLOCK_ABI_FLOOR,
+        }),
+        _ => None,
+    }
+}
+
 /// Write the serialized `SandboxInitPolicy` into a fresh non-CLOEXEC
 /// memfd, rewound to offset 0 so the wrapper's first `read(2)`
 /// sees byte 0. Mirrors
@@ -529,12 +545,14 @@ impl ToolExecutor for RealSandbox {
                                 mode = ?self.sandbox.mode,
                                 "landlock ABI below strict floor; proceeding in audit/disabled mode"
                             );
-                            if let Some(found) = landlock_abi {
+                            if let Some(scope_event) =
+                                landlock_scope_unavailable_event(landlock_abi)
+                            {
                                 tracing::warn!(
                                     target = "sandbox.landlock",
                                     event = "sandbox_scope_unavailable",
-                                    landlock_abi = found,
-                                    required_abi = LANDLOCK_ABI_FLOOR,
+                                    landlock_abi = scope_event.landlock_abi,
+                                    required_abi = scope_event.required_abi,
                                     mode = ?self.sandbox.mode,
                                     "AC-87 Landlock IPC scopes unavailable on relaxed-floor kernel"
                                 );
@@ -951,6 +969,19 @@ mod tests {
         assert_eq!(landlock_scope_bits_for_abi(Some(5)), 0);
         assert_eq!(landlock_scope_bits_for_abi(None), 0);
         assert_eq!(landlock_scope_bits_for_abi(Some(6)), LANDLOCK_SCOPE_ALL);
+    }
+
+    #[test]
+    fn landlock_scope_unavailable_event_pins_stubbed_abi5_warning() {
+        assert_eq!(
+            landlock_scope_unavailable_event(Some(5)),
+            Some(ScopeUnavailableEvent {
+                landlock_abi: 5,
+                required_abi: LANDLOCK_ABI_FLOOR
+            })
+        );
+        assert_eq!(landlock_scope_unavailable_event(Some(6)), None);
+        assert_eq!(landlock_scope_unavailable_event(None), None);
     }
 
     #[test]
