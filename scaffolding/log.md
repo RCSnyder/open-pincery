@@ -1,5 +1,13 @@
 # Open Pincery — Experiment Log
 
+## VERIFY v9 — Slice G0e / AC-87 final CI verification — 2026-04-28T01:13Z
+
+- **Gate**: PASS (attempt 1).
+- **Evidence**: Local Windows-host ladder passed before the final push: `cargo fmt --all -- --check`, `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`, `cargo test --lib -- --test-threads=1`, `cargo test --test landlock_scope_test -- --list` (0 Linux tests on Windows, expected), and `git diff --check`. GitHub Actions PR run `25028332406` completed successfully on head commit `a65e305`: `rustfmt`, `clippy`, `cargo test`, `cargo deny`, and privileged `sandbox real-bwrap smoke` all passed. The privileged sandbox job ran `tests/landlock_scope_test.rs` and proved both `landlock_scope_blocks_host_abstract_socket` and `landlock_scope_blocks_host_signal_probe` (`2 passed; 0 failed`). The normal cargo-test job also proved `landlock_scope_unavailable_event_pins_stubbed_abi5_warning` and `landlock_scopes_drop_below_abi6_for_relaxed_floor` in the 123-test lib suite. TLA+ run `25028332412` also passed.
+- **Changes**: AC-87 is implemented by `src/runtime/sandbox/init_policy.rs` (cross-binary `landlock_scopes` bitmap constants), `src/runtime/sandbox/bwrap.rs` (ABI-aware scope-bit selection, enforce-mode ABI refusal inherited from AC-84/85, relaxed-floor `sandbox_scope_unavailable` warning payload, policy plumbing), `src/runtime/sandbox/landlock.rs` (raw ABI-6 `landlock_create_ruleset` / `landlock_restrict_self` scoped ruleset for `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL` while leaving filesystem Landlock on `landlock = 0.4`), `src/bin/pincery_init.rs` (scope install after filesystem Landlock), `.github/workflows/ci.yml` (adds `socat` and runs `landlock_scope_test` in privileged smoke), and `tests/landlock_scope_test.rs` (live abstract-socket denial and same-PID-namespace signal EPERM proof). `scaffolding/scope.md` and `scaffolding/design.md` were reconciled to match the implemented proof shape.
+- **Retries**: 0. The first AC-87 implementation run `25028176450` was already green on commit `9c63faa`; follow-up commit `a65e305` only added the pure ABI-5 warning-payload assertion and documentation reconciliation, then re-ran CI green.
+- **Next**: AC-87 VERIFY is closed; proceed to G0f / AC-88 (Landlock kernel audit integration) after normal context recovery.
+
 ## VERIFY v9 — Slice G0d / AC-86 final CI verification — 2026-04-27T23:24Z
 
 - **Gate**: PASS (attempt 3).
