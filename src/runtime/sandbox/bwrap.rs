@@ -30,7 +30,7 @@ use crate::config::{ResolvedSandboxMode, SandboxMode};
 
 use super::cgroup::CgroupGuard;
 use super::init_policy::SandboxInitPolicy;
-use super::landlock_layer::LandlockProfile;
+use super::landlock_layer::{LandlockProfile, LANDLOCK_SCOPE_ALL};
 use super::preflight::{KernelProbe, RealKernelProbe, LANDLOCK_ABI_FLOOR};
 use super::{is_rejected_pattern, ExecResult, SandboxProfile, ShellCommand, ToolExecutor};
 
@@ -159,11 +159,13 @@ fn build_init_policy_with_identity(
     cmd: &str,
     mode: SandboxMode,
     identity: SandboxIdentity,
+    landlock_scopes: u64,
 ) -> SandboxInitPolicy {
     let landlock = LandlockProfile::default_for_cwd(cwd);
     SandboxInitPolicy {
         landlock_rx_paths: landlock.rx_paths,
         landlock_rwx_paths: landlock.rwx_paths,
+        landlock_scopes,
         seccomp_bpf: Vec::new(),
         target_uid: identity.uid,
         target_gid: identity.gid,
@@ -174,17 +176,29 @@ fn build_init_policy_with_identity(
 
 #[cfg(test)]
 fn build_init_policy(cwd: &Path, cmd: &str, mode: SandboxMode) -> SandboxInitPolicy {
-    build_init_policy_with_identity(cwd, cmd, mode, SandboxIdentity::default())
+    build_init_policy_with_identity(
+        cwd,
+        cmd,
+        mode,
+        SandboxIdentity::default(),
+        LANDLOCK_SCOPE_ALL,
+    )
 }
 
-fn landlock_abi_below_required_floor() -> Option<String> {
-    let probe = RealKernelProbe;
-    match probe.landlock_abi() {
+fn landlock_abi_below_required_floor(landlock_abi: Option<u32>) -> Option<String> {
+    match landlock_abi {
         Some(found) if found >= LANDLOCK_ABI_FLOOR => None,
         Some(found) => Some(format!(
             "Landlock ABI {found} is below required ABI {LANDLOCK_ABI_FLOOR}"
         )),
         None => Some("Landlock unsupported: landlock_create_ruleset returned ENOSYS".into()),
+    }
+}
+
+fn landlock_scope_bits_for_abi(landlock_abi: Option<u32>) -> u64 {
+    match landlock_abi {
+        Some(found) if found >= LANDLOCK_ABI_FLOOR => LANDLOCK_SCOPE_ALL,
+        _ => 0,
     }
 }
 
@@ -498,7 +512,9 @@ impl ToolExecutor for RealSandbox {
         // from it during startup.
         let (_init_policy_fd, init_wiring): (Option<OwnedFd>, Option<PinceryInitWiring>) =
             if profile.landlock {
-                if let Some(reason) = landlock_abi_below_required_floor() {
+                let probe = RealKernelProbe;
+                let landlock_abi = probe.landlock_abi();
+                if let Some(reason) = landlock_abi_below_required_floor(landlock_abi) {
                     match self.sandbox.mode {
                         SandboxMode::Enforce => {
                             return ExecResult::Err(format!(
@@ -513,6 +529,16 @@ impl ToolExecutor for RealSandbox {
                                 mode = ?self.sandbox.mode,
                                 "landlock ABI below strict floor; proceeding in audit/disabled mode"
                             );
+                            if let Some(found) = landlock_abi {
+                                tracing::warn!(
+                                    target = "sandbox.landlock",
+                                    event = "sandbox_scope_unavailable",
+                                    landlock_abi = found,
+                                    required_abi = LANDLOCK_ABI_FLOOR,
+                                    mode = ?self.sandbox.mode,
+                                    "AC-87 Landlock IPC scopes unavailable on relaxed-floor kernel"
+                                );
+                            }
                         }
                     }
                 }
@@ -564,6 +590,7 @@ impl ToolExecutor for RealSandbox {
                         &cmd.command,
                         self.sandbox.mode,
                         sandbox_identity,
+                        landlock_scope_bits_for_abi(landlock_abi),
                     );
                     let policy_bytes = match policy.to_bytes() {
                         Ok(b) => b,
@@ -908,6 +935,22 @@ mod tests {
             policy.target_gid, 65534,
             "AC-86 target gid must be nogroup/nobody"
         );
+    }
+
+    #[test]
+    fn init_policy_requests_ac87_ipc_scopes() {
+        let policy = build_init_policy(Path::new("/tmp/work"), "true", SandboxMode::Enforce);
+        assert_eq!(
+            policy.landlock_scopes, LANDLOCK_SCOPE_ALL,
+            "AC-87 requires the wrapper policy to request abstract-socket and signal scopes"
+        );
+    }
+
+    #[test]
+    fn landlock_scopes_drop_below_abi6_for_relaxed_floor() {
+        assert_eq!(landlock_scope_bits_for_abi(Some(5)), 0);
+        assert_eq!(landlock_scope_bits_for_abi(None), 0);
+        assert_eq!(landlock_scope_bits_for_abi(Some(6)), LANDLOCK_SCOPE_ALL);
     }
 
     #[test]

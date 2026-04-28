@@ -37,13 +37,24 @@
 
 #![cfg(target_os = "linux")]
 
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 
+pub use crate::runtime::sandbox::init_policy::{
+    LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET, LANDLOCK_SCOPE_ALL, LANDLOCK_SCOPE_SIGNAL,
+};
 use landlock::{
     Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr,
     RulesetCreatedAttr, ABI,
 };
 pub use landlock::{RestrictionStatus, RulesetStatus};
+
+#[repr(C)]
+struct RawRulesetAttr {
+    handled_access_fs: u64,
+    handled_access_net: u64,
+    scoped: u64,
+}
 
 /// How strictly unsupported Landlock features should be handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,6 +218,68 @@ pub fn install_landlock(
     validate_restriction_status(status, compatibility)
 }
 
+/// Install ABI-6 Landlock IPC scopes on the calling thread.
+///
+/// `landlock = 0.4` only exposes Landlock features available as of
+/// Linux 5.19 and has no builder API for the ABI-6 `scoped` field.
+/// AC-87 therefore uses the raw ruleset syscall for this one bitmap
+/// while leaving the path-based filesystem ruleset on the safe crate
+/// API above. This creates a second Landlock layer with no path or
+/// network restrictions and only the requested IPC scopes.
+pub fn install_landlock_scopes(scopes: u64) -> Result<(), String> {
+    if scopes == 0 {
+        return Ok(());
+    }
+
+    let attr = RawRulesetAttr {
+        handled_access_fs: 0,
+        handled_access_net: 0,
+        scoped: scopes,
+    };
+
+    // SAFETY: `attr` points to a plain C-compatible value valid for
+    // the duration of the syscall; size matches the struct we pass.
+    let raw_fd = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            &attr as *const RawRulesetAttr,
+            std::mem::size_of::<RawRulesetAttr>(),
+            0u32,
+        )
+    };
+    if raw_fd < 0 {
+        return Err(format!(
+            "landlock create scoped ruleset failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    let raw_fd: i32 = raw_fd
+        .try_into()
+        .map_err(|_| format!("landlock scoped ruleset fd out of range: {raw_fd}"))?;
+    // SAFETY: `raw_fd` is a fresh kernel-allocated fd with no owner.
+    let ruleset_fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+
+    // SAFETY: pure kernel syscall on a valid ruleset fd. The wrapper
+    // has already set no_new_privs and is single-threaded at this
+    // point, matching the existing filesystem Landlock apply path.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_restrict_self,
+            ruleset_fd.as_raw_fd(),
+            0u32,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "landlock restrict scoped ruleset failed: {}",
+            std::io::Error::last_os_error()
+        ))
+    }
+}
+
 fn validate_restriction_status(
     status: RestrictionStatus,
     compatibility: LandlockCompatibility,
@@ -290,6 +363,14 @@ mod tests {
         // with various kernels) and CI. We're just pinning that the
         // probe is side-effect-free and returns *something*.
         let _ = landlock_supported();
+    }
+
+    #[test]
+    fn ac87_scope_bitmap_contains_abstract_socket_and_signal() {
+        assert_eq!(
+            LANDLOCK_SCOPE_ALL,
+            LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL
+        );
     }
 
     #[test]

@@ -42,7 +42,7 @@
 //!
 //! - AC-84 / Slice G0b: kernel ABI floor preflight field.
 //! - AC-85 / Slice G0c: `require_fully_enforced` becomes non-optional.
-//! - AC-87 / Slice G0e: `ipc_scopes` bitmap (Landlock ABI >= 6).
+//! - AC-87 / Slice G0e: `landlock_scopes` bitmap (Landlock ABI >= 6).
 //! - AC-88 / Slice G0f: `kernel_audit_log` toggle for
 //!   `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON`.
 
@@ -63,6 +63,16 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// Landlock ABI-6 scope bit for abstract UNIX domain sockets.
+/// Kept in the cross-platform policy module because it is part of
+/// the serialized parent-to-wrapper contract even though only Linux
+/// applies it.
+pub const LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET: u64 = 1 << 0;
+/// Landlock ABI-6 scope bit for signals.
+pub const LANDLOCK_SCOPE_SIGNAL: u64 = 1 << 1;
+/// All IPC scopes AC-87 requires in production enforce mode.
+pub const LANDLOCK_SCOPE_ALL: u64 = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL;
+
 /// Policy bytes crossed from parent -> pincery-init via a memfd.
 ///
 /// This struct is **exclusively** for cross-binary IPC. No other
@@ -77,6 +87,11 @@ use serde::{Deserialize, Serialize};
 ///   Paths are evaluated inside the sandbox namespace and must be
 ///   visible there (bwrap's `--ro-bind` / `--bind` arrangements
 ///   mirror these).
+/// - `landlock_scopes`: ABI-6 Landlock IPC scopes requested by the
+///   parent. `0` means scope flags are unavailable on the running
+///   kernel's Landlock ABI (only allowed in audit / relaxed-floor
+///   posture). Production enforce mode sends both abstract UNIX
+///   socket and signal scopes (AC-87).
 /// - `seccomp_bpf`: a raw `sock_filter[]` byte blob already produced
 ///   by `seccompiler`. The wrapper passes it straight to
 ///   `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ...)` after
@@ -100,6 +115,7 @@ use serde::{Deserialize, Serialize};
 pub struct SandboxInitPolicy {
     pub landlock_rx_paths: Vec<PathBuf>,
     pub landlock_rwx_paths: Vec<PathBuf>,
+    pub landlock_scopes: u64,
     pub seccomp_bpf: Vec<u8>,
     pub target_uid: u32,
     pub target_gid: u32,
@@ -166,6 +182,7 @@ mod tests {
                 PathBuf::from("/proc"),
                 PathBuf::from("/tmp/workspace-abc123"),
             ],
+            landlock_scopes: LANDLOCK_SCOPE_ALL,
             // A nonempty but syntactically arbitrary BPF blob stands
             // in for a real seccompiler output — round-trip does not
             // interpret it.
@@ -194,6 +211,7 @@ mod tests {
         let original = SandboxInitPolicy {
             landlock_rx_paths: vec![],
             landlock_rwx_paths: vec![],
+            landlock_scopes: 0,
             seccomp_bpf: vec![],
             target_uid: 0,
             target_gid: 0,

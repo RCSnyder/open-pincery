@@ -25,6 +25,9 @@
 //!   `runtime::sandbox::landlock_layer::install_landlock`, placed
 //!   BEFORE seccomp so the filter does not need to allow the
 //!   `landlock_*` syscalls. Gate on at least one rx/rwx path.
+//! - G0e / AC-87 (this slice): install Landlock ABI-6 IPC scopes
+//!   (`LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL`)
+//!   when requested by the parent policy.
 //! - G0a.3e (shipped): if `policy.require_fully_enforced` is
 //!   `true`, verify that every requested layer actually enforced:
 //!   landlock status is `RestrictionStatus { ruleset: FullyEnforced,
@@ -617,7 +620,8 @@ mod linux {
     ) -> Result<Option<open_pincery::runtime::sandbox::landlock_layer::RestrictionStatus>, InitError>
     {
         use open_pincery::runtime::sandbox::landlock_layer::{
-            install_landlock, LandlockCompatibility, LandlockProfile, RulesetStatus,
+            install_landlock, install_landlock_scopes, LandlockCompatibility, LandlockProfile,
+            RulesetStatus,
         };
 
         if policy.landlock_rx_paths.is_empty() && policy.landlock_rwx_paths.is_empty() {
@@ -637,6 +641,8 @@ mod linux {
         };
         let mut status = install_landlock(&profile, compatibility)
             .map_err(|e| InitError::ApplyPolicy(format!("landlock: {e}")))?;
+        install_landlock_scopes(policy.landlock_scopes)
+            .map_err(|e| InitError::ApplyPolicy(format!("landlock scopes: {e}")))?;
 
         // Test-only override: force a PartiallyEnforced observation
         // for the FullyEnforced verify negative case. Requires BOTH
@@ -910,10 +916,11 @@ mod linux {
     fn log_policy_summary(policy: &SandboxInitPolicy) {
         eprintln!(
             "pincery-init: parsed policy rx_paths={} rwx_paths={} \
-             seccomp_bytes={} target_uid={} target_gid={} \
+             landlock_scopes={} seccomp_bytes={} target_uid={} target_gid={} \
              require_fully_enforced={} user_argv_len={}",
             policy.landlock_rx_paths.len(),
             policy.landlock_rwx_paths.len(),
+            policy.landlock_scopes,
             policy.seccomp_bpf.len(),
             policy.target_uid,
             policy.target_gid,
