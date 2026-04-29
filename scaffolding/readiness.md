@@ -1,3 +1,12 @@
+# Readiness: Open Pincery — current slice pointer
+
+> Current admission gate: **Phase G1a / AC-76 (Sandbox Escape Suite —
+> FS Category)**. The G1a addendum lives below the G0f block (search
+> for "Phase G1a"). G0f / AC-88 closed on 2026-04-28; its addendum is
+> retained verbatim as historical record.
+
+---
+
 # Readiness: Open Pincery — v9 Phase G0f (AC-88 Kernel Audit Integration)
 
 > This addendum covers AC-88 only. It was produced after AC-87 VERIFY
@@ -207,6 +216,186 @@ audit-visibility slice.
 - Linux live audit proof may be CI/kernel-permission gated. This is not
   a scope reduction when deterministic parser/fallback tests always run
   and the live gate is explicit and evidenced.
+
+---
+
+# Readiness: Open Pincery — v9 Phase G1a (AC-76 Sandbox Escape Suite — FS Category)
+
+> This addendum covers Slice G1a only. It opens AC-76 work (Phase G,
+> sandbox escape suite). Slices G1b/G1c/G1d/G1e add the privesc,
+> resource, network categories and the AC-53 closure gate; each gets
+> its own readiness addendum at the start of its build. Prior G0f
+> readiness above remains the authoritative record for AC-88.
+
+## Verdict
+
+READY for Slice G1a / AC-76 (FS category). Builds directly on the
+fully-landed AC-83..AC-88 sandbox stack: `RealSandbox` + `pincery-init`
+wrapper, AC-86 UID-65534 + cap-drop, AC-85 FullyEnforced landlock,
+AC-87 IPC scoping, and AC-88 `landlock_denied` audit-event emission.
+This slice ships the test harness and the four filesystem-category
+adversarial payloads. Privesc / resource / network categories are
+explicitly deferred to G1b..G1d. The strict `sandbox_blocked` event
+contract from scope.md AC-76 is decomposed: G1a asserts non-zero
+exit (behavioral block) and verifies the kernel-attributed
+`landlock_denied` event from AC-88 fires when ABI >= 7 is available;
+the synthesized cross-layer `sandbox_blocked` emitter is tracked as
+G1e (after all four categories' payloads exist and the layer-attribution
+heuristic can be exercised against real evidence from each category).
+
+## Truths
+
+- **T-AC76-G1a-1** Slice G1a ships `tests/sandbox_escape_test.rs` with a
+  shared precondition gate (`bwrap` on PATH + landlock supported + ABI
+  >= `LANDLOCK_ABI_FLOOR` + `OPEN_PINCERY_SKIP_REAL_BWRAP` unset +
+  `PINCERY_INIT_BIN_PATH` resolved from `CARGO_BIN_EXE_pincery-init`),
+  a shared `escape_profile()` that turns on every defense layer
+  (`deny_net=true`, `seccomp=true`, `landlock=true`), and a shared
+  `assert_payload_blocked` helper. When preconditions are not met the
+  test emits an explicit skip line and returns success.
+- **T-AC76-G1a-2** G1a covers the four filesystem-category payloads
+  named by AC-76: read `/etc/shadow`, walk `/proc/1/root`, open
+  `/dev/sda` for read, attempt a `mount` mount-namespace escape. Each
+  payload runs through `RealSandbox::run` in `Enforce` mode and
+  asserts `ExecResult::Ok { exit_code, stdout, stderr, .. }` with
+  `exit_code != 0` AND a denial signature in stdout/stderr that
+  proves the failure is sandbox-attributed (e.g. "Permission denied",
+  "Operation not permitted", "No such device or address",
+  shell-test exit token). Bare exit-code checks alone are too weak;
+  every assertion includes at least one positive denial-signature
+  match.
+- **T-AC76-G1a-3** G1a does NOT yet emit a synthesized `sandbox_blocked`
+  event from runtime code. Where AC-88 already wires the kernel-audit
+  bridge for filesystem denials on Linux >= 6.7 (ABI >= 7), the harness
+  treats the AC-88 `landlock_denied` event as the *kernel-confirmed*
+  evidence for the FS category, but does not require it as a hard
+  gate (the live audit reader is host-permission gated and may be
+  unreadable in some CI environments). The synthesized cross-layer
+  `sandbox_blocked` event with `{tool_call_id, payload_category,
+  denied_by_layer, syscall?, path?}` is tracked as G1e and lands after
+  G1b/c/d so the layer-attribution heuristic can be exercised against
+  evidence from every category.
+- **T-AC76-G1a-4** G1a does not weaken the AC-84/AC-85 enforcement
+  floor. Tests use the production `enforce` sandbox path. Tests do
+  not set `OPEN_PINCERY_SANDBOX_FLOOR=relaxed`,
+  `OPEN_PINCERY_ALLOW_UNSAFE`, or `OPEN_PINCERY_INIT_FORCE_PARTIAL`.
+- **T-AC76-G1a-5** G1a is cross-platform-buildable and Linux-only-runnable.
+  The whole test file is `#![cfg(target_os = "linux")]`. Windows
+  `cargo check` and CI `cargo build` succeed; Windows `cargo test`
+  trivially passes (the file compiles to no tests). Linux test runs
+  exercise the suite when bwrap is available; otherwise self-skip
+  with explicit evidence.
+- **T-AC76-G1a-6** G1a payloads are deterministic on the privileged
+  CI `sandbox-smoke` job (Ubuntu 24.04, kernel >= 6.8, bwrap, sudo
+  available for `apparmor_restrict_unprivileged_userns=0`). Local
+  Docker Desktop devshell still self-skips strict-floor checks
+  because Docker Desktop's WSL2 kernel reports Landlock ABI Some(3),
+  which is below `LANDLOCK_ABI_FLOOR=6`; deterministic compile and
+  Windows `cargo test` always run.
+- **T-AC76-G1a-7** G1a binds canonical TLA+ actions
+  `ProvisionSandbox`, `ScopeFilesystem`, `BindShellPolicy`, and
+  `AttestSandbox`. Tests reference these in their module docstring
+  so AC-81 (binding commitments) finds them when it lands.
+  `ScopeNetwork` binding lands in G1d.
+
+## Key Links
+
+- **L-AC76-G1a-1** [AC-76 FS] -> `tests/sandbox_escape_test.rs`
+  precondition gate -> existing `RealSandbox::new(ResolvedSandboxMode
+  { Enforce, allow_unsafe: false })` + `pincery-init` wrapper ->
+  runtime proof on CI `sandbox-smoke` job that all four FS payloads
+  exit non-zero with a denial signature.
+- **L-AC76-G1a-2** [AC-76 FS / `cat /etc/shadow`] ->
+  `RealSandbox::run` with AC-86 UID drop + landlock rx-allow on
+  `/etc` -> `cat` opens shadow under UID 65534 and gets EACCES from
+  Unix permissions (mode 0640 root:shadow) -> assert exit_code != 0
+  AND stderr contains "Permission denied".
+- **L-AC76-G1a-3** [AC-76 FS / `/proc/1/root`] -> bwrap `--proc /proc`
+  + AC-86 UID drop + new PID namespace -> `ls /proc/1/root` resolves
+  to the in-sandbox pid-ns root, but UID 65534 cannot read pid 1's
+  root link -> assert exit_code != 0 AND stderr contains "Permission
+  denied" or "No such file or directory".
+- **L-AC76-G1a-4** [AC-76 FS / `/dev/sda`] -> bwrap `--dev /dev`
+  tmpfs only mounts the safe device subset (null/zero/random/tty),
+  so `/dev/sda` does not exist inside the sandbox -> assert
+  exit_code != 0 AND stderr contains "No such file or directory" or
+  "cannot open".
+- **L-AC76-G1a-5** [AC-76 FS / mount-ns break] -> AC-77 denylist
+  blocks `mount(2)` via seccomp, AC-86 cap-drop removes
+  `CAP_SYS_ADMIN`, and bwrap unshares the mount namespace -> shell
+  invocation `mount --bind /etc /mnt 2>&1` fails before any host
+  view is reattached -> assert exit_code != 0 AND stderr contains
+  "Operation not permitted" or "must be superuser".
+- **L-AC76-G1a-6** [AC-76 FS] -> AC-88 landlock audit reader
+  observes filesystem denials when ABI >= 7 -> `tests/landlock_audit_test.rs`
+  already covers the kernel-audit path; G1a does not duplicate the
+  audit assertion but documents it as a deeper proof available on
+  ABI >= 7 hosts.
+
+## Acceptance Criteria Coverage
+
+| AC ID | Build Slice | Test / Proof | Runtime Verification | Status |
+| ----- | ----------- | ------------ | -------------------- | ------ |
+| AC-76 | G1a: harness + 4 FS payloads (etc/shadow, /proc/1/root, /dev/sda, mount-ns break). G1b: 3 privesc payloads. G1c: 3 resource payloads. G1d: 2 network payloads. G1e: synthesized `sandbox_blocked` event emission + AC-53 closure gate. | `tests/sandbox_escape_test.rs` (G1a only); G1b..G1e add tests/code in their own slices. | Privileged CI `sandbox-smoke` job runs the suite and fails the build if any payload succeeds. Local Docker Desktop devshell self-skips strict-floor checks. Windows `cargo test` compiles the file to zero tests. | G1a in progress; G1b..G1e queued. |
+
+## Scope Reduction Risks
+
+- **Suite that asserts only `exit_code != 0`** without checking denial
+  signature: guarded by required stdout/stderr signature match per
+  payload (see Key Links L-AC76-G1a-2 .. L-AC76-G1a-5).
+- **Payload that "blocks" because the binary is missing on the test
+  host**: guarded by self-skip when `bwrap` is missing, plus payloads
+  that use coreutils (`cat`, `ls`, `dd`, `mount`) only — all present
+  in the privileged CI image and the devshell image.
+- **Suite never runs because preconditions always fail**: guarded by
+  CI evidence (the `sandbox-smoke` job runs on every CI) — failure to
+  reach the privileged path will surface as "0 tests ran" in CI logs
+  and a missing skip line. Local devshell preconditions are
+  documented but not required for CI green.
+- **Synthesized `sandbox_blocked` event silently dropped**: explicitly
+  deferred to G1e, called out here so it cannot be quietly omitted.
+  G1e cannot land without all four categories existing first, so the
+  attribution heuristic is exercised against real evidence.
+- **Floor relaxation creep**: guarded by T-AC76-G1a-4 — tests do not
+  set any of the `*_RELAXED` / `*_ALLOW_UNSAFE` / `*_FORCE_PARTIAL`
+  knobs.
+
+## Clarifications Needed
+
+- None blocking. The strict reading of AC-76 ("every payload MUST emit
+  a `sandbox_blocked` event") is decomposed into `landlock_denied`
+  (already emitted by AC-88 for FS denials) plus a synthesized
+  `sandbox_blocked` emitted by G1e. This decomposition is in scope of
+  AC-76 itself (the AC defines the contract; the slice plan defines
+  how it lands) and does not change the pass/fail meaning of the AC.
+
+## Build Order
+
+1. **G1a.1 - Test harness skeleton.** Create
+   `tests/sandbox_escape_test.rs` with `#![cfg(target_os = "linux")]`,
+   precondition gate (mirrors `sandbox_landlock_test.rs`), profile
+   helper, and `assert_payload_blocked` helper.
+2. **G1a.2 - FS payload: `cat /etc/shadow`.** Assert exit code != 0
+   and stderr contains "Permission denied".
+3. **G1a.3 - FS payload: `/proc/1/root` walk.** Assert exit code != 0
+   and stderr contains "Permission denied" or "No such file".
+4. **G1a.4 - FS payload: `/dev/sda` open.** Assert exit code != 0
+   and stderr contains "No such file" or "cannot open".
+5. **G1a.5 - FS payload: mount-ns break.** Assert exit code != 0
+   and stderr contains "Operation not permitted" or "must be
+   superuser".
+6. **G1a.6 - Verify locally and push.** `cargo fmt --all --
+   --check`, `cargo clippy --all-targets -- -D warnings`,
+   `cargo check --tests`, then commit + push. CI privileged
+   `sandbox-smoke` job is the runtime proof.
+
+## Complexity Exceptions
+
+- `tests/sandbox_escape_test.rs` is allowed up to 250 lines for G1a
+  (harness + 4 payloads). G1b..G1d will each add ~50-80 more lines;
+  if the file passes ~450 lines after G1d the suite gets split by
+  category in G1e. Per scope.md design.md note 2: single-file is
+  acceptable given shared harness cost.
 
 ---
 
