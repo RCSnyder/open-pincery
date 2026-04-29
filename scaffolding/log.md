@@ -1,5 +1,13 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — Slice G1a / AC-76 sandbox escape suite (FS category) — 2026-04-29T00:00Z
+
+- **Gate**: PASS (attempt 1). Post-build admission gate met locally; CI privileged sandbox-smoke job is the runtime proof.
+- **Evidence**: Windows `cargo fmt --all -- --check` and `cargo clippy --all-targets -- -D warnings` both exit 0; Linux devshell `cargo clippy --all-targets -- -D warnings` exits 0; Linux devshell `cargo test --test sandbox_escape_test -- --test-threads=1 --nocapture` reports `4 passed; 0 failed` with all four payloads self-skipping with explicit "Landlock ABI below AC-84/AC-85 strict floor 6" evidence (Docker Desktop WSL2 reports Some(3)). Test file added at `tests/sandbox_escape_test.rs`, scoped to the four FS-category payloads named by AC-76: `cat /etc/shadow`, `ls /proc/1/root`, `dd if=/dev/sda`, `mount --bind`. Each payload asserts non-zero exit AND a kernel/coreutils denial signature in stdout/stderr; bare `exit=N` tokens are deliberately excluded so a missing binary or shell syntax error cannot pass for a block.
+- **Changes**: New `tests/sandbox_escape_test.rs` (~210 lines) with shared precondition gate, `escape_profile()` (all defenses on), `assert_payload_blocked` helper, and four FS payload tests. Readiness addendum opens AC-76 / Slice G1a with explicit decomposition: G1a covers FS only; privesc/resource/network defer to G1b/c/d; the synthesized cross-layer `sandbox_blocked` event defers to G1e once the layer-attribution heuristic can be exercised against real evidence from every category.
+- **Retries**: 1 self-review tightening — initial signature lists included bare `exit=1`/`exit=2`/`exit=32` tokens that would have let payloads pass without observing a real denial diagnostic; tightened to kernel/coreutils messages only before commit.
+- **Next**: Commit and push, capture CI privileged sandbox-smoke evidence, then start G1b (privesc payloads).
+
 ## VERIFY v9 — Slice G0f / AC-88 final CI evidence — 2026-04-28T12:25Z
 
 - **Gate**: PASS (attempt 3). AC-88 is now verified on the pushed repair head `f14d9c03139bc7728eca1b2f06ef7b5da80b1e7d`.
