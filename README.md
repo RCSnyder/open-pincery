@@ -193,22 +193,25 @@ to the container immediately. Build artifacts are written to
 `target/devshell/` to avoid colliding with any host Rust toolchain used
 for editor integration.
 
-If you want native Rust artifacts off the system drive, set Cargo's
-standard target override before you build:
+If your shell inherited an old target directory, pin native Rust
+artifacts to this checkout before you build:
 
 ```powershell
-$env:CARGO_TARGET_DIR = 'E:\open-pincery-target\native'
+$env:CARGO_TARGET_DIR = Join-Path (Get-Location) 'target\local-check'
 cargo test
 ```
 
 The devshell wrappers also support a separate host-side cache directory.
-On Windows, this keeps the container-backed cargo cache on `E:\` while
-leaving the repo checkout where it is:
+On Windows, this keeps the container-backed cargo cache under the repo
+checkout while leaving native host artifacts separate:
 
 ```powershell
-$env:OPEN_PINCERY_DEVSHELL_HOST_TARGET_DIR = 'E:\open-pincery-target\devshell'
+$env:OPEN_PINCERY_DEVSHELL_HOST_TARGET_DIR = Join-Path (Get-Location) 'target\devshell'
 .\scripts\devshell.ps1 cargo test
 ```
+
+You can still replace either value with another absolute path if you
+intentionally want build artifacts on a different drive.
 
 CI runs `tests/devshell_parity_test.rs` to confirm the wrapper,
 `Dockerfile.devshell`, and runbooks stay in sync.

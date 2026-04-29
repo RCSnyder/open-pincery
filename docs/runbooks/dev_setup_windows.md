@@ -65,27 +65,28 @@ Build artifacts land in `.\target\devshell\` on the host (separate from
 a native `.\target` so you can keep a host Rust toolchain around for
 editor integration without cache collisions).
 
-## Keeping heavy artifacts off `C:`
+## Pinning build artifacts to this checkout
 
 Use Cargo's native target override for any host-side Rust build you run
-outside the devshell, including rust-analyzer's background `cargo check`:
+outside the devshell, including rust-analyzer's background `cargo check`.
+This also clears stale shells that still point at an unplugged drive:
 
 ```powershell
-$env:CARGO_TARGET_DIR = 'E:\open-pincery-target\native'
+$env:CARGO_TARGET_DIR = Join-Path (Get-Location) 'target\local-check'
 cargo test
 ```
 
-The devshell wrapper has its own host-side override. Point it at a
-directory on `E:\` and the wrapper bind-mounts that path into the
-container as Cargo's target directory:
+The devshell wrapper has its own host-side override. Point it at the
+repo-local devshell target directory and the wrapper bind-mounts that
+path into the container as Cargo's target directory:
 
 ```powershell
-$env:OPEN_PINCERY_DEVSHELL_HOST_TARGET_DIR = 'E:\open-pincery-target\devshell'
+$env:OPEN_PINCERY_DEVSHELL_HOST_TARGET_DIR = Join-Path (Get-Location) 'target\devshell'
 .\scripts\devshell.ps1 cargo test
 ```
 
-That moves repo-controlled build artifacts off the system drive without
-changing the checkout path.
+You can replace either value with another absolute path if you
+intentionally want repo-controlled build artifacts on a different drive.
 
 ### Persist the override for every shell
 
@@ -97,17 +98,23 @@ once:
 
 ```powershell
 # Run in PowerShell; requires no admin rights.
-setx CARGO_TARGET_DIR "E:\open-pincery-target\native"
-setx OPEN_PINCERY_DEVSHELL_HOST_TARGET_DIR "E:\open-pincery-target\devshell"
+$RepoRoot = (Get-Location).Path
+$NativeTarget = Join-Path $RepoRoot 'target\local-check'
+$DevshellTarget = Join-Path $RepoRoot 'target\devshell'
+setx CARGO_TARGET_DIR $NativeTarget
+setx OPEN_PINCERY_DEVSHELL_HOST_TARGET_DIR $DevshellTarget
 New-Item -ItemType Directory -Force -Path `
-  'E:\open-pincery-target\native', `
-  'E:\open-pincery-target\devshell' | Out-Null
+  $NativeTarget, `
+  $DevshellTarget | Out-Null
 ```
 
 `setx` writes to `HKCU\Environment`, so **new** shells (PowerShell, cmd,
 Git Bash, VS Code integrated terminals) inherit the values. Existing
 shells and a running VS Code need to be restarted before they see the
-change. Once the new shell is up, reclaim the old cache on `C:` with:
+change. If you previously used another drive, reclaim the old cache from
+that drive after confirming no current shell points at it.
+
+If you want to clear the repo-local cache later, run:
 
 ```powershell
 Remove-Item -Recurse -Force .\target
