@@ -293,18 +293,24 @@ async fn privesc_setuid_exec_blocked() {
     assert_payload_blocked(
         "privesc/setuid-exec",
         // `su -c 'id -u'` is the canonical setuid escalation probe;
-        // we fall through to `sudo` and `passwd` if `su` is missing.
-        // The trailing `id -u` proves the running uid; it MUST stay
-        // at 65534 (or the candidate binaries MUST all refuse / be
-        // absent). `2>&1` so refusal diagnostics reach stdout.
+        // we fall through to `passwd --status` if `su` is missing.
+        // (`sudo` is excluded: the sandbox preflight rejects any
+        // command containing `sudo` before exec — itself a valid
+        // and stronger block, but it short-circuits this runtime
+        // probe via `ExecResult::Rejected` before we can observe a
+        // denial signature.) The trailing `id -u` proves the
+        // running uid; it MUST stay at 65534 (or the candidate
+        // binaries MUST all refuse / be absent). `2>&1` so refusal
+        // diagnostics reach stdout. We force a non-zero exit so the
+        // shared `assert_payload_blocked` non-zero-exit guard fires;
+        // signature match then proves the block.
         "(su -c 'id -u' 2>&1 || \
-          sudo -n id -u 2>&1 || \
           passwd --status 2>&1 || \
-          (echo \"all setuid candidates refused/absent\" && false)); \
+          echo \"all setuid candidates refused/absent\"); \
          id_after=$(id -u); \
          echo \"final-uid=$id_after\"; \
-         test \"$id_after\" -eq 0 && exit 1; \
-         exit 0",
+         test \"$id_after\" -eq 0 && exit 0; \
+         exit 1",
         &[
             "must be run from a terminal",
             "permission denied",
@@ -341,14 +347,16 @@ async fn privesc_cap_sys_admin_blocked() {
         "privesc/cap-sys-admin",
         // Try chroot first (the most direct CAP_SYS_ADMIN-adjacent
         // primitive); fall through to unshare's map-root-user. If
-        // both fail with EPERM the test passes; if either succeeds
-        // (returns 0) we EXIT 1 to surface the escape.
+        // either succeeds we EXIT 0 so the shared assertion's
+        // non-zero-exit guard fires (escape!). If both denied we
+        // EXIT 1 with the "both privileged probes denied" tag so
+        // the assertion's non-zero+signature check passes.
         "if chroot /tmp /bin/true 2>&1; then \
-           echo \"escape: chroot succeeded\"; exit 1; \
+           echo \"escape: chroot succeeded\"; exit 0; \
          elif unshare --user --map-root-user /bin/true 2>&1; then \
-           echo \"escape: map-root-user succeeded\"; exit 1; \
+           echo \"escape: map-root-user succeeded\"; exit 0; \
          else \
-           echo \"both privileged probes denied\"; exit 0; \
+           echo \"both privileged probes denied\"; exit 1; \
          fi",
         &[
             "operation not permitted",
@@ -356,6 +364,7 @@ async fn privesc_cap_sys_admin_blocked() {
             "must be superuser",
             "bad system call",
             "only root can",
+            "no space left on device",
             "both privileged probes denied",
         ],
     )
@@ -390,6 +399,12 @@ async fn privesc_user_ns_elevation_blocked() {
             "must be superuser",
             "bad system call",
             "no such file or directory",
+            // `unshare(2)` returning ENOSPC is the kernel refusing
+            // to create another user namespace (per-user limit /
+            // userns-restrict). That is a valid block — the
+            // payload could not even enter the new userns to chain
+            // mount(2).
+            "no space left on device",
             "only root can",
         ],
     )
