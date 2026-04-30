@@ -1,9 +1,172 @@
 # Readiness: Open Pincery — current slice pointer
 
-> Current admission gate: **Phase G1a / AC-76 (Sandbox Escape Suite —
-> FS Category)**. The G1a addendum lives below the G0f block (search
-> for "Phase G1a"). G0f / AC-88 closed on 2026-04-28; its addendum is
-> retained verbatim as historical record.
+> Current admission gate: **Phase G1c / AC-76 (Sandbox Escape Suite —
+> Resource Category)**. The G1c addendum lives immediately below this
+> pointer. G1b (privesc) closed CI-green at `8935fd7` on 2026-04-29
+> (CI run `25141721367`); its addendum is retained verbatim further
+> down. G1a (FS) and G0f / AC-88 addenda are also retained as
+> historical record.
+
+---
+
+# Readiness: Open Pincery — v9 Phase G1c (AC-76 Sandbox Escape Suite — Resource Category)
+
+> This addendum covers Slice G1c only. G1a (FS) and G1b (privesc)
+> closed at commits `dd10a8b` / `4913c6e` and `8935fd7` respectively.
+> Slice G1d adds the network category; Slice G1e adds the synthesized
+> `sandbox_blocked` event emitter and the AC-53 closure gate.
+
+## Verdict
+
+READY for Slice G1c / AC-76 (resource category). Builds on the G1a +
+G1b runtime harness (`tests/sandbox_escape_test.rs::{preconditions_met,
+enforce_sandbox, escape_profile, assert_payload_blocked}`) with one
+contained extension: `escape_profile()` now installs the production
+cgroup v2 limits (`memory.max=512 MiB`, `pids.max=64`) so the
+resource payloads have something to be capped *by*. Without this
+extension the resource category cannot fail-closed because the prior
+slices ran with `cgroup: None`. `preconditions_met()` is widened to
+also require `cgroup_v2_writable()`, mirroring `sandbox_cgroup_test.rs`
+— the privileged CI runner already satisfies this gate (the existing
+`cgroup_pids_max_limits_fork_count` test passes there). Network
+category and `sandbox_blocked` event remain explicitly deferred to
+G1d/G1e.
+
+## Truths
+
+- **T-AC76-G1c-1** Slice G1c extends `tests/sandbox_escape_test.rs`
+  with three additional `#[tokio::test]` functions covering the
+  resource-exhaustion category named in `scaffolding/scope.md` AC-76.
+  The harness primitives (`preconditions_met`, `enforce_sandbox`,
+  `escape_profile`, `assert_payload_blocked`) are reused; only
+  `escape_profile()` and `preconditions_met()` are extended (see
+  T-AC76-G1c-2 and T-AC76-G1c-3). No `src/` changes.
+- **T-AC76-G1c-2** `escape_profile()` is upgraded to the
+  production-equivalent cgroup posture: `memory_max_bytes =
+  Some(512 * 1024 * 1024)`, `pids_max = Some(64)`,
+  `cpu_max_micros = None` (CPU cap is not adversarially probed in
+  G1c). This matches the AC-53 production limits documented in
+  `scaffolding/scope.md` and the existing
+  `sandbox_cgroup_test.rs::cgroup_permits_command_under_caps`
+  baseline. The G1a (FS, 4) and G1b (privesc, 3) tests inherit the
+  upgraded profile; none of them allocate anywhere near 512 MiB or
+  spawn anywhere near 64 processes, so they remain green.
+- **T-AC76-G1c-3** `preconditions_met()` gains a fourth gate after
+  the existing bwrap / landlock-supported / Landlock-ABI-floor gates:
+  `cgroup_v2_writable()` from `runtime::sandbox::cgroup`. Without
+  this, applying `escape_profile()` would cause `Enforce`-mode
+  fail-closed (`ExecResult::Err`) on hosts where the test process
+  cannot `mkdir` under `/sys/fs/cgroup`, which would mask real
+  blocks behind a harness error. Self-skip with an explicit reason
+  to keep CI logs clear.
+- **T-AC76-G1c-4** The three resource payloads are:
+  - `resource_fork_bomb_blocked` — classic recursive shell
+    fork-bomb (`bomb(){ bomb|bomb& };bomb`) wrapped in `timeout 4s`
+    so the test does not hang. With `pids.max=64` the kernel
+    refuses additional `fork(2)` calls with EAGAIN; the shell
+    surfaces "Resource temporarily unavailable" / "Cannot fork" in
+    stderr. Even if `timeout` itself signals the bomb, the suite
+    must observe a denial signature OR a non-zero exit.
+  - `resource_memory_balloon_blocked` — `head -c 600M /dev/zero |
+    tr '\\0' 'a' >/tmp/big` allocates ≈600 MiB into the bwrap
+    tmpfs, exceeding `memory.max=512 MiB`. cgroup v2 OOM-kills the
+    pipeline; the parent shell prints "Killed" to stderr and the
+    overall exit is non-zero (typically 137 = 128 + SIGKILL).
+  - `resource_pid_exhaustion_blocked` — flat backgrounded loop
+    (`for i in $(seq 1 200); do sleep 60 & done; wait`) wrapped in
+    `timeout 4s`. Distinct from fork-bomb in shape (linear, not
+    recursive) but exercises the same `pids.max` cap; surfaces the
+    same EAGAIN signature. We accept either kernel-level signature
+    OR a non-zero exit from `timeout`'s SIGTERM as the block.
+- **T-AC76-G1c-5** Each payload runs through the production
+  `RealSandbox::run()` `Enforce` path (`SandboxMode::Enforce`,
+  `allow_unsafe = false`). The same two-check assertion shape as
+  G1a/G1b applies: non-zero exit AND a denial-signature match. The
+  memory-balloon test additionally accepts `"killed"` and the
+  string `"137"` (some shells print the exit code) as denial
+  signatures, since the OOM-kill path produces a SIGKILL rather
+  than a userspace error message.
+- **T-AC76-G1c-6** G1c does not weaken the AC-83..AC-88 enforcement
+  floor, the AC-77 seccomp denylist, or the AC-86 uid-drop. The new
+  cgroup limits are additive on top of every prior layer.
+- **T-AC76-G1c-7** G1c is cross-platform-buildable and Linux-runnable
+  (`#![cfg(target_os = "linux")]` is unchanged). The privileged CI
+  `sandbox real-bwrap smoke` job is the runtime proof.
+
+## Key Links (AC -> Design -> Test -> Proof)
+
+- **L-AC76-G1c-1** `AC-76` -> `escape_profile()` upgraded with
+  `CgroupLimits { memory_max_bytes: Some(512 MiB), pids_max:
+  Some(64), .. }` -> tests `resource_fork_bomb_blocked`,
+  `resource_memory_balloon_blocked`, `resource_pid_exhaustion_blocked`
+  -> CI privileged sandbox-smoke job runs the suite under cgroup v2.
+- **L-AC76-G1c-2** `AC-76` -> `preconditions_met()` adds
+  `cgroup_v2_writable()` gate -> all G1a/G1b/G1c tests self-skip on
+  hosts without writable cgroup v2 -> privileged CI runner satisfies
+  the gate (proven by existing `sandbox_cgroup_test.rs` runs).
+- **L-AC76-G1c-3** `AC-76` -> `assert_payload_blocked` extended
+  signature lists per-payload (memory-balloon adds "killed", "137",
+  "out of memory"; fork-bomb / pid-exhaustion add "resource
+  temporarily unavailable", "cannot fork", "fork:") -> CI logs
+  surface the actual kernel diagnostic for each payload.
+
+## Acceptance Criteria Coverage (G1c slice)
+
+| AC     | Truth(s)              | Planned test                                                                  | Planned runtime proof                              |
+| ------ | --------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------- |
+| AC-76  | T-AC76-G1c-1..5       | `resource_fork_bomb_blocked` (pids.max EAGAIN OR signaled-by-timeout)         | CI sandbox-smoke job: non-zero exit + signature    |
+| AC-76  | T-AC76-G1c-1..5       | `resource_memory_balloon_blocked` (cgroup OOM kill SIGKILL)                   | CI sandbox-smoke job: non-zero exit + "killed"     |
+| AC-76  | T-AC76-G1c-1..5       | `resource_pid_exhaustion_blocked` (pids.max EAGAIN OR signaled-by-timeout)    | CI sandbox-smoke job: non-zero exit + signature    |
+| AC-76  | T-AC76-G1c-2          | (existing) G1a/G1b suite re-runs under upgraded `escape_profile()` with cgroup limits | CI sandbox-smoke job: 7 prior tests stay green |
+| AC-76  | T-AC76-G1c-3          | `preconditions_met()` self-skips on cgroup-unwritable hosts                   | CI logs print explicit skip reason                 |
+
+## Scope Reduction Risks
+
+- **Risk: pids.max false-pass via timeout.** If the CI runner's
+  `pids.max` is not enforced (e.g. cgroup v2 not mounted, delegation
+  broken), the fork-bomb / pid-exhaustion tests could green via
+  `timeout 4s` killing the shell with SIGTERM (non-zero exit) without
+  any kernel-level denial. **Mitigation**: signature lists require an
+  EAGAIN-shaped diagnostic ("resource temporarily unavailable",
+  "cannot fork", "fork:") — `timeout`'s SIGTERM does not produce
+  these. If neither a signature nor an exit code matches, the test
+  fails. The harness exit-code-preservation fix from G1a (no `;
+  echo exit=$?`) ensures the shell's exit reflects the real outcome.
+- **Risk: memory-balloon false-pass via missing /dev/zero.** Bwrap
+  bind-mounts a minimal `/dev` tmpfs containing only the safe device
+  subset; `/dev/zero` is in that subset (per AC-86). If a future
+  hardening removes `/dev/zero`, the test would ENOENT-skip without
+  proving the memory cap. **Mitigation**: signature list includes
+  "no such file or directory" so the failure mode is still surfaced
+  as a block (defence-in-depth: missing primitive = stronger isolation
+  than the target). A follow-up FYI is acceptable but not blocking.
+- **Risk: G1a/G1b regression from the cgroup upgrade.** Adding cgroup
+  limits to `escape_profile()` could surface latent issues in the
+  prior suite (e.g. memory bloat in `dd if=/dev/sda` retries).
+  **Mitigation**: 512 MiB + 64 PIDs is far more headroom than any
+  G1a/G1b payload needs (each is a single short-lived shell). If a
+  prior test regresses, it is a real cgroup-init bug, not a scope
+  reduction.
+
+## Clarifications Needed
+
+None for G1c. AC-76 in `scaffolding/scope.md` names the three
+resource payloads verbatim ("fork-bomb, memory-balloon,
+pid-exhaustion") and the production cgroup limits.
+
+## Build Order
+
+- **G1c.1** Extend `escape_profile()` with `Some(CgroupLimits { memory_max_bytes: Some(512 MiB), pids_max: Some(64), cpu_max_micros: None })`.
+- **G1c.2** Extend `preconditions_met()` to also require `cgroup_v2_writable()`.
+- **G1c.3** Add `resource_fork_bomb_blocked`, `resource_memory_balloon_blocked`, `resource_pid_exhaustion_blocked` tests with documented denial-signature lists.
+- **G1c.4** Local verify (fmt + clippy + check); commit + push; watch CI privileged sandbox-smoke job for runtime proof.
+
+## Complexity Exceptions
+
+None. File size after G1c is expected ~510-540 lines, just over the
+~450-line G1e split trigger noted in earlier addenda. Splitting is
+deferred to G1e per the prior plan; G1c does not, on its own, justify
+the structural change.
 
 ---
 

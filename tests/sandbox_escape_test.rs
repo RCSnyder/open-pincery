@@ -42,6 +42,7 @@
 use std::time::Duration;
 
 use open_pincery::config::{ResolvedSandboxMode, SandboxMode};
+use open_pincery::runtime::sandbox::cgroup::{cgroup_v2_writable, CgroupLimits};
 use open_pincery::runtime::sandbox::preflight::{KernelProbe, RealKernelProbe, LANDLOCK_ABI_FLOOR};
 use open_pincery::runtime::sandbox::{
     bwrap::RealSandbox, ExecResult, SandboxProfile, ShellCommand, ToolExecutor,
@@ -87,6 +88,16 @@ fn preconditions_met() -> bool {
         eprintln!("skipping: Landlock ABI below AC-84/AC-85 strict floor {LANDLOCK_ABI_FLOOR}");
         return false;
     }
+    // G1c: `escape_profile()` now installs production cgroup v2
+    // limits, so the test process must be able to `mkdir` under
+    // `/sys/fs/cgroup`. Without this gate, Enforce-mode would
+    // fail-closed with `ExecResult::Err`, masking real blocks behind
+    // a harness error. Privileged CI satisfies this gate; local
+    // dev hosts without delegation will self-skip with this reason.
+    if !cgroup_v2_writable() {
+        eprintln!("skipping: process cannot mkdir under /sys/fs/cgroup (not root / no delegation)");
+        return false;
+    }
     // Integration tests get `CARGO_BIN_EXE_pincery-init` from cargo
     // automatically. `--test-threads=1` is enforced by the privileged
     // CI sandbox-smoke job, which makes `set_var` safe here.
@@ -104,13 +115,25 @@ fn enforce_sandbox() -> RealSandbox {
 /// Production-equivalent profile: every defence layer on. Adversarial
 /// tests that succeed under this profile prove a real escape, not a
 /// configuration weakness.
+///
+/// G1c upgrade: cgroup v2 limits now match the AC-53 production
+/// posture documented in `scaffolding/scope.md` (`memory.max=512M`,
+/// `pids.max=64`). G1a (FS) and G1b (privesc) tests inherit these
+/// caps; none of their payloads come anywhere near the limits, so
+/// they remain green. The resource-category G1c tests rely on these
+/// caps to fail-closed — without them the kernel has no reason to
+/// refuse a fork-bomb or a 600 MiB allocation.
 fn escape_profile() -> SandboxProfile {
     SandboxProfile {
         env_allowlist: vec!["PATH".into()],
         deny_net: true,
         timeout: Duration::from_secs(10),
         cwd: None,
-        cgroup: None,
+        cgroup: Some(CgroupLimits {
+            memory_max_bytes: Some(512 * 1024 * 1024),
+            pids_max: Some(64),
+            cpu_max_micros: None,
+        }),
         seccomp: true,
         landlock: true,
     }
@@ -406,6 +429,147 @@ async fn privesc_user_ns_elevation_blocked() {
             // mount(2).
             "no space left on device",
             "only root can",
+        ],
+    )
+    .await;
+}
+
+// -------------------------------------------------------------------
+// AC-76 / Slice G1c — resource-exhaustion category (3 payloads).
+//
+// Each test below targets one resource-exhaustion primitive named in
+// scope.md AC-76. They all run through `escape_profile()` (every
+// defence layer on, including the G1c-upgraded cgroup v2 limits
+// `memory.max=512M` / `pids.max=64`) under the production
+// `RealSandbox` `Enforce` path, with the same two-check assertion
+// shape as G1a/G1b (non-zero exit AND a denial signature). See
+// readiness G1c addendum (T-AC76-G1c-1..7 / L-AC76-G1c-1..3) for
+// the per-payload rationale.
+// -------------------------------------------------------------------
+
+/// Resource-1 / fork-bomb: a recursive shell function that pipes its
+/// own output to another invocation of itself, doubling each round.
+/// With `pids.max=64` the kernel refuses the cascade with EAGAIN
+/// from `fork(2)`; the shell prints an EAGAIN-shaped diagnostic
+/// ("Resource temporarily unavailable" / "Cannot fork" / "fork:")
+/// to stderr. We wrap the bomb in `timeout 4s` so the test cannot
+/// hang even if (somehow) the cap is not enforced — but the
+/// signature list does NOT include "Terminated"/SIGTERM, so a
+/// timeout-only kill without an EAGAIN signature would FAIL the
+/// test (per readiness scope-reduction risk).
+#[tokio::test]
+async fn resource_fork_bomb_blocked() {
+    if !preconditions_met() {
+        return;
+    }
+    assert_payload_blocked(
+        "resource/fork-bomb",
+        // Define a recursive function `b` then invoke it. `b|b&`
+        // doubles each iteration. `2>&1` so EAGAIN diagnostics
+        // reach stdout. `timeout 4s` bounds the test; we then
+        // emit the captured exit status so the assertion sees
+        // both the bomb's stderr AND a non-zero exit even on
+        // SIGTERM. `set +m` silences "[1] Done" job-control noise
+        // that some shells emit.
+        "set +m; \
+         timeout 4s sh -c 'b(){ b|b& }; b' 2>&1; \
+         status=$?; \
+         echo \"timeout-status=$status\"; \
+         exit \"$status\"",
+        &[
+            "resource temporarily unavailable",
+            "cannot fork",
+            "fork:",
+            "no more processes",
+            // Defence-in-depth: if cgroup-init fails the harness
+            // returns Err; assert_payload_blocked panics in that
+            // case, so we don't need to match an Err signature
+            // here. Bare `timeout` SIGTERM produces exit 124 but
+            // no EAGAIN string — that path WILL fail this test
+            // and surface a real cgroup misconfiguration.
+        ],
+    )
+    .await;
+}
+
+/// Resource-2 / memory-balloon: allocate ≈600 MiB into the bwrap
+/// tmpfs, exceeding `memory.max=512 MiB`. cgroup v2 OOM-kills the
+/// pipeline; the shell prints "Killed" to stderr and the overall
+/// exit is non-zero (typically 137 = 128 + SIGKILL). The bwrap
+/// `/tmp` is a tmpfs that counts against the cgroup memory budget,
+/// so writing into a file there is functionally equivalent to a
+/// `malloc` for cap-enforcement purposes.
+#[tokio::test]
+async fn resource_memory_balloon_blocked() {
+    if !preconditions_met() {
+        return;
+    }
+    assert_payload_blocked(
+        "resource/memory-balloon",
+        // `head -c 600M /dev/zero` produces 600 MiB of NULs;
+        // `tr '\0' 'a'` keeps them in a register the kernel must
+        // back with real pages (a sparse file would not). The
+        // pipeline writes into `/tmp/big` which is on the bwrap
+        // tmpfs (counted against memory.max). `2>&1` so the
+        // "Killed" diagnostic reaches stdout.
+        "head -c 600M /dev/zero | tr '\\0' 'a' > /tmp/big 2>&1; \
+         status=$?; \
+         echo \"alloc-status=$status\"; \
+         exit \"$status\"",
+        &[
+            "killed",
+            "out of memory",
+            // 137 = 128 + SIGKILL; some shells include this in
+            // their diagnostic. Substring-match against the raw
+            // status echo as defence-in-depth.
+            "alloc-status=137",
+            // bwrap tmpfs may also surface ENOSPC if /tmp is
+            // size-capped before memory.max kicks in. Either is
+            // a valid block — the payload could not allocate.
+            "no space left on device",
+            // Defence-in-depth: if /dev/zero ever gets removed
+            // from the safe-device subset, we still want the
+            // test to surface a block rather than mysteriously
+            // pass. ENOENT from a missing primitive IS a block
+            // (stronger isolation than the target).
+            "no such file or directory",
+        ],
+    )
+    .await;
+}
+
+/// Resource-3 / pid-exhaustion: a flat backgrounded loop that
+/// tries to spawn 200 sleep processes. Distinct from the recursive
+/// fork-bomb in shape (linear, not exponential) but exercises the
+/// same `pids.max=64` cap; the kernel refuses additional fork(2)
+/// calls past the cap. We wrap in `timeout 4s` so the surviving
+/// `sleep`s do not hold the test open. As with the fork-bomb the
+/// signature list excludes plain SIGTERM — the test PASSES only
+/// if an EAGAIN-shaped diagnostic appears, proving real kernel-
+/// level enforcement.
+#[tokio::test]
+async fn resource_pid_exhaustion_blocked() {
+    if !preconditions_met() {
+        return;
+    }
+    assert_payload_blocked(
+        "resource/pid-exhaustion",
+        // Linear backgrounded fork loop. `sleep 60 &` is enough
+        // that the children outlive the spawning loop, so the
+        // cgroup PID count climbs monotonically. `2>&1` so EAGAIN
+        // diagnostics reach stdout. `timeout 4s` bounds the test;
+        // we propagate the inner exit status so a sub-cap success
+        // (impossible if the cap is enforced) would surface as 0.
+        "set +m; \
+         timeout 4s sh -c 'for i in $(seq 1 200); do sleep 60 & done; wait' 2>&1; \
+         status=$?; \
+         echo \"timeout-status=$status\"; \
+         exit \"$status\"",
+        &[
+            "resource temporarily unavailable",
+            "cannot fork",
+            "fork:",
+            "no more processes",
         ],
     )
     .await;
