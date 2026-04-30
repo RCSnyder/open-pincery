@@ -1,5 +1,13 @@
 # Open Pincery — Experiment Log
 
+## VERIFY v9 — Slice G1a / AC-76 (FS category) green on CI — 2026-04-29T05:00Z
+
+- **Gate**: PASS (attempt 1 post-fix). Slice G1a closed.
+- **Evidence**: GitHub Actions CI run `25141121156` on commit `dd10a8b` succeeded across all jobs: `cargo test`, `clippy`, `rustfmt`, `cargo deny`, and the privileged `sandbox real-bwrap smoke` job. TLA+ run `25141121144` on the same head also succeeded. The bwrap unit guard (`bwrap_args_do_not_bind_broad_or_sensitive_etc`) and Landlock guard (`default_profile_does_not_grant_broad_etc`) ran clean; the four FS escape payloads (`cat /etc/shadow`, `ls /proc/1/root`, `dd if=/dev/sda`, `mount --bind`) executed under the privileged container and all blocked with denial-signature evidence. The previously-failed run `25140817065` is superseded.
+- **Changes**: None this entry — verifies `dd10a8b` (per-path Landlock access mask + bwrap guard fix). G1a end-to-end deliverables already shipped in `24ac973` + `dd10a8b`: `tests/sandbox_escape_test.rs`, narrowed `runtime::sandbox::landlock_layer::{ETC_ALLOWLIST, ETC_FORBIDDEN_PATHS}`, lockstep bwrap + Landlock guards, harness exit-code-preservation fix.
+- **Retries**: 2 build-fix iterations across the slice (round 1: `24ac973`, round 2: `dd10a8b`); 0 verify-fix iterations.
+- **Next**: Open Slice G1b (AC-76 privesc category — 3 payloads). ANALYZE addendum first.
+
 ## BUILD-fix v9 — Slice G1a remediation round 2 (per-path Landlock access + guard-test correctness) — 2026-04-29T03:30Z
 
 - **Gate**: PASS (attempt 2 of post-build remediation; round 1 = commit `24ac973`).

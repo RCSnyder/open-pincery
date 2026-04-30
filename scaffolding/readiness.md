@@ -61,7 +61,7 @@ audit-visibility slice.
   `AUDIT_LANDLOCK_*` denial records into append-only
   `landlock_denied` events through `models::event::append_event`. The
   canonical JSON payload includes the required `{tool_name, agent_id,
-  denied_path, requested_access, syscall}` fields plus `wake_id`,
+denied_path, requested_access, syscall}` fields plus `wake_id`,
   sampled `correlation_pids`, audit `pid`, audit `ppid`/`parent_pid`,
   and audit timestamp when available.
 - **T-AC88-6** Kernel audit records must be correlated to real runtime
@@ -137,8 +137,8 @@ audit-visibility slice.
 
 ## Acceptance Criteria Coverage
 
-| AC ID | Build Slice | Test / Proof | Runtime Verification | Status |
-| ----- | ----------- | ------------ | -------------------- | ------ |
+| AC ID | Build Slice                                                                                                                                         | Test / Proof                                                                                                                                                                                                              | Runtime Verification                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | Status                   |
+| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
 | AC-88 | G0f: audit flag in policy + raw Landlock restrict flag + per-invocation audit source/parser + correlated event emission + deployment env forwarding | `tests/landlock_audit_test.rs`; `src/observability/landlock_audit_netlink.rs` unit fixture; `src/runtime/sandbox/{init_policy,bwrap,landlock}.rs` unit coverage; `tests/compose_env_test.rs`; `tests/env_example_test.rs` | Local deterministic tests cover parser aliases, EOF fallback, bounded two-record delayed polling, parent-PID correlation, timestamp-window rejection/acceptance, uncorrelated rejection, and ABI 6 audit-unavailable fallback. Linux live tests run when ABI >= 7 and a readable audit source exists; otherwise they skip with explicit evidence while sandbox enforcement remains active. Compose proof covers `OPEN_PINCERY_LANDLOCK_AUDIT_LOG` forwarding with a gated `COMPOSE_AVAILABLE=1` `docker compose config` fixture, and env example coverage keeps the operator-facing knob documented. | Implemented and reviewed |
 
 ## Scope Reduction Risks
@@ -196,9 +196,9 @@ audit-visibility slice.
    `tests/landlock_audit_test.rs`; live Linux proofs are gated and
    deterministic proofs always run.
 6. **G0f.6 - Deployment env proof.** Implemented by forwarding
-  `OPEN_PINCERY_LANDLOCK_AUDIT_LOG` in `docker-compose.yml` and
-  guarding it with `tests/compose_env_test.rs` plus env-example
-  coverage.
+   `OPEN_PINCERY_LANDLOCK_AUDIT_LOG` in `docker-compose.yml` and
+   guarding it with `tests/compose_env_test.rs` plus env-example
+   coverage.
 
 ## Complexity Exceptions
 
@@ -247,12 +247,12 @@ heuristic can be exercised against real evidence from each category).
 
 - **T-AC76-G1a-1** Slice G1a ships `tests/sandbox_escape_test.rs` with a
   shared precondition gate (`bwrap` on PATH + landlock supported + ABI
-  >= `LANDLOCK_ABI_FLOOR` + `OPEN_PINCERY_SKIP_REAL_BWRAP` unset +
-  `PINCERY_INIT_BIN_PATH` resolved from `CARGO_BIN_EXE_pincery-init`),
-  a shared `escape_profile()` that turns on every defense layer
-  (`deny_net=true`, `seccomp=true`, `landlock=true`), and a shared
-  `assert_payload_blocked` helper. When preconditions are not met the
-  test emits an explicit skip line and returns success.
+  > = `LANDLOCK_ABI_FLOOR` + `OPEN_PINCERY_SKIP_REAL_BWRAP` unset +
+  > `PINCERY_INIT_BIN_PATH` resolved from `CARGO_BIN_EXE_pincery-init`),
+  > a shared `escape_profile()` that turns on every defense layer
+  > (`deny_net=true`, `seccomp=true`, `landlock=true`), and a shared
+  > `assert_payload_blocked` helper. When preconditions are not met the
+  > test emits an explicit skip line and returns success.
 - **T-AC76-G1a-2** G1a covers the four filesystem-category payloads
   named by AC-76: read `/etc/shadow`, walk `/proc/1/root`, open
   `/dev/sda` for read, attempt a `mount` mount-namespace escape. Each
@@ -267,12 +267,12 @@ heuristic can be exercised against real evidence from each category).
 - **T-AC76-G1a-3** G1a does NOT yet emit a synthesized `sandbox_blocked`
   event from runtime code. Where AC-88 already wires the kernel-audit
   bridge for filesystem denials on Linux >= 6.7 (ABI >= 7), the harness
-  treats the AC-88 `landlock_denied` event as the *kernel-confirmed*
+  treats the AC-88 `landlock_denied` event as the _kernel-confirmed_
   evidence for the FS category, but does not require it as a hard
   gate (the live audit reader is host-permission gated and may be
   unreadable in some CI environments). The synthesized cross-layer
   `sandbox_blocked` event with `{tool_call_id, payload_category,
-  denied_by_layer, syscall?, path?}` is tracked as G1e and lands after
+denied_by_layer, syscall?, path?}` is tracked as G1e and lands after
   G1b/c/d so the layer-attribution heuristic can be exercised against
   evidence from every category.
 - **T-AC76-G1a-4** G1a does not weaken the AC-84/AC-85 enforcement
@@ -317,7 +317,7 @@ heuristic can be exercised against real evidence from each category).
 
 - **L-AC76-G1a-1** [AC-76 FS] -> `tests/sandbox_escape_test.rs`
   precondition gate -> existing `RealSandbox::new(ResolvedSandboxMode
-  { Enforce, allow_unsafe: false })` + `pincery-init` wrapper ->
+{ Enforce, allow_unsafe: false })` + `pincery-init` wrapper ->
   runtime proof on CI `sandbox-smoke` job that all four FS payloads
   exit non-zero with a denial signature.
 - **L-AC76-G1a-2** [AC-76 FS / `cat /etc/shadow`] -> bwrap binds
@@ -329,10 +329,10 @@ heuristic can be exercised against real evidence from each category).
   Assert exit_code != 0 AND stdout/stderr contains "no such file or
   directory" or "permission denied".
 - **L-AC76-G1a-3** [AC-76 FS / `/proc/1/root`] -> bwrap `--proc /proc`
-  + AC-86 UID drop + new PID namespace -> `ls /proc/1/root` resolves
-  to the in-sandbox pid-ns root, but UID 65534 cannot read pid 1's
-  root link -> assert exit_code != 0 AND stderr contains "Permission
-  denied" or "No such file or directory".
+  - AC-86 UID drop + new PID namespace -> `ls /proc/1/root` resolves
+    to the in-sandbox pid-ns root, but UID 65534 cannot read pid 1's
+    root link -> assert exit_code != 0 AND stderr contains "Permission
+    denied" or "No such file or directory".
 - **L-AC76-G1a-4** [AC-76 FS / `/dev/sda`] -> bwrap `--dev /dev`
   tmpfs only mounts the safe device subset (null/zero/random/tty),
   so `/dev/sda` does not exist inside the sandbox -> assert
@@ -352,8 +352,8 @@ heuristic can be exercised against real evidence from each category).
 
 ## Acceptance Criteria Coverage
 
-| AC ID | Build Slice | Test / Proof | Runtime Verification | Status |
-| ----- | ----------- | ------------ | -------------------- | ------ |
+| AC ID | Build Slice                                                                                                                                                                                                                            | Test / Proof                                                                            | Runtime Verification                                                                                                                                                                                              | Status                            |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- |
 | AC-76 | G1a: harness + 4 FS payloads (etc/shadow, /proc/1/root, /dev/sda, mount-ns break). G1b: 3 privesc payloads. G1c: 3 resource payloads. G1d: 2 network payloads. G1e: synthesized `sandbox_blocked` event emission + AC-53 closure gate. | `tests/sandbox_escape_test.rs` (G1a only); G1b..G1e add tests/code in their own slices. | Privileged CI `sandbox-smoke` job runs the suite and fails the build if any payload succeeds. Local Docker Desktop devshell self-skips strict-floor checks. Windows `cargo test` compiles the file to zero tests. | G1a in progress; G1b..G1e queued. |
 
 ## Scope Reduction Risks
@@ -403,7 +403,7 @@ heuristic can be exercised against real evidence from each category).
    and stderr contains "Operation not permitted" or "must be
    superuser".
 6. **G1a.6 - Verify locally and push.** `cargo fmt --all --
-   --check`, `cargo clippy --all-targets -- -D warnings`,
+--check`, `cargo clippy --all-targets -- -D warnings`,
    `cargo check --tests`, then commit + push. CI privileged
    `sandbox-smoke` job is the runtime proof.
 
