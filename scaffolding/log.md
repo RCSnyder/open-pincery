@@ -1,5 +1,17 @@
 # Open Pincery — Experiment Log
 
+## BUILD-fix v9 — Slice G1c round 1 — 2026-04-29T08:30Z
+
+- **Gate**: PASS locally (attempt 2/3); CI privileged sandbox-smoke job re-run is the runtime proof.
+- **Evidence**: CI run `25142390237` on `926f53d` failed: `cargo test`/`clippy`/`rustfmt`/`cargo deny` all green; `sandbox real-bwrap smoke` failed with all 3 new resource tests panicking. `cargo fmt --all` and `cargo clippy --all-targets -- -D warnings` clean locally on the fix.
+- **Root causes** (one per failing test):
+  1. `resource_fork_bomb_blocked` — `b(){ b|b& }; b` with the trailing `&` immediately backgrounded the recursion; the parent shell exited 0 in milliseconds, before the kernel pids cap could bite. CI showed `timeout-status=0` with no shell diagnostics. Fix: drop the `&` for synchronous foreground recursion `b(){ b|b; }; b`.
+  2. `resource_memory_balloon_blocked` — bwrap `/tmp` is owned by the launcher uid, not by the runtime uid 65534 (this is a stronger property of AC-86: even the sandbox tmpfs is read-only to the runtime). CI showed `sh: 1: cannot create /tmp/big: Permission denied; alloc-status=2`. Fix: avoid disk entirely by piping `head -c 600M /dev/zero | sort >/dev/null` — `sort` buffers all input in process anonymous heap before producing output, allocating ≈600 MiB of cgroup-accounted memory. cgroup v2 OOM-kills `sort` with SIGKILL.
+  3. `resource_pid_exhaustion_blocked` — `sleep 60 &` is fire-and-forget; `&` always returns 0 and dash silently swallows fork failures, so 200 background spawn attempts surfaced no kernel diagnostic and `timeout 4s` SIGTERM-killed the loop at status 124. Fix: add a synchronous fork canary `(:)` per iteration. When `pids.max=64` is exhausted, the canary's fork fails and dash emits "Cannot fork" / "Resource temporarily unavailable" to stderr (visible via `2>&1`).
+- **Changes**: `tests/sandbox_escape_test.rs` only — three test bodies replaced with the patterns above; module-doc comment header preserved; `escape_profile()` and `preconditions_met()` unchanged from initial G1c BUILD. No `src/` changes.
+- **Retries**: 1 (this is round 1; budget remaining: 2). All three failures had distinct, well-understood root causes — not a single systemic bug.
+- **Next**: Commit + push (amend would lose the original BUILD checkpoint, which we want preserved for audit per BEE-OS); watch CI run for `sandbox real-bwrap smoke` job re-run. The 7 prior G1a/G1b tests must remain green under the upgraded `escape_profile()`.
+
 ## BUILD v9 — Slice G1c / AC-76 sandbox escape suite (resource category) — 2026-04-29T07:45Z
 
 - **Gate**: PASS (attempt 1). Post-build admission gate met locally; CI privileged sandbox-smoke job is the runtime proof.

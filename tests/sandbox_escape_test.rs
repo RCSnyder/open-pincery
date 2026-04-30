@@ -448,13 +448,17 @@ async fn privesc_user_ns_elevation_blocked() {
 // -------------------------------------------------------------------
 
 /// Resource-1 / fork-bomb: a recursive shell function that pipes its
-/// own output to another invocation of itself, doubling each round.
-/// With `pids.max=64` the kernel refuses the cascade with EAGAIN
-/// from `fork(2)`; the shell prints an EAGAIN-shaped diagnostic
-/// ("Resource temporarily unavailable" / "Cannot fork" / "fork:")
-/// to stderr. We wrap the bomb in `timeout 4s` so the test cannot
-/// hang even if (somehow) the cap is not enforced — but the
-/// signature list does NOT include "Terminated"/SIGTERM, so a
+/// own output to another invocation of itself. The classic shape
+/// `b(){ b|b& };b` does NOT work for our purposes — the trailing
+/// `&` backgrounds the recursion so the parent shell returns 0
+/// immediately, before the kernel pids cap has a chance to bite.
+/// The synchronous form `b(){ b|b; };b` keeps the pipeline in the
+/// foreground; each invocation foreground-forks two children
+/// running `b`. When `pids.max=64` is exhausted, dash emits
+/// "Cannot fork" to stderr and the entire process tree exits
+/// non-zero. We wrap in `timeout 4s` so the test cannot hang even
+/// if (somehow) the cap is not enforced — the signature list does
+/// NOT include plain SIGTERM ("Terminated" / exit 124), so a
 /// timeout-only kill without an EAGAIN signature would FAIL the
 /// test (per readiness scope-reduction risk).
 #[tokio::test]
@@ -464,15 +468,13 @@ async fn resource_fork_bomb_blocked() {
     }
     assert_payload_blocked(
         "resource/fork-bomb",
-        // Define a recursive function `b` then invoke it. `b|b&`
-        // doubles each iteration. `2>&1` so EAGAIN diagnostics
-        // reach stdout. `timeout 4s` bounds the test; we then
-        // emit the captured exit status so the assertion sees
-        // both the bomb's stderr AND a non-zero exit even on
-        // SIGTERM. `set +m` silences "[1] Done" job-control noise
-        // that some shells emit.
+        // Synchronous recursive fork-bomb. Define `b`, then call
+        // `b` so each invocation foreground-forks two children
+        // (`b|b` is a foreground pipeline). `2>&1` so EAGAIN /
+        // "Cannot fork" diagnostics reach stdout. `timeout 4s`
+        // bounds the test.
         "set +m; \
-         timeout 4s sh -c 'b(){ b|b& }; b' 2>&1; \
+         timeout 4s sh -c 'b(){ b|b; }; b' 2>&1; \
          status=$?; \
          echo \"timeout-status=$status\"; \
          exit \"$status\"",
@@ -481,24 +483,23 @@ async fn resource_fork_bomb_blocked() {
             "cannot fork",
             "fork:",
             "no more processes",
-            // Defence-in-depth: if cgroup-init fails the harness
-            // returns Err; assert_payload_blocked panics in that
-            // case, so we don't need to match an Err signature
-            // here. Bare `timeout` SIGTERM produces exit 124 but
-            // no EAGAIN string — that path WILL fail this test
-            // and surface a real cgroup misconfiguration.
         ],
     )
     .await;
 }
 
-/// Resource-2 / memory-balloon: allocate ≈600 MiB into the bwrap
-/// tmpfs, exceeding `memory.max=512 MiB`. cgroup v2 OOM-kills the
-/// pipeline; the shell prints "Killed" to stderr and the overall
-/// exit is non-zero (typically 137 = 128 + SIGKILL). The bwrap
-/// `/tmp` is a tmpfs that counts against the cgroup memory budget,
-/// so writing into a file there is functionally equivalent to a
-/// `malloc` for cap-enforcement purposes.
+/// Resource-2 / memory-balloon: allocate ≈600 MiB of anonymous
+/// process memory, exceeding `memory.max=512 MiB`. We deliberately
+/// avoid writing to `/tmp` (the bwrap tmpfs is not writable by uid
+/// 65534 — a stronger isolation property of AC-86). Instead, pipe
+/// 600 MiB of NULs from `/dev/zero` through `sort`, which buffers
+/// its entire input in process memory before producing output.
+/// `sort` therefore allocates a single ≈600 MiB anonymous heap
+/// allocation — well over `memory.max` — and cgroup v2 OOM-kills
+/// it with SIGKILL. The pipeline exit is `sort`'s exit, typically
+/// 137 (= 128 + SIGKILL). `>/dev/null` discards the (huge) output
+/// so the kill happens against the memory cap, not against tmpfs
+/// space.
 #[tokio::test]
 async fn resource_memory_balloon_blocked() {
     if !preconditions_met() {
@@ -507,46 +508,48 @@ async fn resource_memory_balloon_blocked() {
     assert_payload_blocked(
         "resource/memory-balloon",
         // `head -c 600M /dev/zero` produces 600 MiB of NULs;
-        // `tr '\0' 'a'` keeps them in a register the kernel must
-        // back with real pages (a sparse file would not). The
-        // pipeline writes into `/tmp/big` which is on the bwrap
-        // tmpfs (counted against memory.max). `2>&1` so the
-        // "Killed" diagnostic reaches stdout.
-        "head -c 600M /dev/zero | tr '\\0' 'a' > /tmp/big 2>&1; \
+        // `sort` reads the entire stream into memory before
+        // emitting output (anonymous heap allocation, counted
+        // against the cgroup memory budget). `>/dev/null` so we
+        // don't fight against tmpfs ENOSPC. `2>&1` so any kernel
+        // OOM diagnostic reaches stdout.
+        "head -c 600M /dev/zero | sort > /dev/null 2>&1; \
          status=$?; \
          echo \"alloc-status=$status\"; \
          exit \"$status\"",
         &[
             "killed",
             "out of memory",
-            // 137 = 128 + SIGKILL; some shells include this in
-            // their diagnostic. Substring-match against the raw
-            // status echo as defence-in-depth.
+            // 137 = 128 + SIGKILL (the cgroup OOM-killer's
+            // standard signal). The status echo gives us a
+            // deterministic substring even when no kernel
+            // diagnostic reaches our stdout.
             "alloc-status=137",
-            // bwrap tmpfs may also surface ENOSPC if /tmp is
-            // size-capped before memory.max kicks in. Either is
-            // a valid block — the payload could not allocate.
-            "no space left on device",
-            // Defence-in-depth: if /dev/zero ever gets removed
-            // from the safe-device subset, we still want the
-            // test to surface a block rather than mysteriously
-            // pass. ENOENT from a missing primitive IS a block
-            // (stronger isolation than the target).
-            "no such file or directory",
+            // 143 = 128 + SIGTERM (some kernel configs use this
+            // for memory-pressure kill).
+            "alloc-status=143",
+            // 141 = 128 + SIGPIPE (sort's pipe partner died,
+            // typical when head is the SIGKILL victim instead).
+            "alloc-status=141",
         ],
     )
     .await;
 }
 
-/// Resource-3 / pid-exhaustion: a flat backgrounded loop that
-/// tries to spawn 200 sleep processes. Distinct from the recursive
-/// fork-bomb in shape (linear, not exponential) but exercises the
-/// same `pids.max=64` cap; the kernel refuses additional fork(2)
-/// calls past the cap. We wrap in `timeout 4s` so the surviving
-/// `sleep`s do not hold the test open. As with the fork-bomb the
-/// signature list excludes plain SIGTERM — the test PASSES only
-/// if an EAGAIN-shaped diagnostic appears, proving real kernel-
-/// level enforcement.
+/// Resource-3 / pid-exhaustion: a flat backgrounded loop that tries
+/// to spawn 200 sleep processes. Distinct from the recursive
+/// fork-bomb in shape (linear, not exponential). The naive form
+/// `sleep 60 &` does NOT detect fork failures — dash treats `&` as
+/// fire-and-forget and returns 0 even when fork(2) returns EAGAIN.
+/// To produce a deterministic kernel-level diagnostic, every
+/// iteration includes a synchronous fork canary `(:)`: a tiny
+/// subshell that forks but does no work. When `pids.max=64` is
+/// exhausted, the canary's fork fails; dash emits "Cannot fork" /
+/// "Resource temporarily unavailable" to stderr and exits non-zero,
+/// at which point the inner `sh -c` propagates that exit to the
+/// outer payload. The signature list excludes plain SIGTERM — a
+/// timeout-only kill without an EAGAIN diagnostic would FAIL this
+/// test (per readiness scope-reduction risk).
 #[tokio::test]
 async fn resource_pid_exhaustion_blocked() {
     if !preconditions_met() {
@@ -554,14 +557,15 @@ async fn resource_pid_exhaustion_blocked() {
     }
     assert_payload_blocked(
         "resource/pid-exhaustion",
-        // Linear backgrounded fork loop. `sleep 60 &` is enough
-        // that the children outlive the spawning loop, so the
-        // cgroup PID count climbs monotonically. `2>&1` so EAGAIN
-        // diagnostics reach stdout. `timeout 4s` bounds the test;
-        // we propagate the inner exit status so a sub-cap success
-        // (impossible if the cap is enforced) would surface as 0.
+        // Linear backgrounded fork loop with synchronous canary.
+        // Each iteration: (a) backgrounds a long-lived `sleep 60`
+        // (accumulates one PID against the cgroup), (b) runs a
+        // tiny `(:)` subshell as a fork canary. When pids.max
+        // bites, the canary fork fails and dash exits with
+        // "Cannot fork" on stderr. `2>&1` exposes that
+        // diagnostic to stdout for the assertion.
         "set +m; \
-         timeout 4s sh -c 'for i in $(seq 1 200); do sleep 60 & done; wait' 2>&1; \
+         timeout 4s sh -c 'i=0; while [ $i -lt 200 ]; do sleep 60 & (:); i=$((i+1)); done; echo iters=$i' 2>&1; \
          status=$?; \
          echo \"timeout-status=$status\"; \
          exit \"$status\"",
