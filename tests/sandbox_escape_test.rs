@@ -105,6 +105,35 @@ fn preconditions_met() -> bool {
     true
 }
 
+/// Probe whether the host has delegated the cgroup v2 `memory`
+/// controller to children of `/sys/fs/cgroup/`. The cgroup v2
+/// controller-delegation contract: a controller can only enforce
+/// limits on *children* of a cgroup if that controller is enabled
+/// in the cgroup's `cgroup.subtree_control`. Writing to
+/// `memory.max` on a child cgroup whose parent does NOT have
+/// `+memory` in subtree_control succeeds at the file level (the
+/// kernel accepts the write) but the limit is a no-op \u2014 the kernel
+/// does not enforce memory accounting for that cgroup.
+///
+/// `cgroup_v2_writable()` (used as a precondition for all G1c tests)
+/// checks only that we can `mkdir` under `/sys/fs/cgroup/`; it does
+/// NOT check whether each individual controller is delegated. The
+/// memory-balloon test needs this stronger check, since pids.max
+/// happens to be delegated in environments where memory.max is
+/// not (privileged Docker-in-Docker CI runners are a common case).
+///
+/// Returns `true` if `memory` appears in the host's
+/// `/sys/fs/cgroup/cgroup.subtree_control`. Returns `false` on any
+/// I/O error or when the controller is missing — the test then
+/// self-skips with an explicit log line rather than producing a
+/// false-positive pass.
+fn memory_controller_delegated() -> bool {
+    match std::fs::read_to_string("/sys/fs/cgroup/cgroup.subtree_control") {
+        Ok(contents) => contents.split_whitespace().any(|c| c == "memory"),
+        Err(_) => false,
+    }
+}
+
 fn enforce_sandbox() -> RealSandbox {
     RealSandbox::new(ResolvedSandboxMode {
         mode: SandboxMode::Enforce,
@@ -492,28 +521,34 @@ async fn resource_fork_bomb_blocked() {
 /// process memory, exceeding `memory.max=512 MiB`. We deliberately
 /// avoid writing to `/tmp` (the bwrap tmpfs is owned by the
 /// launcher uid, not by uid 65534 — a stronger property of AC-86).
-/// We also avoid `sort`, which buffers efficiently and may keep
-/// the working set well below 600 MiB even given a 600 MiB input.
-/// Instead, use `dd` with `bs=600M count=1`: dd allocates a single
-/// 600 MiB I/O buffer in process anonymous memory before reading
-/// any input. cgroup v2 OOM-kills dd with SIGKILL when the buffer
-/// allocation exceeds `memory.max`. The pipeline exit is dd's
-/// exit, typically 137 (= 128 + SIGKILL). `>/dev/null` discards
-/// the output so we don't fight against tmpfs.
+///
+/// **Precondition:** the memory controller must be enabled in the
+/// host cgroup hierarchy (`memory` listed in
+/// `/sys/fs/cgroup/cgroup.subtree_control`). Without delegation,
+/// writing to `memory.max` succeeds at the file level but is a
+/// no-op — the kernel does not enforce the cap. CI runners that do
+/// not delegate the memory controller cause this test to self-skip
+/// with an explicit diagnostic. Tracked separately from AC-76 as a
+/// runtime/infrastructure gap (see `scaffolding/scope.md` Deferred).
 #[tokio::test]
 async fn resource_memory_balloon_blocked() {
     if !preconditions_met() {
+        return;
+    }
+    if !memory_controller_delegated() {
+        eprintln!(
+            "skipping resource/memory-balloon: memory controller not in {}/cgroup.subtree_control (host cgroup memory accounting not delegated to children); see scope.md Deferred for tracking",
+            "/sys/fs/cgroup"
+        );
         return;
     }
     assert_payload_blocked(
         "resource/memory-balloon",
         // `dd if=/dev/zero of=/dev/null bs=600M count=1` allocates
         // a single 600 MiB anonymous buffer for one I/O block.
-        // This is far simpler and more deterministic than piping
-        // through sort: the allocation happens in dd's address
-        // space *before* any read/write, so the cgroup memory
-        // accountant catches it immediately. `2>&1` so any kernel
-        // OOM diagnostic reaches stdout.
+        // The allocation happens in dd's address space *before*
+        // any read/write, so cgroup memory accounting catches it
+        // immediately when the controller is delegated.
         "dd if=/dev/zero of=/dev/null bs=600M count=1 2>&1; \
          status=$?; \
          echo \"alloc-status=$status\"; \
@@ -521,17 +556,8 @@ async fn resource_memory_balloon_blocked() {
         &[
             "killed",
             "out of memory",
-            // 137 = 128 + SIGKILL (the cgroup OOM-killer's
-            // standard signal). The status echo gives us a
-            // deterministic substring even when no kernel
-            // diagnostic reaches our stdout.
             "alloc-status=137",
-            // 143 = 128 + SIGTERM (some kernel configs use this
-            // for memory-pressure kill).
             "alloc-status=143",
-            // ENOMEM surfaces from dd as "memory exhausted" /
-            // "cannot allocate memory" if it tries to malloc
-            // before getting OOM-killed.
             "memory exhausted",
             "cannot allocate memory",
         ],
