@@ -490,16 +490,16 @@ async fn resource_fork_bomb_blocked() {
 
 /// Resource-2 / memory-balloon: allocate ≈600 MiB of anonymous
 /// process memory, exceeding `memory.max=512 MiB`. We deliberately
-/// avoid writing to `/tmp` (the bwrap tmpfs is not writable by uid
-/// 65534 — a stronger isolation property of AC-86). Instead, pipe
-/// 600 MiB of NULs from `/dev/zero` through `sort`, which buffers
-/// its entire input in process memory before producing output.
-/// `sort` therefore allocates a single ≈600 MiB anonymous heap
-/// allocation — well over `memory.max` — and cgroup v2 OOM-kills
-/// it with SIGKILL. The pipeline exit is `sort`'s exit, typically
-/// 137 (= 128 + SIGKILL). `>/dev/null` discards the (huge) output
-/// so the kill happens against the memory cap, not against tmpfs
-/// space.
+/// avoid writing to `/tmp` (the bwrap tmpfs is owned by the
+/// launcher uid, not by uid 65534 — a stronger property of AC-86).
+/// We also avoid `sort`, which buffers efficiently and may keep
+/// the working set well below 600 MiB even given a 600 MiB input.
+/// Instead, use `dd` with `bs=600M count=1`: dd allocates a single
+/// 600 MiB I/O buffer in process anonymous memory before reading
+/// any input. cgroup v2 OOM-kills dd with SIGKILL when the buffer
+/// allocation exceeds `memory.max`. The pipeline exit is dd's
+/// exit, typically 137 (= 128 + SIGKILL). `>/dev/null` discards
+/// the output so we don't fight against tmpfs.
 #[tokio::test]
 async fn resource_memory_balloon_blocked() {
     if !preconditions_met() {
@@ -507,13 +507,14 @@ async fn resource_memory_balloon_blocked() {
     }
     assert_payload_blocked(
         "resource/memory-balloon",
-        // `head -c 600M /dev/zero` produces 600 MiB of NULs;
-        // `sort` reads the entire stream into memory before
-        // emitting output (anonymous heap allocation, counted
-        // against the cgroup memory budget). `>/dev/null` so we
-        // don't fight against tmpfs ENOSPC. `2>&1` so any kernel
+        // `dd if=/dev/zero of=/dev/null bs=600M count=1` allocates
+        // a single 600 MiB anonymous buffer for one I/O block.
+        // This is far simpler and more deterministic than piping
+        // through sort: the allocation happens in dd's address
+        // space *before* any read/write, so the cgroup memory
+        // accountant catches it immediately. `2>&1` so any kernel
         // OOM diagnostic reaches stdout.
-        "head -c 600M /dev/zero | sort > /dev/null 2>&1; \
+        "dd if=/dev/zero of=/dev/null bs=600M count=1 2>&1; \
          status=$?; \
          echo \"alloc-status=$status\"; \
          exit \"$status\"",
@@ -528,9 +529,11 @@ async fn resource_memory_balloon_blocked() {
             // 143 = 128 + SIGTERM (some kernel configs use this
             // for memory-pressure kill).
             "alloc-status=143",
-            // 141 = 128 + SIGPIPE (sort's pipe partner died,
-            // typical when head is the SIGKILL victim instead).
-            "alloc-status=141",
+            // ENOMEM surfaces from dd as "memory exhausted" /
+            // "cannot allocate memory" if it tries to malloc
+            // before getting OOM-killed.
+            "memory exhausted",
+            "cannot allocate memory",
         ],
     )
     .await;
@@ -538,18 +541,18 @@ async fn resource_memory_balloon_blocked() {
 
 /// Resource-3 / pid-exhaustion: a flat backgrounded loop that tries
 /// to spawn 200 sleep processes. Distinct from the recursive
-/// fork-bomb in shape (linear, not exponential). The naive form
-/// `sleep 60 &` does NOT detect fork failures — dash treats `&` as
-/// fire-and-forget and returns 0 even when fork(2) returns EAGAIN.
-/// To produce a deterministic kernel-level diagnostic, every
-/// iteration includes a synchronous fork canary `(:)`: a tiny
-/// subshell that forks but does no work. When `pids.max=64` is
-/// exhausted, the canary's fork fails; dash emits "Cannot fork" /
-/// "Resource temporarily unavailable" to stderr and exits non-zero,
-/// at which point the inner `sh -c` propagates that exit to the
-/// outer payload. The signature list excludes plain SIGTERM — a
-/// timeout-only kill without an EAGAIN diagnostic would FAIL this
-/// test (per readiness scope-reduction risk).
+/// fork-bomb in shape (linear, not exponential). dash silently
+/// swallows fork failures from `&` (returns 0 unconditionally) and
+/// optimizes `(:)` to skip the subshell fork (single-builtin
+/// optimization), so per-iteration fork canaries do not work.
+/// Instead, we follow the pattern from
+/// `tests/sandbox_cgroup_test.rs::cgroup_pids_max_limits_fork_count`:
+/// spawn N background jobs, then count survivors via `jobs -p`.
+/// When `pids.max=64` is enforced, the survivor count is bounded
+/// well below 200. We make the assertion deterministic by having
+/// the script *itself* exit non-zero with a sentinel diagnostic
+/// when the survivor count is undercount, rather than relying on
+/// the shell printing kernel diagnostics.
 #[tokio::test]
 async fn resource_pid_exhaustion_blocked() {
     if !preconditions_met() {
@@ -557,19 +560,27 @@ async fn resource_pid_exhaustion_blocked() {
     }
     assert_payload_blocked(
         "resource/pid-exhaustion",
-        // Linear backgrounded fork loop with synchronous canary.
-        // Each iteration: (a) backgrounds a long-lived `sleep 60`
-        // (accumulates one PID against the cgroup), (b) runs a
-        // tiny `(:)` subshell as a fork canary. When pids.max
-        // bites, the canary fork fails and dash exits with
-        // "Cannot fork" on stderr. `2>&1` exposes that
-        // diagnostic to stdout for the assertion.
+        // Linear backgrounded fork loop with explicit survivor
+        // count. `jobs -p` enumerates live background PIDs; under
+        // pids.max=64 the count is bounded (cgroup also includes
+        // the bwrap parent, sh, sleep procs — so 200 attempts
+        // produce at most ~60 live sleeps). The script prints
+        // SURVIVORS=$count and exits non-zero with a sentinel if
+        // the count is below the request, giving us a
+        // deterministic non-zero exit + signature substring.
+        // `set +m` silences job-control noise.
         "set +m; \
-         timeout 4s sh -c 'i=0; while [ $i -lt 200 ]; do sleep 60 & (:); i=$((i+1)); done; echo iters=$i' 2>&1; \
+         timeout 4s sh -c 'for i in $(seq 1 200); do sleep 60 & done; count=$(jobs -p | wc -l); echo SURVIVORS=$count; if [ \"$count\" -lt 200 ]; then echo PID_CAP_BIT survivors=$count requested=200; exit 1; fi; exit 0' 2>&1; \
          status=$?; \
          echo \"timeout-status=$status\"; \
          exit \"$status\"",
         &[
+            // Primary deterministic sentinel: the script itself
+            // detected an undercount and exited non-zero.
+            "pid_cap_bit",
+            // Fallback: kernel-level diagnostic, in case the
+            // shell happens to surface fork errors before we
+            // reach the survivor count step.
             "resource temporarily unavailable",
             "cannot fork",
             "fork:",

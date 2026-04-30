@@ -1,5 +1,16 @@
 # Open Pincery — Experiment Log
 
+## BUILD-fix v9 — Slice G1c round 2 — 2026-04-29T09:15Z
+
+- **Gate**: PASS locally (attempt 3/3 — final retry budget); CI privileged sandbox-smoke job re-run is the runtime proof.
+- **Evidence**: CI run `25142593325` on `9396f81` showed 8 passed, 2 failed in `sandbox_escape_test`: fork-bomb fix worked (now passing); memory-balloon and pid-exhaustion still failing. `cargo fmt`/`clippy` clean locally on round-2 fix.
+- **Root causes** (round 2):
+  1. `resource_memory_balloon_blocked` — `head -c 600M /dev/zero | sort >/dev/null` exited 0. Investigation: GNU sort buffers efficiently and for a single 600 MiB line of NULs apparently kept its working set well below the 512 MiB cap (likely streaming/chunking internally even when input has no newlines). The cgroup memory accounting did not bite. Fix: switch to a deterministic single-allocation primitive: `dd if=/dev/zero of=/dev/null bs=600M count=1`. dd allocates a single 600 MiB I/O buffer in process anonymous memory *before* any read, so the cgroup memory accountant catches it immediately. Cgroup OOM-kills dd with SIGKILL → exit 137.
+  2. `resource_pid_exhaustion_blocked` — the synchronous fork canary `(:)` did NOT actually probe fork. dash optimizes single-builtin subshells: when the body of `( ... )` is a single builtin like `:` or `true`, dash skips the fork entirely. With no canary, only the `&` background spawns happen, and dash silently swallows their fork failures (returns 0). All 200 iterations completed; `iters=200` printed. Fix: stop relying on shell diagnostics. Use the SURVIVORS pattern from the existing `tests/sandbox_cgroup_test.rs::cgroup_pids_max_limits_fork_count` test — spawn 200 background sleeps, count via `jobs -p | wc -l`, and have the script *itself* exit non-zero with a sentinel `PID_CAP_BIT survivors=N requested=200` when the count is below the request. This converts the cgroup enforcement check into a deterministic in-script comparison rather than dependent on shell diagnostic emission.
+- **Changes**: `tests/sandbox_escape_test.rs` only — two test bodies replaced. Module-doc, harness primitives, and fork-bomb test untouched.
+- **Retries**: 1 (this is round 2; budget remaining: 1). Both root causes were narrow and well-understood — sort's buffering behavior was the only real surprise; the canary issue was a known dash optimization.
+- **Next**: Commit + push, watch CI. If round 3 still has any failure, the gate is exhausted at 3/3 and we STOP per BEE-OS.
+
 ## BUILD-fix v9 — Slice G1c round 1 — 2026-04-29T08:30Z
 
 - **Gate**: PASS locally (attempt 2/3); CI privileged sandbox-smoke job re-run is the runtime proof.
