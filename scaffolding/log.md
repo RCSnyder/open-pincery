@@ -1,5 +1,13 @@
 # Open Pincery — Experiment Log
 
+## BUILD-fix v9 — Slice G1b remediation round 1 (privesc test correctness) — 2026-04-29T07:00Z
+
+- **Gate**: PASS (attempt 2 of post-build admission for G1b; round 1 = commit `cb8521b`).
+- **Evidence**: GitHub Actions CI run `25141549899` on `cb8521b` failed only the privileged `sandbox real-bwrap smoke` job (`73692229516`) with three diagnosable test failures, all in the new G1b suite: (1) `privesc_setuid_exec_blocked` returned `ExecResult::Rejected("sudo is not permitted")` because the sandbox preflight scans the user-supplied command string for `sudo` and refuses before exec — a stronger block than runtime denial, but it short-circuits the helper's `ExecResult::Ok` path; (2) `privesc_cap_sys_admin_blocked` exited 0 in the both-denied branch (`else: echo "...denied"; exit 0`), violating the helper's `assert_ne!(exit_code, 0)` guard; (3) `privesc_user_ns_elevation_blocked` exited non-zero with `unshare: unshare failed: No space left on device` (kernel per-user userns limit / `user.max_user_namespaces` exhausted) but no signature in the list matched. Fixes (test-only): drop `sudo` from the setuid cascade and invert exit semantics so denial → exit 1; flip `cap_sys_admin` script so denial → exit 1 (escape paths now exit 0 to be caught by the assertion); add `"no space left on device"` as a denial signature for both `cap_sys_admin` and `user_ns_elevation` (it is a valid kernel-level block of userns creation). Local: `cargo fmt --all` clean, `cargo clippy --all-targets -- -D warnings` clean (Windows host, Linux test bodies gated by `cfg(target_os = "linux")`).
+- **Changes**: `tests/sandbox_escape_test.rs` only — three `assert_payload_blocked` invocations updated, comments revised to explain the inverted exit semantics. No `src/` changes; no readiness change (G1b key links and truths still hold; the helper contract is unchanged).
+- **Retries**: 1 (this is the round-1 remediation of the G1b BUILD slice).
+- **Next**: Commit + push; watch CI privileged sandbox-smoke job. On green, append G1b VERIFY entry, update memory file, then open Slice G1c (resource payloads).
+
 ## BUILD v9 — Slice G1b / AC-76 sandbox escape suite (privesc category) — 2026-04-29T05:30Z
 
 - **Gate**: PASS (attempt 1). Post-build admission gate met locally; CI privileged sandbox-smoke job is the runtime proof.
