@@ -207,6 +207,197 @@ pub fn sweep_leaked_cgroups() -> io::Result<usize> {
     Ok(removed)
 }
 
+/// Outcome of [`probe_memory_max_enforcement`]. The empirical probe
+/// distinguishes three cases that the cheap subtree-control parser
+/// cannot:
+///
+/// - [`MemoryProbeOutcome::Enforced`] — the kernel actually killed
+///   an over-allocator inside a freshly-created `pincery-probe-*`
+///   cgroup. memory.max is fully enforced on this host. Safe to
+///   trust the cap inside production sandbox cgroups.
+/// - [`MemoryProbeOutcome::NotEnforced`] — the over-allocator
+///   completed normally despite a cap eight times smaller than the
+///   allocation. Writing `memory.max` is silently a no-op on this
+///   host. Common causes (in order of frequency):
+///     1. Memory controller not delegated to the unified hierarchy
+///        (`memory` missing from `cgroup.subtree_control`). Affects
+///        most non-systemd-managed Docker containers.
+///     2. Swap accounting disabled (`memory.swap.max=max` plus
+///        plenty of free swap). The kernel pages out instead of
+///        OOM-killing.
+///     3. Kernel built without `CONFIG_MEMCG`. Rare in 2026.
+/// - [`MemoryProbeOutcome::Skipped`] — the probe could not run at
+///   all (no cgroup write access, `dd` missing on `$PATH`, fork
+///   failure). Treat as unverified; do not infer enforcement
+///   either way.
+///
+/// The probe is *empirical*, not heuristic: it runs the same
+/// allocation pattern an attacker would attempt and observes the
+/// kernel's response. A `Enforced` result therefore proves the
+/// production capability rather than approximating it.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryProbeOutcome {
+    /// Kernel SIGKILLed the over-allocator. `memory.max` works on
+    /// this host. Production sandbox `memory_max_bytes` caps will
+    /// be honored.
+    Enforced,
+    /// Over-allocator completed normally despite the cap. The
+    /// `evidence` string includes the observed exit code or signal
+    /// and the cap/allocation sizes used. Operators should treat
+    /// `SandboxProfile.cgroup.memory_max_bytes` as advisory until
+    /// the underlying delegation/swap-accounting/kernel issue is
+    /// fixed.
+    NotEnforced { evidence: String },
+    /// Probe could not execute. Caller decides whether to fail
+    /// closed (refuse Enforce mode) or proceed with a warning.
+    Skipped { reason: String },
+}
+
+/// Empirical runtime probe: verify that cgroup v2 `memory.max`
+/// actually causes the kernel to OOM-kill an over-allocator.
+///
+/// Creates a one-shot `pincery-probe-mem-<uuid>` cgroup with
+/// `memory.max=8 MiB`, then spawns `dd if=/dev/zero of=/dev/null
+/// bs=64M count=1` attached to that cgroup via a `pre_exec` write
+/// to `cgroup.procs`. dd allocates a single 64 MiB block buffer
+/// before any read/write — eight times the cap, an unambiguous
+/// over-allocation. Three observable outcomes:
+///
+/// 1. dd is reaped with signal 9 (`SIGKILL`) → memory.max is
+///    enforced; return [`MemoryProbeOutcome::Enforced`].
+/// 2. dd exits 0 → memory.max was silently ignored; return
+///    [`MemoryProbeOutcome::NotEnforced`].
+/// 3. The probe could not even start (cgroup write blocked, dd
+///    missing) → return [`MemoryProbeOutcome::Skipped`].
+///
+/// The probe is bounded by dd's own runtime: with `bs=64M count=1`
+/// and `/dev/zero`/`/dev/null`, dd completes (or is killed) in
+/// well under one second on any machine that can boot Linux. We
+/// therefore do not impose an external timeout — a hung dd would
+/// indicate a deeper kernel fault that no test-side timeout can
+/// usefully recover from.
+///
+/// ## Why an empirical probe instead of `cgroup.subtree_control`
+///
+/// The cheap parser (read `cgroup.subtree_control`, look for the
+/// `memory` token) is necessary but not sufficient. CI runs
+/// 25142773968 / 25142973309 demonstrated that on a privileged
+/// Docker host the controller IS listed in `subtree_control`, yet
+/// the kernel still does not enforce the cap on the bwrapped
+/// hierarchy — likely a swap-accounting / `memory.swap.max` /
+/// overlayfs interaction. Only an empirical allocation against a
+/// known-too-small cap reliably distinguishes "enforced" from
+/// "delegated but ignored".
+///
+/// ## Slice scope (G1c.x)
+///
+/// This slice ships the probe + a unit test that exercises the
+/// `Skipped` branch on unprivileged hosts. It does NOT yet wire
+/// the probe into `assert_kernel_floor` or refuse `Enforce` mode
+/// when the probe says `NotEnforced` — a follow-up slice (G1c.x.2)
+/// will own that posture decision so this slice stays small. The
+/// initial caller is `tests/sandbox_escape_test.rs`'s
+/// `resource_memory_balloon_blocked`, which now gates on the probe
+/// instead of unconditionally skipping.
+#[cfg(target_os = "linux")]
+pub fn probe_memory_max_enforcement() -> MemoryProbeOutcome {
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    use std::process::{Command, Stdio};
+
+    if !cgroup_v2_writable() {
+        return MemoryProbeOutcome::Skipped {
+            reason: "cgroup v2 not writable (need root, CAP_SYS_ADMIN, or systemd Delegate=yes)"
+                .into(),
+        };
+    }
+
+    // 8 MiB cap vs 64 MiB allocation: 8x ratio is unambiguous and
+    // small enough that the probe never holds meaningful memory
+    // even when `Enforced`.
+    const CAP_BYTES: u64 = 8 * 1024 * 1024;
+    const ALLOC_BYTES: u64 = 64 * 1024 * 1024;
+
+    let limits = CgroupLimits {
+        memory_max_bytes: Some(CAP_BYTES),
+        pids_max: None,
+        cpu_max_micros: None,
+    };
+    let guard = match CgroupGuard::new(&limits) {
+        Ok(g) => g,
+        Err(e) => {
+            return MemoryProbeOutcome::Skipped {
+                reason: format!("cgroup create/apply failed: {e}"),
+            };
+        }
+    };
+    let cgroup_procs = guard.path().join("cgroup.procs");
+
+    let mut cmd = Command::new("dd");
+    cmd.arg("if=/dev/zero")
+        .arg("of=/dev/null")
+        .arg(format!("bs={ALLOC_BYTES}"))
+        .arg("count=1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    // SAFETY: `pre_exec` runs in the freshly-forked child, after
+    // `fork(2)` returns and before `execve(2)`. Writing the child
+    // PID into `cgroup.procs` migrates only the calling task (the
+    // child) — the parent stays in its original cgroup and is
+    // unaffected by the cap. `fs::write` may allocate, but only in
+    // the child's heap, which is bounded by the parent's cgroup
+    // (typically uncapped) until the migration takes effect on the
+    // very next memory access. We move `cgroup_procs` into the
+    // closure so the path lifetime is independent of the parent's
+    // `guard`.
+    unsafe {
+        cmd.pre_exec(move || {
+            let pid = std::process::id().to_string();
+            std::fs::write(&cgroup_procs, pid)
+        });
+    }
+
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return MemoryProbeOutcome::Skipped {
+                reason: format!("dd spawn failed: {e} (is /usr/bin/dd installed?)"),
+            };
+        }
+    };
+    let output = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(e) => {
+            return MemoryProbeOutcome::Skipped {
+                reason: format!("dd wait failed: {e}"),
+            };
+        }
+    };
+
+    if let Some(sig) = output.status.signal() {
+        if sig == 9 {
+            return MemoryProbeOutcome::Enforced;
+        }
+        return MemoryProbeOutcome::NotEnforced {
+            evidence: format!(
+                "dd terminated by signal {sig} (expected SIGKILL=9); cap={CAP_BYTES}B alloc={ALLOC_BYTES}B"
+            ),
+        };
+    }
+    if let Some(code) = output.status.code() {
+        return MemoryProbeOutcome::NotEnforced {
+            evidence: format!(
+                "dd exited with code {code} after allocating {ALLOC_BYTES}B against a {CAP_BYTES}B cap; cgroup memory.max is not enforced on this host"
+            ),
+        };
+    }
+    MemoryProbeOutcome::Skipped {
+        reason: "dd terminated with neither signal nor exit code (kernel anomaly)".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,5 +461,50 @@ mod tests {
             result.is_err(),
             "expected io::Error on unprivileged host, got Ok"
         );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn probe_memory_max_enforcement_skipped_when_unprivileged() {
+        // The probe MUST NOT panic on unprivileged hosts. On any
+        // host where `cgroup_v2_writable()` is false (the common
+        // dev/CI case for non-privileged containers and rootless
+        // CI), the probe must return `Skipped` with an explicit
+        // reason instead of blowing up. Mirrors the
+        // `cgroup_guard_new_fails_closed_when_unprivileged` shape.
+        if cgroup_v2_writable() {
+            // Privileged host: the probe runs for real and we
+            // accept either Enforced or NotEnforced — both are
+            // valid empirical observations. We only refuse Skipped,
+            // which would indicate a bug in cgroup creation rather
+            // than an honest probe answer.
+            let outcome = probe_memory_max_enforcement();
+            match outcome {
+                MemoryProbeOutcome::Enforced => {
+                    eprintln!("probe: memory.max enforced on this host");
+                }
+                MemoryProbeOutcome::NotEnforced { evidence } => {
+                    eprintln!("probe: memory.max NOT enforced — {evidence}");
+                }
+                MemoryProbeOutcome::Skipped { reason } => {
+                    panic!(
+                        "probe must not Skip on a privileged host where cgroup_v2_writable=true: {reason}"
+                    );
+                }
+            }
+            return;
+        }
+        let outcome = probe_memory_max_enforcement();
+        match outcome {
+            MemoryProbeOutcome::Skipped { reason } => {
+                assert!(
+                    reason.contains("cgroup v2 not writable"),
+                    "expected cgroup-write skip reason, got: {reason}"
+                );
+            }
+            other => panic!(
+                "expected Skipped on unprivileged host (cgroup_v2_writable=false), got {other:?}"
+            ),
+        }
     }
 }

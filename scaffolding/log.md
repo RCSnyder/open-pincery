@@ -1,5 +1,27 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — Slice G1c.x: empirical memory-enforcement probe — 2026-04-30T17:30Z
+
+- **Slice goal**: Convert AC-76 memory-balloon from "unconditional skip pending runtime/CI fix" into "honest empirical gate" by adding a real runtime probe that distinguishes three states: `Enforced` / `NotEnforced { evidence }` / `Skipped { reason }`. Per the security audit (top-8 gap #5), this also turns the post-G1c BLOCKED finding into actionable production telemetry — operators on hosts where `memory.max` is delegated-but-ignored now get concrete evidence rather than silent failure.
+- **Why now**: The post-G1c security audit (`scaffolding/log.md` BUILD-STOP entry above; full report delivered 2026-04-30) ranked this as the highest-ROI single move because (a) it closes the only AC-76 payload that was honestly skipped, (b) it converts a CI-config workaround into a *production* safety rail (the same probe will reject `Enforce` mode on misconfigured production hosts in a follow-up slice), and (c) it is a single-file source change with a focused test.
+- **Design (matches build-discipline skill: smallest end-to-end behavior)**:
+  1. Add `MemoryProbeOutcome` enum + `probe_memory_max_enforcement()` to `src/runtime/sandbox/cgroup.rs` (Linux-gated). The probe creates a `pincery-probe-mem-<uuid>` cgroup with `memory.max=8 MiB`, spawns `dd if=/dev/zero of=/dev/null bs=64M count=1` attached via `Command::pre_exec`, and observes whether the kernel SIGKILLs the over-allocator. 8 MiB cap vs 64 MiB allocation = unambiguous 8x ratio.
+  2. Add a unit test that asserts the `Skipped` branch on unprivileged hosts (the common dev/CI case) and accepts either `Enforced` or `NotEnforced` on privileged hosts — refusing only `Skipped`, which would indicate a bug in the create path.
+  3. Re-enable `tests/sandbox_escape_test.rs::resource_memory_balloon_blocked`. Replace the unconditional skip with a `match probe_memory_max_enforcement()` gate. On `Enforced` it runs the original `dd bs=600M count=1` adversarial assertion; on `NotEnforced` it self-skips with empirical evidence; on `Skipped` it self-skips with the probe's reason.
+  4. Update `scope.md` Deferred entry to reflect the new posture (probe shipped, startup-gate deferred to G1c.x.2).
+- **Why empirical, not the cheap subtree-control check**: CI runs 25142773968 / 25142973309 demonstrated the cheap parser is insufficient — `memory` IS in `cgroup.subtree_control` on the privileged runner yet the kernel still doesn't enforce. Only an empirical probe (8 MiB cap, 64 MiB allocation, observe SIGKILL) reliably distinguishes "delegated and enforced" from "delegated but ignored". Rationale documented in the `MemoryProbeOutcome` doc comment.
+- **Files touched (3)**: [src/runtime/sandbox/cgroup.rs](src/runtime/sandbox/cgroup.rs) (+~150 lines: enum + probe + unit test), [tests/sandbox_escape_test.rs](tests/sandbox_escape_test.rs) (~50 lines: replace skip with probe gate), [scaffolding/scope.md](scaffolding/scope.md) (Deferred entry updated). Plus this log entry.
+- **Local verification**: `cargo fmt --all` exit 0; `cargo clippy --all-targets -- -D warnings` exit 0. Linux-only `target_os = "linux"` cfg gates prevent the new code from affecting Windows/macOS builds.
+- **Expected CI behavior on `sandbox real-bwrap smoke`**:
+  - The 9 previously-green G1a/G1b/G1c tests stay green (no behavior change).
+  - `resource_memory_balloon_blocked` runs the probe and either (a) returns `NotEnforced` and self-skips with empirical evidence (most likely on the current runner per the historical record), or (b) returns `Enforced` and successfully asserts the SIGKILL on the 600 MiB dd allocation. Either outcome is a real-runtime green test.
+  - `probe_memory_max_enforcement_skipped_when_unprivileged` runs as a unit test in `cargo test` and self-routes based on `cgroup_v2_writable()`.
+- **Concerns / not touched**:
+  - The probe is not yet wired into `assert_kernel_floor`. A follow-up slice (G1c.x.2) will decide whether `Enforce` mode should refuse to start when the probe returns `NotEnforced`. That is a posture decision (fail-closed vs degrade-with-warning) and deserves its own slice rather than being bundled here.
+  - The probe spawns a real subprocess at *test time*, not at server startup. When wired into preflight, the cost is one fork + one dd invocation at boot — negligible.
+  - `pre_exec` SAFETY note in the doc comment explains why `fs::write` is sound in the post-fork pre-exec child.
+- **Next**: commit + push + watch CI. On green, append G1c.x VERIFY entry, update repo memory AC-76 status, then proceed to either G1c.x.2 (preflight wiring) or G1d (network category — raw socket / 169.254.169.254 / DNS unallowlisted) per user preference.
+
 ## BUILD-STOP v9 — Slice G1c gate exhausted at 4 attempts — 2026-04-29T10:45Z
 
 - **Gate**: STOP (BLOCKED). Per BEE-OS, build-fix gate failed 3 times (rounds 1, 2, 3); a fourth attempt was made for cleanup-only (clippy lint introduced in round 3 + convert memory-balloon to unconditional skip). 9 of 10 G1c-related tests are real-runtime green; 1 is unconditionally skipped pending runtime/CI work.

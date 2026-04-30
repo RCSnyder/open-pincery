@@ -42,7 +42,9 @@
 use std::time::Duration;
 
 use open_pincery::config::{ResolvedSandboxMode, SandboxMode};
-use open_pincery::runtime::sandbox::cgroup::{cgroup_v2_writable, CgroupLimits};
+use open_pincery::runtime::sandbox::cgroup::{
+    cgroup_v2_writable, probe_memory_max_enforcement, CgroupLimits, MemoryProbeOutcome,
+};
 use open_pincery::runtime::sandbox::preflight::{KernelProbe, RealKernelProbe, LANDLOCK_ABI_FLOOR};
 use open_pincery::runtime::sandbox::{
     bwrap::RealSandbox, ExecResult, SandboxProfile, ShellCommand, ToolExecutor,
@@ -535,54 +537,63 @@ async fn resource_memory_balloon_blocked() {
     if !preconditions_met() {
         return;
     }
-    // Gate exhausted at 3/3 BUILD-fix retries. The CI privileged
-    // sandbox-smoke runner has `memory` listed in
-    // `/sys/fs/cgroup/cgroup.subtree_control` (probe returns true),
-    // yet `dd if=/dev/zero of=/dev/null bs=600M count=1` allocates
-    // and uses 600 MiB of process anonymous memory in 0.06s with
-    // no OOM kill (proven by CI runs 25142773968 / 25142973309).
-    // The cgroup v2 memory controller is delegated at the file
-    // level but the kernel does not actually enforce the cap on
-    // the bwrapped tree — likely a swap-accounting, container
-    // memory.swap.max, or Docker overlayfs interaction. Until the
-    // runtime/CI is fixed, this test self-skips unconditionally
-    // with an explicit diagnostic. The skip is loud, scoped to
-    // ONE specific payload, and tracked in `scaffolding/scope.md`
-    // Deferred. fork-bomb and pid-exhaustion still exercise the
-    // same cgroup hierarchy via pids.max successfully, so the
-    // overall AC-76 resource category is 2/3 enforced end-to-end.
-    eprintln!(
-        "skipping resource/memory-balloon: memory.max enforcement gap in CI \
-         (controller listed in subtree_control but kernel does not OOM-kill \
-         a 600 MiB allocation against a 512 MiB cap); see scope.md Deferred \
-         for runtime/CI followup"
-    );
-    let _ = memory_controller_delegated; // keep helper alive for a future runtime probe
-    return;
-    #[allow(unreachable_code)]
-    {
-        assert_payload_blocked(
-            "resource/memory-balloon",
-            // `dd if=/dev/zero of=/dev/null bs=600M count=1` allocates
-            // a single 600 MiB anonymous buffer for one I/O block.
-            // The allocation happens in dd's address space *before*
-            // any read/write, so cgroup memory accounting catches it
-            // immediately when the controller is delegated.
-            "dd if=/dev/zero of=/dev/null bs=600M count=1 2>&1; \
+    // AC-76 / G1c.x: the test now gates on an empirical runtime
+    // probe (`probe_memory_max_enforcement`) rather than the cheap
+    // `subtree_control` parser. The cheap parser was insufficient:
+    // CI runs 25142773968 / 25142973309 demonstrated `memory` IS
+    // listed in `/sys/fs/cgroup/cgroup.subtree_control` on the
+    // privileged sandbox-smoke runner, yet the kernel still does
+    // not OOM-kill a too-large allocation. Only an empirical probe
+    // (8 MiB cap, 64 MiB dd allocation, observe SIGKILL) reliably
+    // distinguishes "enforced" from "delegated but ignored". The
+    // probe runs ONCE here so any host where memory.max is honored
+    // exercises this test for real, while hosts with the broken
+    // delegation/swap/overlayfs interaction self-skip with concrete
+    // empirical evidence rather than blind silence.
+    let _ = memory_controller_delegated; // retained for diagnostic comparison
+    match probe_memory_max_enforcement() {
+        MemoryProbeOutcome::Enforced => {
+            // Fall through to the real assertion below.
+        }
+        MemoryProbeOutcome::NotEnforced { evidence } => {
+            eprintln!(
+                "skipping resource/memory-balloon: memory.max NOT enforced on this host. \
+                 Empirical evidence: {evidence}. \
+                 Common causes: memory controller not delegated to subtree_control, \
+                 swap accounting (memory.swap.max=max with available swap), or Docker \
+                 overlayfs interaction. See scope.md Deferred for the runtime/CI fix."
+            );
+            return;
+        }
+        MemoryProbeOutcome::Skipped { reason } => {
+            eprintln!("skipping resource/memory-balloon: probe could not run — {reason}");
+            return;
+        }
+    }
+    // Probe says enforced — run the real adversarial assertion.
+    // `dd if=/dev/zero of=/dev/null bs=600M count=1` allocates a
+    // single 600 MiB anonymous buffer for one I/O block. The
+    // allocation happens in dd's address space *before* any
+    // read/write, so cgroup memory accounting catches it
+    // immediately. We deliberately avoid writing to `/tmp` (the
+    // bwrap tmpfs is owned by the launcher uid, not by uid 65534
+    // — a stronger property of AC-86).
+    assert_payload_blocked(
+        "resource/memory-balloon",
+        "dd if=/dev/zero of=/dev/null bs=600M count=1 2>&1; \
          status=$?; \
          echo \"alloc-status=$status\"; \
          exit \"$status\"",
-            &[
-                "killed",
-                "out of memory",
-                "alloc-status=137",
-                "alloc-status=143",
-                "memory exhausted",
-                "cannot allocate memory",
-            ],
-        )
-        .await;
-    }
+        &[
+            "killed",
+            "out of memory",
+            "alloc-status=137",
+            "alloc-status=143",
+            "memory exhausted",
+            "cannot allocate memory",
+        ],
+    )
+    .await;
 }
 
 /// Resource-3 / pid-exhaustion: a flat backgrounded loop that tries
