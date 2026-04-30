@@ -346,7 +346,14 @@ pub fn install_landlock_with_restrict_flags(
 
     let abi = ABI::V1;
     let access_all = AccessFs::from_all(abi);
-    let access_read = AccessFs::from_read(abi);
+    let access_read_dir = AccessFs::from_read(abi);
+    // For regular files, READ_DIR is invalid -- the kernel returns
+    // EINVAL on `landlock_add_rule` when any access bit is
+    // incompatible with the path type. `from_file(abi)` returns the
+    // subset of access bits that apply to files (READ_FILE +
+    // EXECUTE), so file entries in `rx_paths` (e.g. /etc/passwd,
+    // /etc/ld.so.cache from ETC_ALLOWLIST) install cleanly.
+    let access_read_file = AccessFs::from_file(abi);
 
     let mut ruleset = Ruleset::default()
         .set_compatibility(compatibility.compat_level())
@@ -361,8 +368,13 @@ pub fn install_landlock_with_restrict_flags(
             // Path doesn't exist on this distro - fine, skip.
             Err(_) => continue,
         };
+        let access = if path_is_dir(p) {
+            access_read_dir
+        } else {
+            access_read_file
+        };
         ruleset = ruleset
-            .add_rule(PathBeneath::new(fd, access_read))
+            .add_rule(PathBeneath::new(fd, access))
             .map_err(|e| format!("landlock add_rule({}) failed: {e}", p.display()))?;
     }
     for p in &profile.rwx_paths {
@@ -397,7 +409,14 @@ fn install_landlock_raw(
             Ok(fd) => fd,
             Err(_) => continue,
         };
-        add_path_rule(&ruleset_fd, &path_fd, LANDLOCK_ACCESS_FS_V1_READ, path)?;
+        let access = if path_is_dir(path) {
+            LANDLOCK_ACCESS_FS_V1_READ
+        } else {
+            // Strip READ_DIR for regular files; the kernel returns
+            // EINVAL on add_rule otherwise.
+            LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE
+        };
+        add_path_rule(&ruleset_fd, &path_fd, access, path)?;
     }
     for path in &profile.rwx_paths {
         let path_fd = open_path_fd(path)?;
@@ -453,6 +472,18 @@ fn open_path_fd(path: &Path) -> Result<OwnedFd, String> {
     }
     // SAFETY: `raw_fd` is a fresh kernel-allocated fd with no owner.
     Ok(unsafe { OwnedFd::from_raw_fd(raw_fd) })
+}
+
+/// True iff `path` exists and is a directory. Used by both the
+/// safe-API and raw landlock installers to pick a `PathBeneath`
+/// access mask compatible with the path type. The kernel returns
+/// EINVAL from `landlock_add_rule` when an access mask includes
+/// bits that don't apply to the path (e.g. `READ_DIR` on a regular
+/// file). Unknown / missing paths are treated as files; the
+/// installer skips them anyway via `PathFd::new`/`open_path_fd`
+/// returning Err and the per-path rule loop `continue`-ing.
+fn path_is_dir(path: &Path) -> bool {
+    std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false)
 }
 
 fn add_path_rule(

@@ -149,8 +149,12 @@ async fn landlock_permits_normal_commands() {
 }
 
 /// Positive control #2: reading a file under `/etc` works because
-/// `/etc` is in the default rx allowlist. We cat `/etc/hostname`
-/// which exists on every Linux distro we care about.
+/// the default rx allowlist includes the public-runtime allowlist
+/// `runtime::sandbox::landlock_layer::ETC_ALLOWLIST` (G1a-narrowed).
+/// We cat `/etc/os-release`, which is in that allowlist and exists
+/// on every Linux distro we care about. Previously this test cat'd
+/// `/etc/hostname`, which after the G1a narrowing is no longer
+/// bind-mounted into the sandbox view.
 #[tokio::test]
 async fn landlock_permits_reading_etc() {
     if !preconditions_met() {
@@ -161,7 +165,7 @@ async fn landlock_permits_reading_etc() {
             // `2>/dev/null` swallows any "no such file" diagnostic on
             // exotic distros; the assertion below just checks that
             // the syscall path itself wasn't blocked by landlock.
-            &ShellCommand::new("cat /etc/hostname 2>/dev/null; echo exit=$?"),
+            &ShellCommand::new("cat /etc/os-release 2>/dev/null; echo exit=$?"),
             &landlock_profile(),
         )
         .await;

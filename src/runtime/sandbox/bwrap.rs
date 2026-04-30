@@ -1000,8 +1000,17 @@ mod tests {
             }
             let dst = window[2].as_str();
             for forbidden in crate::runtime::sandbox::landlock_layer::ETC_FORBIDDEN_PATHS {
+                // Bare `/etc` is forbidden as a bind dest, but it
+                // is the parent of every safe allowlist entry, so
+                // we must NOT prefix-match it (that would also
+                // catch `/etc/passwd` etc.). For deeper sensitive
+                // subtrees (`/etc/ssh`, `/etc/ssl/private`, ...)
+                // both exact and prefix matches are forbidden.
+                let exact_match = dst == *forbidden;
+                let subtree_match =
+                    *forbidden != "/etc" && dst.starts_with(&format!("{forbidden}/"));
                 assert!(
-                    dst != *forbidden && !dst.starts_with(&format!("{forbidden}/")),
+                    !exact_match && !subtree_match,
                     "bwrap argv binds forbidden /etc path {dst} (matched {forbidden}); \
                      full argv: {args:?}"
                 );
