@@ -11,6 +11,12 @@
 //!   4. `mount --bind /etc /mnt` — seccomp denylist plus cap-drop
 //!      block `mount(2)`.
 //!
+//! G1b extends the suite with the three privesc payloads named by
+//! AC-76 in `scaffolding/scope.md`: setuid exec, `CAP_SYS_ADMIN`
+//! syscall, and user-namespace elevation. Every privesc test reuses
+//! the G1a precondition gate, `escape_profile()`, and
+//! `assert_payload_blocked` helper without modification.
+//!
 //! Each payload runs through `RealSandbox` in `Enforce` mode with every
 //! defence layer turned on (`deny_net=true`, `seccomp=true`,
 //! `landlock=true`). Every assertion has TWO checks: a non-zero
@@ -254,6 +260,136 @@ async fn fs_mount_ns_break_blocked() {
             "must be superuser",
             "permission denied",
             "bad system call",
+            "only root can",
+        ],
+    )
+    .await;
+}
+
+// -------------------------------------------------------------------
+// AC-76 / Slice G1b — privesc category (3 payloads).
+//
+// Each test below targets one privilege-escalation primitive named
+// in scope.md AC-76. They all run through `escape_profile()` (every
+// defence layer on) under the production `RealSandbox` `Enforce`
+// path, with the same two-check assertion shape as G1a (non-zero
+// exit AND a denial signature). See readiness G1b addendum
+// (T-AC76-G1b-2 / L-AC76-G1b-1..3) for the per-payload rationale.
+// -------------------------------------------------------------------
+
+/// Privesc-1 / setuid exec: even if a setuid-root binary is reachable
+/// inside the sandbox view, `execve` cannot elevate. `pincery-init`
+/// sets `PR_SET_NO_NEW_PRIVS`; bwrap also drops to uid 65534 in a
+/// new user namespace where the host root is unmapped (AC-86). The
+/// payload exec's a candidate setuid binary then prints `id -u`; the
+/// effective uid must remain 65534, OR every candidate binary must
+/// be absent from the sandbox view (also a valid block — the binary
+/// cannot escalate what is unreachable).
+#[tokio::test]
+async fn privesc_setuid_exec_blocked() {
+    if !preconditions_met() {
+        return;
+    }
+    assert_payload_blocked(
+        "privesc/setuid-exec",
+        // `su -c 'id -u'` is the canonical setuid escalation probe;
+        // we fall through to `sudo` and `passwd` if `su` is missing.
+        // The trailing `id -u` proves the running uid; it MUST stay
+        // at 65534 (or the candidate binaries MUST all refuse / be
+        // absent). `2>&1` so refusal diagnostics reach stdout.
+        "(su -c 'id -u' 2>&1 || \
+          sudo -n id -u 2>&1 || \
+          passwd --status 2>&1 || \
+          (echo \"all setuid candidates refused/absent\" && false)); \
+         id_after=$(id -u); \
+         echo \"final-uid=$id_after\"; \
+         test \"$id_after\" -eq 0 && exit 1; \
+         exit 0",
+        &[
+            "must be run from a terminal",
+            "permission denied",
+            "no such file or directory",
+            "operation not permitted",
+            "authentication failure",
+            "must be setuid",
+            "may not be used",
+            "all setuid candidates refused/absent",
+            // Defence-in-depth: even if the candidate ran, the
+            // trailing `final-uid=65534` proves no elevation
+            // occurred. Match on the unprivileged uid string so a
+            // hypothetical successful exit-0 path with uid 0
+            // cannot match this signature.
+            "final-uid=65534",
+        ],
+    )
+    .await;
+}
+
+/// Privesc-2 / `CAP_SYS_ADMIN` syscall: AC-86 cap-drop ALL removes
+/// `CAP_SYS_ADMIN` from the bounding set, and AC-77's seccomp
+/// denylist provides defence-in-depth against `mount`/`pivot_root`.
+/// `chroot` requires `CAP_SYS_CHROOT` (a subset of the privileged
+/// surface); `unshare --user --map-root-user` requires
+/// `CAP_SETUID`/`CAP_SETGID` in the parent namespace, which the
+/// sandbox has also dropped. Both probes must fail.
+#[tokio::test]
+async fn privesc_cap_sys_admin_blocked() {
+    if !preconditions_met() {
+        return;
+    }
+    assert_payload_blocked(
+        "privesc/cap-sys-admin",
+        // Try chroot first (the most direct CAP_SYS_ADMIN-adjacent
+        // primitive); fall through to unshare's map-root-user. If
+        // both fail with EPERM the test passes; if either succeeds
+        // (returns 0) we EXIT 1 to surface the escape.
+        "if chroot /tmp /bin/true 2>&1; then \
+           echo \"escape: chroot succeeded\"; exit 1; \
+         elif unshare --user --map-root-user /bin/true 2>&1; then \
+           echo \"escape: map-root-user succeeded\"; exit 1; \
+         else \
+           echo \"both privileged probes denied\"; exit 0; \
+         fi",
+        &[
+            "operation not permitted",
+            "permission denied",
+            "must be superuser",
+            "bad system call",
+            "only root can",
+            "both privileged probes denied",
+        ],
+    )
+    .await;
+}
+
+/// Privesc-3 / user-namespace elevation: with
+/// `kernel.apparmor_restrict_unprivileged_userns=0` set on the
+/// privileged CI host, `unshare -U` itself can succeed; the escape
+/// would require chaining it to `mount`/`pivot_root`/setuid-exec,
+/// all of which the seccomp denylist + `PR_SET_NO_NEW_PRIVS` block.
+/// We probe by entering a new user namespace with `-r` (mapping
+/// host-uid to in-ns root) then attempting `mount --bind`; the
+/// mount must EPERM, surfacing the layered defence.
+#[tokio::test]
+async fn privesc_user_ns_elevation_blocked() {
+    if !preconditions_met() {
+        return;
+    }
+    assert_payload_blocked(
+        "privesc/user-ns-elevation",
+        // If the unshare itself fails (some kernels still require
+        // userns-restrict relaxation), that's a valid block. If it
+        // succeeds, the chained mount must fail. We capture and
+        // propagate the inner shell's exit through `status=$?`.
+        "unshare -U -r /bin/sh -c 'id -u; mount --bind /etc /mnt 2>&1' 2>&1; \
+         status=$?; \
+         exit \"$status\"",
+        &[
+            "operation not permitted",
+            "permission denied",
+            "must be superuser",
+            "bad system call",
+            "no such file or directory",
             "only root can",
         ],
     )

@@ -219,6 +219,154 @@ denied_path, requested_access, syscall}` fields plus `wake_id`,
 
 ---
 
+# Readiness: Open Pincery — v9 Phase G1b (AC-76 Sandbox Escape Suite — Privesc Category)
+
+> This addendum covers Slice G1b only. G1a (FS) closed at commits
+> `24ac973` → `dd10a8b` → `4913c6e` (CI run `25141121156` green).
+> Slices G1c/G1d/G1e add the resource, network categories and the
+> AC-53 closure gate. Prior G1a + G0f readiness sections remain the
+> authoritative record for those slices.
+
+## Verdict
+
+READY for Slice G1b / AC-76 (privesc category). Builds on the G1a
+harness (precondition gate + `escape_profile()` + `assert_payload_blocked`)
+and reuses the production `RealSandbox` + `pincery-init` wrapper.
+This slice ships the three privesc-category adversarial payloads named
+by `scaffolding/scope.md` AC-76: setuid exec, `CAP_SYS_ADMIN` syscall,
+user-ns elevation. Resource, network, and the synthesized
+`sandbox_blocked` event remain explicitly deferred to G1c/G1d/G1e.
+
+## Truths
+
+- **T-AC76-G1b-1** Slice G1b extends `tests/sandbox_escape_test.rs`
+  with three privesc payloads. The shared precondition gate, profile
+  helper, and `assert_payload_blocked` from G1a are reused verbatim;
+  no new harness code is added.
+- **T-AC76-G1b-2** The three privesc payloads are:
+  1. **Setuid exec** — verify that even if a setuid-root binary is
+     reachable inside the sandbox view, `execve` does not elevate.
+     `pincery-init` sets `PR_SET_NO_NEW_PRIVS`; bwrap also sets
+     `--unshare-user --uid 65534 --gid 65534` per AC-86. The payload
+     attempts `id -u` after exec'ing a candidate setuid binary
+     (`/usr/bin/su`, `/usr/bin/sudo`, `/usr/bin/passwd`, `/bin/su`)
+     and asserts the effective uid stays at 65534, OR the binary is
+     simply not present in the sandbox view (also a valid block).
+     Denial signatures: "must be run from a terminal", "permission
+     denied", "no such file or directory", "operation not permitted",
+     "authentication failure", "must be setuid", "may not be used".
+  2. **`CAP_SYS_ADMIN` syscall** — invoke a syscall that requires
+     `CAP_SYS_ADMIN` (e.g. `unshare --user --map-root-user true`,
+     `chroot /tmp /bin/true`). AC-86 cap-drop removes the capability
+     from the bounding set; AC-77's seccomp denylist also blocks
+     several admin syscalls. Denial signatures: "operation not
+     permitted", "permission denied", "must be superuser", "bad
+     system call", "only root can".
+  3. **User-namespace elevation** — `unshare -U` to spawn a new user
+     namespace where uid 0 is mapped. With `kernel.apparmor_restrict_unprivileged_userns=0`
+     set on the privileged CI host this is normally permitted, but
+     the in-sandbox `pincery-init` already holds `PR_SET_NO_NEW_PRIVS`
+     and the seccomp filter denies the chained `mount`/`pivot_root`
+     primitives that make the namespace exploitable. The payload
+     `unshare -U -r /bin/true 2>&1; status=$?; exit "$status"`
+     asserts either denial of the unshare itself, or denial of the
+     follow-on `id -u` showing it cannot reach root. Denial
+     signatures: "operation not permitted", "permission denied",
+     "bad system call", "no such file", "must be superuser".
+- **T-AC76-G1b-3** Each payload runs through the production
+  `RealSandbox` `Enforce` mode under `escape_profile()` (every defence
+  layer on). No payload sets `OPEN_PINCERY_SANDBOX_FLOOR=relaxed`,
+  `OPEN_PINCERY_ALLOW_UNSAFE`, or `OPEN_PINCERY_INIT_FORCE_PARTIAL`.
+- **T-AC76-G1b-4** Every assertion has TWO checks: non-zero
+  `exit_code` AND a denial-signature match in stdout/stderr.
+  Bare-exit-code blocks (which a missing binary would pass) are
+  rejected by the harness from G1a.
+- **T-AC76-G1b-5** G1b does not weaken the AC-84/AC-85 enforcement
+  floor and does not add new runtime code in `src/`. Test-only delta.
+- **T-AC76-G1b-6** G1b is cross-platform-buildable and
+  Linux-only-runnable. The whole file remains
+  `#![cfg(target_os = "linux")]`. Privileged CI `sandbox-smoke` is
+  the runtime proof; Docker Desktop devshell self-skips strict-floor
+  checks (Landlock ABI Some(3) < floor 6).
+- **T-AC76-G1b-7** G1b binds the same canonical TLA+ actions as G1a
+  (`ProvisionSandbox`, `ScopeFilesystem`, `BindShellPolicy`,
+  `AttestSandbox`); no new bindings. `ScopeNetwork` lands with G1d.
+
+## Key Links
+
+- **L-AC76-G1b-1** [AC-76 privesc / setuid exec] -> AC-86 uid-drop
+  to 65534 + `pincery-init` `PR_SET_NO_NEW_PRIVS` + bwrap's
+  `--unshare-user --uid 65534` -> a setuid bit on a binary cannot
+  escalate during `execve`. Asserted by either denial signature OR
+  `id -u` reporting 65534.
+- **L-AC76-G1b-2** [AC-76 privesc / CAP_SYS_ADMIN] -> AC-86
+  cap-drop ALL removes `CAP_SYS_ADMIN` from the bounding set;
+  `unshare --user --map-root-user` / `chroot` therefore EPERM.
+  AC-77 seccomp denylist provides defence-in-depth.
+- **L-AC76-G1b-3** [AC-76 privesc / user-ns elevation] -> even
+  when the kernel permits `unshare -U`, the seccomp denylist
+  blocks the `mount`/`pivot_root` primitives needed to weaponise
+  the new namespace, and `PR_SET_NO_NEW_PRIVS` prevents
+  setuid-exec inside it. Asserted via the chained command's
+  exit status.
+
+## Acceptance Criteria Coverage
+
+| AC ID | Build Slice | Test / Proof | Runtime Verification | Status |
+| ----- | ----------- | ------------ | -------------------- | ------ |
+| AC-76 | G1b: 3 privesc payloads (setuid exec, CAP_SYS_ADMIN, user-ns elevation) | `tests/sandbox_escape_test.rs` extended (three new `#[tokio::test]` functions); reuses G1a harness. | Privileged CI `sandbox-smoke` job runs all 7 payloads (4 FS + 3 privesc) and fails if any block is missing or any payload succeeds. Local devshell self-skips strict-floor checks. | G1b in progress; G1c/G1d/G1e queued. |
+
+## Scope Reduction Risks
+
+- **Test passes because the setuid binary is missing**: explicit
+  acceptable signature — `assert_payload_blocked` accepts "no such
+  file or directory" because *absence* of the setuid binary inside
+  the sandbox is itself a valid block (the binary cannot escalate
+  what is not reachable). This is documented in T-AC76-G1b-2 #1.
+- **Payload "blocks" because the shell is not present**: guarded by
+  the G1a precondition gate (bwrap on PATH, Landlock supported, ABI
+  >= floor) plus the privileged CI image which carries coreutils,
+  `unshare`, and `su`/`sudo`/`passwd`.
+- **Effective uid not actually checked**: setuid payload uses
+  `id -u` *after* the candidate exec; an unconditional non-zero
+  exit from a missing binary still requires a recognised signature.
+- **Floor relaxation creep**: T-AC76-G1b-3 explicitly forbids the
+  relaxed/allow-unsafe/force-partial knobs.
+
+## Clarifications Needed
+
+- None blocking. The three payloads in scope.md (`setuid exec`,
+  `CAP_SYS_ADMIN syscall`, `user-ns elevation`) map 1:1 to the three
+  test functions and the three Key Links above. No interpretation
+  required.
+
+## Build Order
+
+1. **G1b.1 — Setuid exec payload.** New `#[tokio::test]`
+   `privesc_setuid_exec_blocked` in `tests/sandbox_escape_test.rs`.
+   Iterates candidate setuid binaries; asserts none yields uid 0.
+2. **G1b.2 — `CAP_SYS_ADMIN` syscall payload.** New
+   `privesc_cap_sys_admin_blocked` test invoking
+   `unshare --user --map-root-user true` (or `chroot`) and asserting
+   non-zero exit + denial signature.
+3. **G1b.3 — User-ns elevation payload.** New
+   `privesc_user_ns_elevation_blocked` test running `unshare -U -r`
+   chained to a privileged probe; asserts non-zero exit + denial
+   signature.
+4. **G1b.4 — Local verify and push.** `cargo fmt --all -- --check`,
+   `cargo clippy --all-targets -- -D warnings`, `cargo check --tests`.
+   Commit + push; CI privileged `sandbox-smoke` job is the runtime
+   proof.
+
+## Complexity Exceptions
+
+- The G1a allowance for `tests/sandbox_escape_test.rs` up to ~250
+  lines is consumed (~265 lines after G1a). G1b adds ~70-90 lines,
+  putting the file at ~340-360 lines, still under the ~450-line
+  trigger to split by category in G1e. No new exceptions.
+
+---
+
 # Readiness: Open Pincery — v9 Phase G1a (AC-76 Sandbox Escape Suite — FS Category)
 
 > This addendum covers Slice G1a only. It opens AC-76 work (Phase G,

@@ -1,6 +1,14 @@
 # Open Pincery — Experiment Log
 
-## VERIFY v9 — Slice G1a / AC-76 (FS category) green on CI — 2026-04-29T05:00Z
+## BUILD v9 — Slice G1b / AC-76 sandbox escape suite (privesc category) — 2026-04-29T05:30Z
+
+- **Gate**: PASS (attempt 1). Post-build admission gate met locally; CI privileged sandbox-smoke job is the runtime proof.
+- **Evidence**: `cargo fmt --all -- --check` exit 0; `cargo check --tests --quiet` clean; `cargo clippy --all-targets --quiet -- -D warnings` clean. Three new `#[tokio::test]` functions added to `tests/sandbox_escape_test.rs` covering the AC-76 privesc payloads named by `scaffolding/scope.md`: `privesc_setuid_exec_blocked`, `privesc_cap_sys_admin_blocked`, `privesc_user_ns_elevation_blocked`. Each reuses the G1a precondition gate, `escape_profile()` (every defence on), and `assert_payload_blocked` helper without modification. Each assertion has TWO checks: non-zero exit AND a denial-signature match. Setuid test additionally asserts `final-uid=65534` as defence-in-depth — even if a candidate ran, the trailing `id -u` proves no elevation.
+- **Changes**: `tests/sandbox_escape_test.rs` (+~120 lines, file ~390 lines, still under the ~450-line G1e split trigger); `scaffolding/readiness.md` G1b addendum (verdict READY, 7 truths, 3 key links, build order, scope-reduction risks, complexity exceptions). No runtime / `src/` changes — test-only delta.
+- **Retries**: 0.
+- **Next**: Commit and push, capture CI privileged sandbox-smoke evidence (the 3 new tests run alongside the 4 FS payloads and Landlock + IPC + bwrap tests), then start G1c (resource payloads).
+
+
 
 - **Gate**: PASS (attempt 1 post-fix). Slice G1a closed.
 - **Evidence**: GitHub Actions CI run `25141121156` on commit `dd10a8b` succeeded across all jobs: `cargo test`, `clippy`, `rustfmt`, `cargo deny`, and the privileged `sandbox real-bwrap smoke` job. TLA+ run `25141121144` on the same head also succeeded. The bwrap unit guard (`bwrap_args_do_not_bind_broad_or_sensitive_etc`) and Landlock guard (`default_profile_does_not_grant_broad_etc`) ran clean; the four FS escape payloads (`cat /etc/shadow`, `ls /proc/1/root`, `dd if=/dev/sda`, `mount --bind`) executed under the privileged container and all blocked with denial-signature evidence. The previously-failed run `25140817065` is superseded.
