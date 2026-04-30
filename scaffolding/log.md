@@ -1,5 +1,13 @@
 # Open Pincery — Experiment Log
 
+## VERIFY v9 — Slice G1b / AC-76 sandbox escape suite (privesc category) — 2026-04-29T07:30Z
+
+- **Gate**: PASS (attempt 1 post-fix). Slice G1b closed.
+- **Evidence**: GitHub Actions CI run `25141721367` on commit `8935fd7` succeeded across all five jobs: `cargo test` (host, full suite), `clippy`, `rustfmt`, `cargo deny`, and the privileged `sandbox real-bwrap smoke` job. The privileged job is the runtime proof for the three new G1b tests — `privesc_setuid_exec_blocked`, `privesc_cap_sys_admin_blocked`, `privesc_user_ns_elevation_blocked` — which now pass alongside the four G1a FS payloads. TLA+ run `25141721356` on the same head also succeeded. The previously-failed CI run `25141549899` on `cb8521b` (3 privesc test failures) is superseded.
+- **Changes**: None this entry — verifies `8935fd7` (G1b round-1 remediation in `tests/sandbox_escape_test.rs`).
+- **Retries**: 1 build-fix iteration (round 1: `cb8521b` initial G1b, round 2: `800ddf2` test-correctness fix → `8935fd7` log update); 0 verify-fix iterations.
+- **Next**: Open Slice G1c (AC-76 resource category — fork-bomb, memory-balloon, pid-exhaustion). ANALYZE addendum first.
+
 ## BUILD-fix v9 — Slice G1b remediation round 1 (privesc test correctness) — 2026-04-29T07:00Z
 
 - **Gate**: PASS (attempt 2 of post-build admission for G1b; round 1 = commit `cb8521b`).
