@@ -152,10 +152,14 @@ async fn assert_payload_blocked(payload_name: &str, command: &str, denial_signat
     }
 }
 
-/// FS-1 / read `/etc/shadow`: the file exists inside the sandbox
-/// because bwrap `--ro-bind /etc /etc` exposes it, but its mode
-/// (0640 root:shadow) is unreadable by UID 65534 (AC-86 uid drop).
-/// Landlock's rx allowance on `/etc` does not bypass DAC.
+/// FS-1 / read `/etc/shadow`: after the G1a /etc-narrowing, the
+/// sandbox view of `/etc` is a tmpfs containing only the public
+/// runtime allowlist (see
+/// `runtime::sandbox::landlock_layer::ETC_ALLOWLIST`). `/etc/shadow`
+/// is therefore not bind-mounted and resolves to ENOENT. Even if a
+/// future regression re-exposed it, AC-86 uid-drop (65534) plus
+/// Landlock would still need to deny the read; this test passes when
+/// any of those layers (combined) blocks the open.
 #[tokio::test]
 async fn fs_etc_shadow_read_blocked() {
     if !preconditions_met() {
@@ -163,13 +167,17 @@ async fn fs_etc_shadow_read_blocked() {
     }
     assert_payload_blocked(
         "fs/etc-shadow-read",
-        // 2>&1 so we see the "Permission denied" diagnostic on
-        // stdout even when the cat redirect target is /dev/null.
-        "cat /etc/shadow 2>&1; echo exit=$?",
-        // Only kernel/coreutils denial diagnostics — bare
-        // "exit=N" tokens are deliberately excluded so a missing
-        // binary or shell syntax error cannot pass for a block.
-        &["permission denied"],
+        // 2>&1 so coreutils' diagnostic is visible alongside the
+        // (empty) stdout. No `; echo exit=$?` -- that would mask
+        // cat's non-zero exit behind echo's exit 0. The shell's
+        // exit code now reflects the last (and only) command.
+        "cat /etc/shadow 2>&1",
+        // After narrowing the bind allowlist, the file simply does
+        // not exist inside the sandbox (ENOENT). "permission
+        // denied" is retained as a defence-in-depth signature in
+        // case future hardening puts the file behind DAC + Landlock
+        // instead of removing it from the view entirely.
+        &["no such file or directory", "permission denied"],
     )
     .await;
 }
@@ -185,7 +193,7 @@ async fn fs_proc_1_root_walk_blocked() {
     }
     assert_payload_blocked(
         "fs/proc-1-root-walk",
-        "ls -la /proc/1/root 2>&1; echo exit=$?",
+        "ls -la /proc/1/root 2>&1",
         &["permission denied", "no such file or directory"],
     )
     .await;
@@ -204,8 +212,9 @@ async fn fs_dev_sda_open_blocked() {
         "fs/dev-sda-open",
         // `dd` writes its diagnostic to stderr; redirect to stdout so
         // we can match either path. `count=1 bs=1` keeps the test
-        // bounded if (somehow) the open ever succeeded.
-        "dd if=/dev/sda of=/dev/null bs=1 count=1 2>&1; echo exit=$?",
+        // bounded if (somehow) the open ever succeeded. No trailing
+        // `echo exit=$?` -- the shell's exit reflects dd directly.
+        "dd if=/dev/sda of=/dev/null bs=1 count=1 2>&1",
         &[
             "no such file or directory",
             "no such device",
@@ -231,12 +240,15 @@ async fn fs_mount_ns_break_blocked() {
     }
     assert_payload_blocked(
         "fs/mount-ns-break",
-        // We need /mnt to exist as a target; create it inside the
-        // sandbox tmpfs first. The mount itself is what we expect
-        // to fail.
+        // Create the target inside the sandbox tmpfs first; the
+        // mount itself is what we expect to fail. We bind two
+        // commands with `;` (not `&&`) so the test still asserts
+        // the failing command's exit status, and we capture mount's
+        // exit explicitly so the trailing `mkdir` (if it ran last)
+        // can never mask a successful escape.
         "mkdir -p /tmp/mnt-target 2>/dev/null; \
          mount --bind /etc /tmp/mnt-target 2>&1; \
-         echo exit=$?",
+         status=$?; exit \"$status\"",
         &[
             "operation not permitted",
             "must be superuser",

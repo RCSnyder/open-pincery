@@ -377,9 +377,6 @@ impl RealSandbox {
             "--ro-bind-try".into(),
             "/lib64".into(),
             "/lib64".into(),
-            "--ro-bind-try".into(),
-            "/etc".into(),
-            "/etc".into(),
             // Standard dynamic mounts.
             "--proc".into(),
             "/proc".into(),
@@ -396,6 +393,20 @@ impl RealSandbox {
             "--chdir".into(),
             cwd.into(),
         ];
+        // Narrow `/etc` exposure to the public-runtime allowlist
+        // shared with the Landlock layer. See
+        // `crate::runtime::sandbox::landlock::ETC_ALLOWLIST` for
+        // per-entry rationale and the list of forbidden paths.
+        // Replaces a previous broad `--ro-bind-try /etc /etc` that
+        // exposed `/etc/shadow` and other secret material to the
+        // sandbox under the user-namespace uid 65534 mapping
+        // (AC-76 / Slice G1a CI privileged-smoke evidence,
+        // 2026-04-29).
+        for entry in crate::runtime::sandbox::landlock_layer::ETC_ALLOWLIST {
+            args.push("--ro-bind-try".into());
+            args.push((*entry).into());
+            args.push((*entry).into());
+        }
         if deny_net {
             // Blunt network kill — no loopback, no DNS, no egress.
             // Slice A2b.4 swaps this for slirp4netns + allowlist.
@@ -969,6 +980,52 @@ mod tests {
             args.windows(2).any(|w| w == ["--dev", "/dev"]),
             "dev on /dev missing"
         );
+    }
+
+    #[test]
+    fn bwrap_args_do_not_bind_broad_or_sensitive_etc() {
+        // Regression guard for AC-76 / Slice G1a. The privileged
+        // CI smoke run on 2026-04-29 demonstrated that broad
+        // `--ro-bind /etc /etc` exposed `/etc/shadow` to the
+        // sandboxed shell because the user-namespace uid 65534
+        // mapping is not a reliable host-DAC boundary. /etc must
+        // be narrowed to the public-runtime allowlist; secret
+        // material must remain entirely invisible (ENOENT, not
+        // EACCES) inside the sandbox.
+        let args = RealSandbox::build_bwrap_args("/tmp/work", "true", true, None, None);
+        let bind_flags = ["--ro-bind", "--ro-bind-try", "--bind", "--bind-try"];
+        for window in args.windows(3) {
+            if !bind_flags.contains(&window[0].as_str()) {
+                continue;
+            }
+            let dst = window[2].as_str();
+            for forbidden in crate::runtime::sandbox::landlock_layer::ETC_FORBIDDEN_PATHS {
+                assert!(
+                    dst != *forbidden && !dst.starts_with(&format!("{forbidden}/")),
+                    "bwrap argv binds forbidden /etc path {dst} (matched {forbidden}); \
+                     full argv: {args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bwrap_args_include_safe_etc_allowlist() {
+        // Mirror of `default_profile_grants_safe_etc_allowlist`.
+        // Every entry in ETC_ALLOWLIST must appear as a
+        // `--ro-bind-try <path> <path>` triple so the public file
+        // is mounted into the sandbox at its host path. Both
+        // layers MUST stay in lockstep -- a Landlock grant with
+        // no bwrap bind simply does not exist inside the sandbox.
+        let args = RealSandbox::build_bwrap_args("/tmp/work", "true", true, None, None);
+        for entry in crate::runtime::sandbox::landlock_layer::ETC_ALLOWLIST {
+            let triple = ["--ro-bind-try", entry, entry];
+            assert!(
+                args.windows(3)
+                    .any(|w| w[0] == triple[0] && w[1] == triple[1] && w[2] == triple[2]),
+                "bwrap argv missing safe /etc allowlist entry {entry}: {args:?}"
+            );
+        }
     }
 
     #[test]

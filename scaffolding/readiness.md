@@ -297,6 +297,21 @@ heuristic can be exercised against real evidence from each category).
   `AttestSandbox`. Tests reference these in their module docstring
   so AC-81 (binding commitments) finds them when it lands.
   `ScopeNetwork` binding lands in G1d.
+- **T-AC76-G1a-8** (REMEDIATION 2026-04-29) Sandbox `/etc` exposure
+  is narrowed to a public-runtime allowlist
+  (`runtime::sandbox::landlock_layer::ETC_ALLOWLIST`) shared by both
+  the bwrap bind layer and the Landlock rx-grant layer. The previous
+  broad `--ro-bind /etc /etc` plus broad Landlock `/etc` rx grant
+  was demonstrated to expose `/etc/shadow` to the sandboxed shell on
+  the privileged CI smoke run because user-namespace uid 65534 + DAC
+  is not a reliable host-secret boundary. Two Rust unit guards
+  (`bwrap_args_do_not_bind_broad_or_sensitive_etc`,
+  `default_profile_does_not_grant_broad_etc`) plus their lockstep
+  positive twins (`*_include_safe_etc_allowlist`,
+  `*_grants_safe_etc_allowlist`) keep both layers aligned and
+  fail-closed on regression. The G1a harness was simultaneously
+  fixed: shell payloads no longer trail `; echo exit=$?`, which
+  previously masked the payload's exit code behind echo's exit 0.
 
 ## Key Links
 
@@ -305,11 +320,14 @@ heuristic can be exercised against real evidence from each category).
   { Enforce, allow_unsafe: false })` + `pincery-init` wrapper ->
   runtime proof on CI `sandbox-smoke` job that all four FS payloads
   exit non-zero with a denial signature.
-- **L-AC76-G1a-2** [AC-76 FS / `cat /etc/shadow`] ->
-  `RealSandbox::run` with AC-86 UID drop + landlock rx-allow on
-  `/etc` -> `cat` opens shadow under UID 65534 and gets EACCES from
-  Unix permissions (mode 0640 root:shadow) -> assert exit_code != 0
-  AND stderr contains "Permission denied".
+- **L-AC76-G1a-2** [AC-76 FS / `cat /etc/shadow`] -> bwrap binds
+  only the `ETC_ALLOWLIST` set into the sandbox view of `/etc`
+  (T-AC76-G1a-8); `/etc/shadow` is therefore absent and `cat`
+  resolves to ENOENT under UID 65534. Defence-in-depth: even if a
+  future regression re-exposed the file, AC-86 UID drop (mode 0640
+  root:shadow) and Landlock would still need to deny the read.
+  Assert exit_code != 0 AND stdout/stderr contains "no such file or
+  directory" or "permission denied".
 - **L-AC76-G1a-3** [AC-76 FS / `/proc/1/root`] -> bwrap `--proc /proc`
   + AC-86 UID drop + new PID namespace -> `ls /proc/1/root` resolves
   to the in-sandbox pid-ns root, but UID 65534 cannot read pid 1's

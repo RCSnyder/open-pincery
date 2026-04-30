@@ -160,7 +160,96 @@ impl LandlockCompatibility {
 // NOTE: /proc is NOT here because bwrap writes /proc/self/uid_map,
 // /proc/self/gid_map, /proc/self/setgroups during user-namespace
 // setup. /proc must be in rwx_paths instead. See default_for_cwd.
-const ROOTFS_RX_PATHS: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/sys"];
+//
+// NOTE: /etc is deliberately NOT a broad rx grant. The G1a CI
+// privileged smoke run on 2026-04-29 demonstrated that broad host
+// /etc bind + uid 65534 in a user namespace is not a reliable DAC
+// boundary -- /etc/shadow was readable inside RealSandbox under
+// `--ro-bind /etc /etc`. /etc is now narrowed to ETC_ALLOWLIST
+// below, mirrored by the bwrap layer in `bwrap.rs::ETC_ALLOWLIST`.
+const ROOTFS_RX_PATHS: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib64", "/sys"];
+
+/// Narrow `/etc` allowlist for both bwrap bind-mounts and Landlock
+/// read+execute grants. Public runtime config only -- no secrets,
+/// no private keys, no service config files.
+///
+/// Mirrored by `bwrap.rs::ETC_ALLOWLIST` -- the two MUST stay in
+/// lockstep. Adding a path here without adding the matching bwrap
+/// bind is harmless (the path simply won't exist inside the
+/// sandbox); adding a bwrap bind without the matching Landlock
+/// grant breaks reads. Removing a path requires evaluating both
+/// layers.
+///
+/// Rationale per entry:
+/// - `/etc/ld.so.cache`, `/etc/ld.so.conf`, `/etc/ld.so.conf.d` --
+///   dynamic linker cache + config, required for any dynamically
+///   linked binary the sandbox executes.
+/// - `/etc/nsswitch.conf`, `/etc/passwd`, `/etc/group` -- name
+///   service switch + uid/gid name resolution. `passwd` and `group`
+///   are world-readable by design and contain no secret material.
+/// - `/etc/hosts`, `/etc/host.conf`, `/etc/resolv.conf`,
+///   `/etc/gai.conf` -- DNS resolver config; needed when network
+///   is allowed (no-op when `deny_net=true`).
+/// - `/etc/localtime`, `/etc/timezone`, `/etc/os-release` --
+///   benign metadata.
+/// - `/etc/alternatives` -- Debian/Ubuntu symlink farm; many
+///   `/usr/bin/*` resolve through it.
+/// - `/etc/ssl/certs`, `/etc/ssl/openssl.cnf` -- public CA bundle
+///   directory + OpenSSL config. NEVER `/etc/ssl` wholesale
+///   (contains `/etc/ssl/private`).
+/// - `/etc/ca-certificates`, `/etc/ca-certificates.conf` -- public
+///   CA store metadata.
+/// - `/etc/pki/tls/certs`, `/etc/pki/ca-trust/extracted` -- RHEL
+///   family public trust store. NEVER `/etc/pki` wholesale
+///   (contains `/etc/pki/tls/private`).
+///
+/// Explicitly excluded (must remain invisible to the sandbox):
+/// `/etc/shadow`, `/etc/gshadow`, `/etc/sudoers`, `/etc/sudoers.d`,
+/// `/etc/ssh`, `/etc/ssl/private`, `/etc/pki/tls/private`,
+/// `/etc/letsencrypt`, plus broad service config roots
+/// (`/etc/docker`, `/etc/caddy`, `/etc/nginx`, `/etc/kubernetes`).
+pub const ETC_ALLOWLIST: &[&str] = &[
+    "/etc/ld.so.cache",
+    "/etc/ld.so.conf",
+    "/etc/ld.so.conf.d",
+    "/etc/nsswitch.conf",
+    "/etc/passwd",
+    "/etc/group",
+    "/etc/hosts",
+    "/etc/host.conf",
+    "/etc/resolv.conf",
+    "/etc/gai.conf",
+    "/etc/localtime",
+    "/etc/timezone",
+    "/etc/os-release",
+    "/etc/alternatives",
+    "/etc/ssl/certs",
+    "/etc/ssl/openssl.cnf",
+    "/etc/ca-certificates",
+    "/etc/ca-certificates.conf",
+    "/etc/pki/tls/certs",
+    "/etc/pki/ca-trust/extracted",
+];
+
+/// Sensitive `/etc` paths that MUST NEVER be bind-mounted into the
+/// sandbox or granted Landlock read access. Used by the unit guard
+/// tests in both `landlock.rs` and `bwrap.rs` to fail closed if a
+/// future edit accidentally reintroduces a broad bind or grant.
+pub const ETC_FORBIDDEN_PATHS: &[&str] = &[
+    "/etc",
+    "/etc/shadow",
+    "/etc/shadow-",
+    "/etc/gshadow",
+    "/etc/gshadow-",
+    "/etc/sudoers",
+    "/etc/sudoers.d",
+    "/etc/ssh",
+    "/etc/ssl/private",
+    "/etc/pki/tls/private",
+    "/etc/letsencrypt",
+    "/etc/krb5.keytab",
+    "/etc/security/opasswd",
+];
 
 /// Profile describing which paths are allowed and at what access
 /// level. Built once per tool call by [`LandlockProfile::default_for_cwd`].
@@ -181,8 +270,13 @@ impl LandlockProfile {
     /// `/dev/null`, `/dev/urandom`, etc. as the bwrap `--dev` tmpfs
     /// provides them), and the cwd as read+write+execute.
     pub fn default_for_cwd(cwd: &Path) -> Self {
+        let rx_paths = ROOTFS_RX_PATHS
+            .iter()
+            .chain(ETC_ALLOWLIST.iter())
+            .map(PathBuf::from)
+            .collect();
         Self {
-            rx_paths: ROOTFS_RX_PATHS.iter().map(PathBuf::from).collect(),
+            rx_paths,
             rwx_paths: vec![
                 PathBuf::from("/proc"),
                 PathBuf::from("/dev"),
@@ -492,10 +586,48 @@ mod tests {
     fn default_profile_includes_rootfs_rx_paths() {
         let cwd = PathBuf::from("/tmp/work-landlock-xyz");
         let p = LandlockProfile::default_for_cwd(&cwd);
-        for required in ["/usr", "/bin", "/lib", "/etc"] {
+        for required in ["/usr", "/bin", "/lib"] {
             assert!(
                 p.rx_paths.iter().any(|x| x == Path::new(required)),
                 "default rx paths missing {required}: {:?}",
+                p.rx_paths
+            );
+        }
+    }
+
+    #[test]
+    fn default_profile_does_not_grant_broad_etc() {
+        // Regression guard for AC-76 / Slice G1a. The privileged CI
+        // smoke run of 2026-04-29 demonstrated that broad host
+        // /etc bind + uid 65534 in a user namespace is not a
+        // reliable DAC boundary -- /etc/shadow was readable inside
+        // the sandbox under `--ro-bind /etc /etc`. The sister bwrap
+        // bind was narrowed to ETC_ALLOWLIST; this guard ensures
+        // Landlock cannot accidentally re-grant broad /etc either.
+        let cwd = PathBuf::from("/tmp/work-landlock-xyz");
+        let p = LandlockProfile::default_for_cwd(&cwd);
+        for forbidden in ETC_FORBIDDEN_PATHS {
+            assert!(
+                !p.rx_paths.iter().any(|x| x == Path::new(forbidden)),
+                "forbidden /etc path {forbidden} appears in default rx grants: {:?}",
+                p.rx_paths
+            );
+        }
+    }
+
+    #[test]
+    fn default_profile_grants_safe_etc_allowlist() {
+        // Mirror of `bwrap_args_include_safe_etc_allowlist`. The
+        // two layers MUST stay in lockstep: a path bind-mounted by
+        // bwrap with no matching Landlock grant is unreadable;
+        // a path granted by Landlock with no bwrap bind simply
+        // doesn't exist inside the sandbox.
+        let cwd = PathBuf::from("/tmp/work-landlock-xyz");
+        let p = LandlockProfile::default_for_cwd(&cwd);
+        for safe in ETC_ALLOWLIST {
+            assert!(
+                p.rx_paths.iter().any(|x| x == Path::new(safe)),
+                "safe /etc allowlist entry {safe} missing from default rx grants: {:?}",
                 p.rx_paths
             );
         }

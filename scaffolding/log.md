@@ -1746,3 +1746,18 @@
 - **Changes**: `DELIVERY.md`, `scaffolding/log.md`.
 - **Retries**: 0
 - **Next**: STOP — v7 lights-out SWE loop complete. Awaiting PR/merge decision and next-feature selection.
+
+## v9 BUILD-fix — Slice G1a remediation (audited) — 2026-04-29T
+
+- **Gate**: PASS (attempt 1, local fmt+clippy; CI privileged smoke pending)
+- **Evidence**:
+  - Root cause finding 1 (escape): broad `--ro-bind-try /etc /etc` exposed `/etc/shadow` to UID 65534 in the user-namespace mapping. CI run 25139882837 (privileged sandbox-smoke on 53a5f8d) read shadow successfully.
+  - Root cause finding 2 (harness): `; echo exit=$?` made `sh -c` exit 0 regardless of payload outcome, masking the escape.
+  - Independent CriticalSystemsEngineer audit refined the remediation: avoid `/etc/ssl`, `/etc/pki`, `/etc/ssh`, `/etc/letsencrypt`; mirror the bind allowlist into Landlock; add lockstep guard tests; do not change UID 65534 in this slice.
+  - Implemented: `runtime::sandbox::landlock_layer::ETC_ALLOWLIST` (20 public-runtime paths) + `ETC_FORBIDDEN_PATHS` (sensitive set). `bwrap.rs` replaces broad bind with per-entry `--ro-bind-try`. `landlock.rs` `default_for_cwd` chains the same allowlist; broad `/etc` removed from `ROOTFS_RX_PATHS`.
+  - Harness fixed: `tests/sandbox_escape_test.rs` removes `; echo exit=$?` from all four FS payloads; `cat /etc/shadow` denial signature broadened to include "no such file or directory" (post-narrowing the file no longer exists in the sandbox view).
+  - Guard tests added: `bwrap_args_do_not_bind_broad_or_sensitive_etc`, `bwrap_args_include_safe_etc_allowlist`, `default_profile_does_not_grant_broad_etc`, `default_profile_grants_safe_etc_allowlist`. Existing `default_profile_includes_rootfs_rx_paths` no longer requires `/etc`.
+  - Local: `cargo fmt --all -- --check` clean, `cargo clippy --all-targets -- -D warnings` clean (Windows host; sandbox modules are linux-gated so deeper unit-test runtime proof comes from CI).
+- **Changes**: `src/runtime/sandbox/landlock.rs`, `src/runtime/sandbox/bwrap.rs`, `tests/sandbox_escape_test.rs`, `scaffolding/readiness.md` (T-AC76-G1a-8, L-AC76-G1a-2 revised), `scaffolding/log.md`.
+- **Retries**: 0
+- **Next**: push, watch CI privileged sandbox-smoke run; on green, proceed to Slice G1b (privesc category).
