@@ -1,5 +1,29 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — Slices G2d+G2e+G2f: AC-77 integration tests + corpus-subset guard + CHANGELOG — 2026-05-01T05:00Z
+
+- **Gate**: PASS (attempt 1).
+- **Commits**: `81571db` (G2d integration tests), `5982ab3` (G2e subset guard + G2f CHANGELOG) on `v6-01_implementation`.
+- **Slice goals**:
+  - G2d: ship runtime evidence that the default-deny allowlist (a) does not break happy-path workloads and (b) actually kills disallowed namespace-creation attempts with SIGSYS.
+  - G2e: catch any future drift between the empirical strace corpus and the allowlist constants at unit-test time, with no env-var gating.
+  - G2f: document the AC-77 surface area in CHANGELOG.md under Unreleased / Security.
+- **Changed**:
+  - NEW `tests/seccomp_allowlist_test.rs` (240 LOC, 3 `#[tokio::test]`, `cfg(target_os=linux)`, mirrors `tests/sandbox_escape_test.rs` preconditions / SandboxProfile / skip discipline). Tests: `allowlist_covers_happy_path_workloads` (7 corpus workloads must exit 0), `unshare_blocked_by_default_deny_allowlist` (`unshare -U /bin/true` must exit 159 = SIGSYS), `unshare_does_not_sigsys_when_seccomp_disabled` (control: same payload with seccomp:false must NOT exit 159).
+  - `src/runtime/sandbox/seccomp.rs`: added `allowlist_covers_observed_corpus` unit test + private `syscall_nr_by_name` map. The test reads `tests/fixtures/seccomp/observed_syscalls.txt` via `include_str!`, checks every entry is either in `allowed_syscalls()` or is `SYS_clone`. Panics with an actionable message pointing at `scripts/capture_seccomp_corpus.sh`.
+  - `CHANGELOG.md`: Unreleased / Security entry for the allowlist flip, escape-primitive negative control, size-floor/ceiling guard, SYS_clone arg filter, `sandbox_syscall_denied` event, POSIX 128+signum exit-code translation, integration-test suite, and capture script + fixture.
+- **Verification ladder**:
+  1. `cargo build --tests` clean on rust:1.95 Linux (15.84s incremental).
+  2. `cargo test --test seccomp_allowlist_test` -> 3/3 self-skip honestly without bwrap.
+  3. `cargo test --lib seccomp` -> 17/17 PASS (8 allowlist + 5 seccomp_audit + 3 bwrap-args + 1 preflight) including the new `allowlist_covers_observed_corpus`.
+  4. Live SIGSYS canary lands on the CI privileged sandbox-smoke job (same gate as AC-76 net-1 / fs-1 — local Windows host cannot exercise bwrap+Landlock directly).
+- **Deferred (still)**:
+  - G2c.2: AUDIT_SECCOMP netlink correlation -> replace `record=None` / `syscall_nr=-1` with kernel-reported number.
+  - Granular per-syscall blocker tests (bpf, io_uring_setup, perf_event_open) -> would need custom helper binaries inside the bwrap rootfs. The unit-test invariant `allowlist_excludes_escape_primitives` already proves the BPF program lacks those numbers, so the runtime cost of helper binaries is not justified for v9.
+- **AC-77 build order**: G2a `e08a15b` ✓, G2b `a89d4a5` ✓, G2c `a96499e` ✓, G2d `81571db` ✓, G2e+G2f `5982ab3` ✓. **All AC-77 build-order items are complete.**
+- **Retries**: 1 (no rework).
+- **Next**: post-build gate -> REVIEW -> RECONCILE -> VERIFY -> DEPLOY.
+
 ## BUILD v9 — Slice G2c: AC-77 sandbox_syscall_denied event on SIGSYS — 2026-05-01T04:15Z
 
 - **Gate**: PASS (attempt 1) for the slice's verification ladder.
