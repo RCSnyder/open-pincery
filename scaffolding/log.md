@@ -1,5 +1,41 @@
 # Open Pincery — Experiment Log
 
+## VERIFY-FIX-2 v9 — AC-77 BLOCKED — 2026-05-01T08:30Z
+
+- **Gate**: FAIL (attempt 2/3). Continuing risks shipping a fundamentally over-broad allowlist that defeats AC-77's security purpose. STOPping per BEE-OS STOP conditions.
+- **Verify-fix-1 verdict**: partial. Pushed `8770751` (allowlist widened 57 → 68 with 11 Rust-runtime + glibc-2.39 residuals: `statx`, `faccessat2`, `gettid`, `madvise`, `mremap`, `getdents64`, `sched_yield`, `sched_getaffinity`, `tkill`, `readlink`, `pselect6`; 2 clippy lints fixed; `seccomp_allowlist_test` wired into the privileged sandbox-smoke job). Then `0b7f466` (count-drift doc fixes in `scaffolding/design.md` and `docs/security/sandbox-architecture-audit.md` to match shipped reality: 17→28 additions, 58→~70 entries, 17→19 ESCAPE_PRIMITIVES, 3→4 seccomp_allowlist_test count, 8→9 unit tests in seccomp.rs).
+- **Local evidence on rust:1.95**: `cargo build --lib --tests` clean. `cargo test --lib seccomp` 17/17 PASS. `cargo clippy --all-targets -- -D warnings` clean (was 2 errors at HEAD `100e24c`).
+- **CI evidence at `8770751`** (run `25203763191`):
+  - ✅ `rustfmt` PASS
+  - ✅ `cargo deny` PASS
+  - ✅ `clippy` PASS (was FAIL at `100e24c`)
+  - ✅ `cargo test` PASS (postgres-attached job; includes `sigsys_event_test` 2/2 PASS)
+  - ❌ `sandbox real-bwrap smoke` FAIL — `/bin/true` still exits 159 (SIGSYS); 9/12 AC-76 escape payloads still regress; 1/4 `seccomp_allowlist_test` FAIL on `echo` SIGSYS, 3/4 panic at `tokio-1.52.1/src/runtime/scheduler/multi_thread/mod.rs:91` (separate root cause — likely sqlx `PgPool` setup in `common::test_pool()` panicking when `TEST_DATABASE_URL` is unset in the privileged container, OR shared-runtime state corruption after a prior test SIGSYSes a child).
+- **Why STOP**: pincery-init's stderr shows `parsed policy ...\ndrop_privs short-circuit (already at uid=65534 gid=65534)` and then nothing — the next steps are `apply_empty_capabilities`, `apply_landlock`, `apply_seccomp`, `verify_no_new_privs`, `verify_fully_enforced`, `execvp(/bin/true)` — and one of them (or `/bin/true` itself) hits a denied syscall. **We cannot identify which without kernel audit-log evidence**, which the CI privileged container does not currently capture. Without that signal, every fix is a guess; widening the allowlist further would either (a) push past the 120 ceiling, requiring a doc/scope change, or (b) ship a kitchen-sink list that defeats AC-77's "default-deny with empirical justification" posture.
+- **Options surfaced to user**:
+  - **(A)** Instrument auditd in CI privileged job + add an `OPEN_PINCERY_SECCOMP_AUDIT_PROBE=1` test mode that runs the AC-77 allowlist in `Audit` posture (`SECCOMP_RET_LOG`) and writes every kernel-logged denial to a CI artifact. Iterate the allowlist using kernel-reported syscall_nr. Slowest but surgical.
+  - **(B)** Ship AC-77 v9 with `SandboxMode::Audit` as the default rather than `SandboxMode::Enforce`. The kernel logs but allows missing syscalls; production telemetry surfaces them; `Enforce` becomes a v9.1 follow-up. Loses the "kill" guarantee but keeps the event-log + arg-filter + escape-primitive negative control + size guards.
+  - **(C)** Revert AC-77 to the prior 11-entry denylist + ship the new infrastructure (`sandbox_syscall_denied` event, POSIX `128+signum` translation, `ESCAPE_PRIMITIVES` invariant, size guards, capture script) as a feature-gated path. Most conservative; preserves what works.
+  - **(D)** Raise `ALLOWLIST_SIZE_CEILING` to ~200 and import a comprehensive systemd-style `@system-service` allowlist (~150 entries). Fastest unblock but undermines AC-77's empirical-justification claim.
+- **Recommendation**: **(A) combined with (B) for v9 ship**. Add the auditd probe to the smoke job, ship Audit mode now, lock in Enforce in v9.1 once the kernel-reported gap is closed empirically. Both retain the new event/POSIX/escape-primitive infrastructure. Update readiness `T-AC77-1` accordingly (the readiness coverage table presently requires `Enforce=KillProcess` as the production posture; (B) requires re-ANALYZE if accepted).
+- **Branch state**: `v6-01_implementation` HEAD `0b7f466`, pushed to origin. Working tree clean. Verify-fix-1 changes preserved.
+- **Documents updated**: `scaffolding/log.md` (this entry), `/memories/repo/open-pincery-v9-phase-g.md` (BLOCKED state).
+- **Next**: AWAITING USER DECISION on options A/B/C/D.
+
+### BLOCKED Post-Mortem
+
+- **What went wrong**: The `scripts/capture_seccomp_corpus.sh` capture was performed on the **host process** (`strace -f /bin/sh -c "$cmd"`), not inside the production sandbox layering (bwrap parent + `pincery-init` child + user binary). The script header even acknowledges and asserts the syscall set is "invariant under bwrap modulo a few kernel-side namespace-translation details that do not change the syscall *number* observed by seccomp-bpf" — but that assumption was wrong on two counts:
+  1. The `pincery-init` Rust binary's `verify_no_new_privs` and `verify_fully_enforced` (the latter calls `std::fs::read_to_string("/proc/self/status")`) execute **after** `apply_seccomp` and exercise modern Rust + glibc-2.39 syscalls (statx, gettid, madvise, ...) that the host-side coreutils capture never saw.
+  2. The user-binary side (e.g. `/bin/true`) on glibc 2.39 / kernel 6.6 (the noble runner) uses syscall numbers that may differ from the capture host's glibc — and we still don't know which specific number is missing.
+- **What to try differently**:
+  - Capture syscalls **inside the sandbox** by either (a) wrapping the user command with `strace -f` from a `bwrap`-mounted strace binary, or (b) running `pincery-init` in `SandboxMode::Audit` and reading the kernel audit log via auditd in the privileged container. (b) is more authentic and closer to production.
+  - Add a one-off CI job `sandbox-audit-probe` that runs the AC-77 happy-path corpus under `SandboxMode::Audit` and uploads `dmesg | grep audit:` as an artifact. The output gives kernel-reported `syscall=NN` for every denial; map to names with `ausyscall`.
+  - Treat the capture script as a starting point, not a complete oracle; surface this in the additions.txt header.
+- **What to avoid**:
+  - Adding syscalls one-by-one based on guesswork. Each guess costs a CI cycle and risks shipping an over-broad list. Use the audit log instead.
+  - Assuming "Rust binaries don't run inside the sandbox." They do — `pincery-init` runs the verification steps under the seccomp filter.
+  - Pushing past `ALLOWLIST_SIZE_CEILING` without a re-ANALYZE on the threat-model implications.
+
 ## VERIFY-FIX v9 — AC-77 allowlist widening + clippy + CI wiring — 2026-05-01T08:00Z
 
 - **Trigger**: VERIFY at `100e24c` returned **FAIL**. Three blockers:
