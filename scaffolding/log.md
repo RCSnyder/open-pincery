@@ -1,5 +1,25 @@
 # Open Pincery — Experiment Log
 
+## VERIFY v9 — Slice G1d: AC-76 closes at 12/12 (network category live on CI) — 2026-05-01T01:25Z
+
+- **Gate**: PASS (attempt 1).
+- **Commits**: `9db7525` (G1d tests) + `75a7760` (CI iputils-ping install) on `v6-01_implementation`.
+- **CI runs**: [25197469097](https://github.com/RCSnyder/open-pincery/actions/runs/25197469097) all-green at `9db7525` (net-1 self-skipped honestly because ping was missing); [25197562247](https://github.com/RCSnyder/open-pincery/actions/runs/25197562247) all-green at `75a7760` with **all 3/3 network tests running live**:
+  - `test net_dns_leak_blocked ... ok`
+  - `test net_metadata_ssrf_blocked ... ok`
+  - `test net_raw_socket_blocked ... ok`
+- **Evidence**: All 5 CI jobs (cargo test / clippy / rustfmt / cargo deny / sandbox real-bwrap smoke) green on both commits. Each network test enforces non-zero exit AND a denial signature — no green-by-skip. The AC-76 corpus is now 12/12 runtime-verified on every CI run: 4 FS (G1a) + 3 privesc (G1b) + 3 resource (G1c) + 3 network (G1d) — minus the one-of-three resource memory-balloon path that runs only when memory.max is fully delegated (still gated by the G1c.x probe; production safety enforced by G1c.x.2 startup gate).
+- **AC-76 status**: **CLOSED at 12/12.** Unblocks final close of AC-53. Production-safety claim is runtime-enforced (G1c.x.2 startup gate) and adversarial coverage is comprehensive across all four categories.
+- **Next**: AC-77 (allowlist seccomp upgrade — replaces denylist with explicit allowed-syscall set, recommendation #1 from 2026-04-30 audit). Strategic gaps documented in scope.md "Deferred — Strategic Security Gaps" remain explicitly out of v9 scope.
+
+## BUILD v9 — Slice G1d: network-category AC-76 payloads — 2026-05-01T01:00Z
+
+- **Slice goal**: Close AC-76 at 12/12 by adding the 3 network-category adversarial payloads named in scope.md AC-76 (raw-socket / cloud-metadata SSRF / DNS leak).
+- **Changed**: `tests/sandbox_escape_test.rs` (+203 LOC: 3 #[tokio::test] fns + `binary_in_sandbox()` helper); `.github/workflows/ci.yml` (+1: iputils-ping in apt install set).
+- **Not touched**: src/, Cargo.toml, scope.md, design.md, readiness.md.
+- **Concerns**: net-1 needs `ping` in the sandbox PATH; net-3 needs `bash`. Each test self-skips honestly with explicit log evidence if its driver binary is missing. Initial G1d CI run found ping missing → 75a7760 added it to the privileged-container apt set.
+- **Pattern reuse**: All three tests reuse the existing `escape_profile()` (deny_net=true), `assert_payload_blocked()` (non-zero exit + denial signature), `preconditions_met()` gate, and `enforce_sandbox()` factory unchanged. Binds canonical TLA+ action `ScopeNetwork`.
+
 ## VERIFY v9 — Slice G1c.x.2: memory.max startup gate shipped CI-green — 2026-05-01T00:50Z
 
 - **Gate**: PASS (attempt 1).
