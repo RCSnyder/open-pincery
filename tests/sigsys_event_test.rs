@@ -12,6 +12,14 @@
 //! a privileged Linux container; just a Postgres pool. The complementary
 //! live test (`tests/seccomp_allowlist_test.rs::unshare_blocked_by_default_deny_allowlist`)
 //! exercises the same code path with a real kernel SIGSYS on CI.
+//!
+//! The whole file is gated to `target_os = "linux"` because the
+//! SIGSYS-detection branch in `src/runtime/tools.rs` is itself
+//! `#[cfg(target_os = "linux")]`. On non-Linux hosts the dispatch
+//! path simply does not emit `sandbox_syscall_denied`, so this test's
+//! assertions would be false-negative.
+
+#![cfg(target_os = "linux")]
 
 mod common;
 

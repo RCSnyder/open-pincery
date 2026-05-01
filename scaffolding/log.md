@@ -19,6 +19,11 @@
   4. Live SIGSYS canary lands on the CI privileged sandbox-smoke job (same gate as AC-76 net-1 / fs-1 — local Windows host cannot exercise bwrap+Landlock directly).
 - **Deferred (still)**:
   - G2c.2: AUDIT_SECCOMP netlink correlation -> replace `record=None` / `syscall_nr=-1` with kernel-reported number.
+  - **G2c.2 carries the following review-deferred items as well** (REVIEW 2026-05-01 Consider list, accepted under existing G2c.2 sub-slice):
+    - C1: reverse-drift guard — assert `allowlist ⊆ (observed ∪ additions)` so a future allowlist entry that is neither observed nor manually justified is caught.
+    - C2: expand `ESCAPE_PRIMITIVES` with `setns`, `keyctl`, `add_key`, `request_key`, `userfaultfd`, `process_vm_readv`, `process_vm_writev`, `move_pages`, `swapon`, `swapoff` (kernel-escape literature additions; not in observed corpus and not in additions).
+    - C3: signal-presence discriminator — replace `exit_code == 159` keying in `tools.rs` with `status.signal() == Some(SIGSYS)` so an organic `exit 159` from user code does not emit a spurious `sandbox_syscall_denied` event.
+    - C5: extend `clone_arg_rules()` mask to `(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWCGROUP | CLONE_NEWTIME)` — current mask only locks the two namespaces named in T-AC77-4.
   - Granular per-syscall blocker tests (bpf, io_uring_setup, perf_event_open) -> would need custom helper binaries inside the bwrap rootfs. The unit-test invariant `allowlist_excludes_escape_primitives` already proves the BPF program lacks those numbers, so the runtime cost of helper binaries is not justified for v9.
 - **AC-77 build order**: G2a `e08a15b` ✓, G2b `a89d4a5` ✓, G2c `a96499e` ✓, G2d `81571db` ✓, G2e+G2f `5982ab3` ✓. **All AC-77 build-order items are complete.**
 - **Retries**: 1 (no rework).
