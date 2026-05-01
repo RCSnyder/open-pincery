@@ -138,11 +138,11 @@ pub const ALLOWLIST_SIZE_CEILING: usize = 120;
 ///
 /// Sources (see module header):
 /// - `tests/fixtures/seccomp/observed_syscalls.txt` (41 syscalls)
-/// - `tests/fixtures/seccomp/additions.txt` (30 manually-justified,
+/// - `tests/fixtures/seccomp/additions.txt` (32 manually-justified,
 ///   including 11 Rust-runtime + modern-glibc residuals added by
-///   the AC-77 verify-fix and 2 (getresuid, getresgid) added by
-///   verify-fix-2 from kernel SECCOMP_RET_KILL_PROCESS dmesg
-///   evidence)
+///   the AC-77 verify-fix and 4 (getresuid, getresgid, capget,
+///   capset) added by verify-fix-2 from kernel
+///   SECCOMP_RET_KILL_PROCESS dmesg evidence)
 ///
 /// `clone` is intentionally absent here -- it is added with an
 /// argument filter via [`clone_arg_rules`].
@@ -242,8 +242,19 @@ fn allowed_syscalls() -> Vec<i64> {
         //    calling process's own uids/gids -- they have no
         //    security implication and cannot be used as escape
         //    primitives.
+        //
+        //    `capget` is also a pure read. `capset` looks more
+        //    sensitive but is safe in this sandbox: bwrap has
+        //    already dropped ALL capabilities and the kernel's
+        //    PR_SET_NO_NEW_PRIVS bit prevents any subsequent
+        //    capset from gaining privileges; the only legal
+        //    capset call is one that drops or no-ops capability
+        //    sets. glibc-2.39 init calls capset on Ubuntu 24.04
+        //    to drop ambient caps post-exec.
         libc::SYS_getresuid,
         libc::SYS_getresgid,
+        libc::SYS_capget,
+        libc::SYS_capset,
     ]
 }
 

@@ -75,3 +75,5 @@ pselect6  # signal-aware select used by glibc's pthread_kill / nptl signal handl
 # Pure read, no escape primitive.
 getresuid  # glibc-2.39 init-time uid read; CI dmesg syscall=118 (runs 25216296931, 25216465822).
 getresgid  # glibc-2.39 init-time gid read; CI dmesg syscall=120 (run 25216646797).
+capget     # paired read for capset; safe.
+capset     # glibc-2.39 init-time ambient-cap drop; CI dmesg syscall=126 (run 25216780344). Defense-in-depth: bwrap cap-drop ALL + PR_SET_NO_NEW_PRIVS prevent any privilege gain (kernel returns EPERM).
