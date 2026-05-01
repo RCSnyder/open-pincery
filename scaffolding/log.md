@@ -1,5 +1,17 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — Slice G2c: AC-77 sandbox_syscall_denied event on SIGSYS — 2026-05-01T04:15Z
+
+- **Gate**: PASS (attempt 1) for the slice's verification ladder.
+- **Commit**: `a96499e` on `v6-01_implementation`.
+- **Slice goal**: When a sandboxed child is killed by SIGSYS (the kernel's response to a default-deny seccomp violation in Enforce mode), emit one `sandbox_syscall_denied` event into `events` so downstream queries / dashboards can surface seccomp denials with the same uniformity as `landlock_denied`.
+- **Changed**: NEW `src/observability/seccomp_audit.rs` (220 LOC, 5 unit tests); `src/observability/mod.rs` (+1 module declaration); `src/runtime/sandbox/bwrap.rs` (exit_code now translates `out.status.signal()` via POSIX `128 + signum`, so SIGSYS=31 surfaces as exit_code 159 to callers); `src/runtime/sandbox/mod.rs` (same translation in `ProcessExecutor`); `src/runtime/tools.rs` (ShellExecution gains `exit_code: i32`; dispatch detects `exit_code == SIGSYS_EXIT_CODE` and calls `append_sandbox_syscall_denied_event` with `record=None` -> emits payload with `syscall_nr=-1`, `record_correlated=false`).
+- **Verification ladder**: (1) compile: `cargo build --lib` clean on rust:1.95 Linux; (2) `cargo test --lib seccomp` -> 16/16 PASS (8 allowlist tests from G2b + 5 new seccomp_audit tests + 3 pre-existing bwrap-args tests).
+- **Deferred to G2c.2**: AUDIT_SECCOMP netlink correlation. Today the event always carries `syscall_nr=-1` (readiness AC-77 G2c explicitly allows the fallback). The follow-up sub-slice will drain both LANDLOCK and SECCOMP records from one `InvocationAuditSource` per invocation and replace the fallback with the kernel-reported syscall number. Schema and tests stay stable across the refinement.
+- **Concerns**: (a) `bwrap.rs` is now 1224 LOC -- already over the 300 LOC/file soft cap from the Complexity Brake. The G2c diff was minimal (one line) so it does not worsen the situation, but the file is overdue for the AC-87 split scope.md identifies. (b) The existing `landlock_audit::append_landlock_denials_within` call still drains the audit source -- when G2c.2 lands, it will need a unified pass to avoid losing SECCOMP records that share the source.
+- **Retries**: 1.
+- **Next**: G2d -- new `tests/seccomp_allowlist_test.rs` with 7 tests per readiness AC Coverage (program-shape, happy-path, 4 SIGSYS payloads, sigsys-emits-event, audit-mode-logs).
+
 ## BUILD v9 — Slice G2b: AC-77 default-deny allowlist + clone arg-filter — 2026-05-01T03:30Z
 
 - **Gate**: PASS (attempt 1) for the slice's verification ladder; the post-build gate runs after G2c..G2f.
