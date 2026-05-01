@@ -1,5 +1,15 @@
 # Open Pincery — Experiment Log
 
+## ANALYZE v9 — AC-77 (Seccomp default-deny allowlist) — 2026-05-01T01:35Z
+
+- **Gate**: PASS (attempt 1).
+- **Commit**: `0b02558` on `v6-01_implementation` — appended Slice G2 / AC-77 section to scaffolding/readiness.md (+423 LOC).
+- **Verdict**: READY. All required fields present (Truths T-AC77-1..10, Key Links L-AC77-1..6, AC Coverage table, Scope Reduction Risks, Clarifications, Build Order G2a..G2f, Complexity Exceptions).
+- **Build order**: G2a strace corpus fixture → G2b rewrite seccomp.rs (denied → allowed + clone arg-rules + KillProcess mismatch) → G2c register `EventType::SandboxSyscallDenied` + extend AC-88 audit-netlink reader for `AUDIT_SECCOMP` + emit on SIGSYS → G2d new `tests/seccomp_allowlist_test.rs` (program-shape + happy-path + 4 SIGSYS payloads + audit-mode + event-emit) + re-run AC-76 12-payload suite → G2e regen-on-new-tool diff-fail (gated by `OPEN_PINCERY_RUN_AC77_REGEN=1`) → G2f docs + CHANGELOG.
+- **Top scope-reduction risks**: (1) inverted denylist masquerading as allowlist (mitigated by 60..=120 size assertion + happy-path coverage); (2) empirical strace skipped for hand-rolled defaults (mitigated by checked-in fixture); (3) clone allowed bare without arg-filtering would silently delegate user-namespace lockout to AC-86's --disable-userns (mitigated by `allowlist_blocks_user_ns_clone` SIGSYS-specific assertion).
+- **Clarifications resolved as bounded assumptions (non-blocking)**: AC-88 audit netlink reader extended for AUDIT_SECCOMP; raw socket(2) arg-filter deferred to v10; AC-66 business tools out of v9 scope; stay on `seccompiler` (not libseccomp system dep); clone3 bare-allow tied to AC-86 cap+userns lockout.
+- **Next**: BUILD G2a — empirical strace corpus capture + checked-in fixture under `tests/fixtures/seccomp/`.
+
 ## VERIFY v9 — Slice G1d: AC-76 closes at 12/12 (network category live on CI) — 2026-05-01T01:25Z
 
 - **Gate**: PASS (attempt 1).
