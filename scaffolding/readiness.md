@@ -1,11 +1,13 @@
 # Readiness: Open Pincery — current slice pointer
 
-> Current admission gate: **Phase G1c / AC-76 (Sandbox Escape Suite —
-> Resource Category)**. The G1c addendum lives immediately below this
-> pointer. G1b (privesc) closed CI-green at `8935fd7` on 2026-04-29
-> (CI run `25141721367`); its addendum is retained verbatim further
-> down. G1a (FS) and G0f / AC-88 addenda are also retained as
-> historical record.
+> Current admission gate: **Phase G Slice G2 / AC-77 (Seccomp
+> Default-Deny Allowlist)**. The AC-77 addendum is appended below the
+> AC-76 / G1c addendum that preceded it. AC-76 closed at 12/12 on
+> 2026-04-30 (CI run `25197562247`) — all four payload categories
+> (FS, privesc, resource, network) runtime-verified. G1b (privesc)
+> closed CI-green at `8935fd7` on 2026-04-29; its addendum is retained
+> verbatim further down. G1a (FS), G1c (resource), G1d (network), and
+> G0f / AC-88 addenda are all retained as historical record.
 
 ---
 
@@ -23,7 +25,7 @@ G1b runtime harness (`tests/sandbox_escape_test.rs::{preconditions_met,
 enforce_sandbox, escape_profile, assert_payload_blocked}`) with one
 contained extension: `escape_profile()` now installs the production
 cgroup v2 limits (`memory.max=512 MiB`, `pids.max=64`) so the
-resource payloads have something to be capped *by*. Without this
+resource payloads have something to be capped _by_. Without this
 extension the resource category cannot fail-closed because the prior
 slices ran with `cgroup: None`. `preconditions_met()` is widened to
 also require `cgroup_v2_writable()`, mirroring `sandbox_cgroup_test.rs`
@@ -43,7 +45,7 @@ G1d/G1e.
   T-AC76-G1c-2 and T-AC76-G1c-3). No `src/` changes.
 - **T-AC76-G1c-2** `escape_profile()` is upgraded to the
   production-equivalent cgroup posture: `memory_max_bytes =
-  Some(512 * 1024 * 1024)`, `pids_max = Some(64)`,
+Some(512 * 1024 * 1024)`, `pids_max = Some(64)`,
   `cpu_max_micros = None` (CPU cap is not adversarially probed in
   G1c). This matches the AC-53 production limits documented in
   `scaffolding/scope.md` and the existing
@@ -68,7 +70,7 @@ G1d/G1e.
     stderr. Even if `timeout` itself signals the bomb, the suite
     must observe a denial signature OR a non-zero exit.
   - `resource_memory_balloon_blocked` — `head -c 600M /dev/zero |
-    tr '\\0' 'a' >/tmp/big` allocates ≈600 MiB into the bwrap
+tr '\\0' 'a' >/tmp/big` allocates ≈600 MiB into the bwrap
     tmpfs, exceeding `memory.max=512 MiB`. cgroup v2 OOM-kills the
     pipeline; the parent shell prints "Killed" to stderr and the
     overall exit is non-zero (typically 137 = 128 + SIGKILL).
@@ -97,7 +99,7 @@ G1d/G1e.
 
 - **L-AC76-G1c-1** `AC-76` -> `escape_profile()` upgraded with
   `CgroupLimits { memory_max_bytes: Some(512 MiB), pids_max:
-  Some(64), .. }` -> tests `resource_fork_bomb_blocked`,
+Some(64), .. }` -> tests `resource_fork_bomb_blocked`,
   `resource_memory_balloon_blocked`, `resource_pid_exhaustion_blocked`
   -> CI privileged sandbox-smoke job runs the suite under cgroup v2.
 - **L-AC76-G1c-2** `AC-76` -> `preconditions_met()` adds
@@ -112,13 +114,13 @@ G1d/G1e.
 
 ## Acceptance Criteria Coverage (G1c slice)
 
-| AC     | Truth(s)              | Planned test                                                                  | Planned runtime proof                              |
-| ------ | --------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------- |
-| AC-76  | T-AC76-G1c-1..5       | `resource_fork_bomb_blocked` (pids.max EAGAIN OR signaled-by-timeout)         | CI sandbox-smoke job: non-zero exit + signature    |
-| AC-76  | T-AC76-G1c-1..5       | `resource_memory_balloon_blocked` (cgroup OOM kill SIGKILL)                   | CI sandbox-smoke job: non-zero exit + "killed"     |
-| AC-76  | T-AC76-G1c-1..5       | `resource_pid_exhaustion_blocked` (pids.max EAGAIN OR signaled-by-timeout)    | CI sandbox-smoke job: non-zero exit + signature    |
-| AC-76  | T-AC76-G1c-2          | (existing) G1a/G1b suite re-runs under upgraded `escape_profile()` with cgroup limits | CI sandbox-smoke job: 7 prior tests stay green |
-| AC-76  | T-AC76-G1c-3          | `preconditions_met()` self-skips on cgroup-unwritable hosts                   | CI logs print explicit skip reason                 |
+| AC    | Truth(s)        | Planned test                                                                          | Planned runtime proof                           |
+| ----- | --------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| AC-76 | T-AC76-G1c-1..5 | `resource_fork_bomb_blocked` (pids.max EAGAIN OR signaled-by-timeout)                 | CI sandbox-smoke job: non-zero exit + signature |
+| AC-76 | T-AC76-G1c-1..5 | `resource_memory_balloon_blocked` (cgroup OOM kill SIGKILL)                           | CI sandbox-smoke job: non-zero exit + "killed"  |
+| AC-76 | T-AC76-G1c-1..5 | `resource_pid_exhaustion_blocked` (pids.max EAGAIN OR signaled-by-timeout)            | CI sandbox-smoke job: non-zero exit + signature |
+| AC-76 | T-AC76-G1c-2    | (existing) G1a/G1b suite re-runs under upgraded `escape_profile()` with cgroup limits | CI sandbox-smoke job: 7 prior tests stay green  |
+| AC-76 | T-AC76-G1c-3    | `preconditions_met()` self-skips on cgroup-unwritable hosts                           | CI logs print explicit skip reason              |
 
 ## Scope Reduction Risks
 
@@ -131,7 +133,7 @@ G1d/G1e.
   "cannot fork", "fork:") — `timeout`'s SIGTERM does not produce
   these. If neither a signature nor an exit code matches, the test
   fails. The harness exit-code-preservation fix from G1a (no `;
-  echo exit=$?`) ensures the shell's exit reflects the real outcome.
+echo exit=$?`) ensures the shell's exit reflects the real outcome.
 - **Risk: memory-balloon false-pass via missing /dev/zero.** Bwrap
   bind-mounts a minimal `/dev` tmpfs containing only the safe device
   subset; `/dev/zero` is in that subset (per AC-86). If a future
@@ -169,6 +171,403 @@ deferred to G1e per the prior plan; G1c does not, on its own, justify
 the structural change.
 
 ---
+
+# Readiness: Open Pincery — v9 Phase G Slice G2 (AC-77 Seccomp Default-Deny Allowlist)
+
+> This addendum covers Slice G2 / AC-77 only. It is the admission gate
+> immediately after AC-76 closed 12/12 on 2026-04-30 (CI run
+> `25197562247`). Prior addenda (G1a/b/c/d, G0f, G0a..e) are retained
+> verbatim below as historical record and are not re-opened by this
+> gate. AC-77 replaces the existing 11-syscall **denylist** in
+> `src/runtime/sandbox/seccomp.rs` with a default-deny **allowlist**
+> sourced from empirical strace of the actually-executed v9 workloads.
+
+## Verdict
+
+READY for Slice G2 / AC-77, conditional on the clarifications below
+being resolved as part of slice **G2a** (baseline allowlist capture)
+rather than blocking entry. The clarifications are bounded — they
+affect _which_ syscalls land in the allowlist's tail, not the
+pass/fail meaning of AC-77 itself, which is "default-deny + named
+permitted set + SIGSYS on unknown + `sandbox_syscall_denied` event +
+the AC-76 12-payload corpus stays green". The current denylist
+(`denied_syscalls()` returning 11 entries with
+`mismatch_action = SeccompAction::Allow`) is a known interim per the
+file's own header comment; AC-77 is the planned tightening path.
+
+The seccomp install is already plumbed through **two** call sites that
+both consume the same source-of-truth in
+`src/runtime/sandbox/seccomp.rs`:
+
+1. The pre-AC-83 path: `bwrap --seccomp <fd>` via
+   `compose_seccomp_fd()` in `src/runtime/sandbox/bwrap.rs:530`.
+2. The current AC-83 path: `pincery-init` reads the BPF byte stream
+   from `SandboxInitPolicy.seccomp_bpf` and installs it via
+   `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ...)` in
+   `src/bin/pincery_init.rs::apply_seccomp` (verified post-install via
+   `/proc/self/status` `Seccomp: 2`).
+
+Both paths share `denied_syscalls()` -> `build_bpf_program()` ->
+`SeccompFilter::new(...)`. AC-77 changes ONLY the input (allowlist
+table) and the `mismatch_action` (`Allow` -> `KillProcess`) and the
+match action posture; both call sites pick up the change without
+structural edits.
+
+## Truths
+
+- **T-AC77-1** After AC-77 lands, the seccomp BPF program installed
+  inside every sandboxed child (via `pincery-init`) is a
+  **default-deny allowlist**: `SeccompFilter::new(rules,
+mismatch_action = KillProcess (Enforce) / Log (Audit), match_action
+  = Allow, target_arch)`. The current posture (mismatch=Allow,
+  match=KillProcess on a small denied set) is inverted. SIGSYS (signal
+  31, exit code 159) is the kernel-visible denial signature for any
+  syscall not on the list in Enforce mode.
+- **T-AC77-2** The allowlist is **sourced empirically** from the
+  observed syscall set of the actually-executed v9 happy-path
+  workloads, not hand-rolled from documentation. The corpus is, at
+  minimum: (a) the existing AC-53 / AC-76 happy-path command set
+  (`echo`, `sh -c`, `/bin/true`, `head -c`, `seq`, `dd`, `cat`,
+  `id -u`, `command -v`, `unshare`, `mount` probes); (b) glibc/musl
+  startup syscalls observed in the same runs (`execve`, `brk`,
+  `arch_prctl`, `set_tid_address`, `set_robust_list`, `rseq`,
+  `mmap`/`mprotect`/`munmap`, `read`/`write`/`close`, `openat`,
+  `newfstatat`/`fstat`, `getrandom`, `prlimit64`, `clock_*`, `futex`,
+  `exit_group`); (c) `pincery-init`'s own residual syscalls between
+  the seccomp install and `execvp` of the user binary. AC-66's
+  business tools (`http_get`, `file_read`, `db_query`) are NOT in v9
+  scope yet (Phase F1, deferred) — see Clarification C-AC77-3 for
+  how the source comment / commit body must reflect that.
+- **T-AC77-3** The allowlist explicitly does NOT include the
+  scope.md AC-77-named escape-class syscalls regardless of whether
+  they appear in any strace: `io_uring_setup`, `io_uring_register`,
+  `io_uring_enter`, `bpf`, `perf_event_open`, `name_to_handle_at`,
+  `open_by_handle_at`, all `fanotify_*`, plus the existing AC-77
+  denylist set (`mount`, `umount2`, `pivot_root`, `init_module`,
+  `finit_module`, `delete_module`, `kexec_load`, `kexec_file_load`,
+  `reboot`, `ptrace`). These names are deliberately enumerated as a
+  negative-test fixture so the allowlist test asserts they remain
+  blocked even if a future strace pass accidentally captures one.
+- **T-AC77-4** `clone` and `clone3` require **argument filtering**,
+  not bare allow. `clone(CLONE_NEWUSER)` and `clone(CLONE_NEWNS)`
+  must be denied; `clone` for ordinary thread creation
+  (`CLONE_VM | CLONE_FS | CLONE_FILES | ...` without the namespace
+  bits) must be allowed because tokio / glibc threads use it. This
+  uses `seccompiler::SeccompRule` with `SeccompCondition` on the
+  `flags` argument (arg-0). `clone3` takes a pointer-to-struct,
+  which BPF cannot dereference — for `clone3`, the allowlist permits
+  it bare and relies on AC-86 (UID drop + cap drop + bwrap
+  `--disable-userns`) to make namespace creation EPERM regardless.
+  This is documented in the seccomp module header so the next
+  reviewer understands the trade.
+- **T-AC77-5** `mismatch_action = SECCOMP_RET_KILL_PROCESS` (not
+  `RET_ERRNO`). scope.md G2 line 898 is explicit: "SIGSYS unknown
+  syscalls; mismatch action `SECCOMP_RET_KILL_PROCESS` (not
+  `RET_ERRNO`)". A SIGSYS-killed process is observable from the
+  parent (non-zero exit; AC-76 harness already keys off this); an
+  ENOSYS would silently degrade a denied syscall into a normal
+  errno path, which would mask escape attempts in audit logs.
+- **T-AC77-6** A new event type `sandbox_syscall_denied` is
+  registered in `src/models/event.rs` (or wherever event types
+  live; reconcile during BUILD) with payload `{syscall_nr: i64,
+  syscall_name: Option<String>, tool_name: Option<String>,
+  agent_id: Option<Uuid>, wake_id: Option<Uuid>}`. Emission requires
+  observing the SIGSYS — the parent sees `WIFSIGNALED && WTERMSIG ==
+  SIGSYS` from `wait_with_output` and writes the event before
+  returning the `ExecResult`. The parent also reads
+  `/proc/<pid>/status`'s `SigQ` or, more reliably, parses the
+  audit netlink `AUDIT_SECCOMP` record (see
+  `src/observability/landlock_audit.rs` for the netlink reader
+  pattern shipped by AC-88) to extract `syscall_nr`. If the audit
+  source is unavailable (ABI gap), `syscall_nr = -1` and
+  `syscall_name = None` are recorded, with the SIGSYS exit alone
+  proving the denial. Tool / agent / wake context comes from the
+  call-site (`SandboxedExecutor`) via the existing context
+  threading; absence is allowed for pre-AC-66 callers.
+- **T-AC77-7** All 12 AC-76 payloads remain blocked under the new
+  allowlist with their existing denial signatures preserved OR
+  upgraded. Concretely: (a) FS-1..4 (path-shaped denials via
+  Landlock and bwrap mount-ns) are unaffected — Landlock is enforced
+  via `landlock_restrict_self` which is on the allowlist;
+  (b) Privesc-1..3 (setuid exec, `CAP_SYS_ADMIN`, user-ns
+  elevation) tighten — `unshare(CLONE_NEWUSER)` and `clone(...,
+  CLONE_NEWUSER, ...)` now SIGSYS at the seccomp layer BEFORE
+  reaching bwrap's `--disable-userns` EPERM (defense-in-depth, both
+  signatures accepted); `setuid` of a real-root binary is already
+  EPERM via cap-drop, unaffected; (c) Resource-1..3 (fork-bomb,
+  memory-balloon, pid-exhaustion) — `fork`/`clone`/`execve` are on
+  the allowlist (must be), so cgroup v2 remains the enforcing layer
+  exactly as in G1c; (d) Network-1..3 — raw socket via `socket(2)`
+  with `AF_PACKET` or `SOCK_RAW` is in scope for AC-77 to deny via
+  arg filtering on `socket(domain, type, ...)` — see
+  Clarification C-AC77-2.
+- **T-AC77-8** AC-77 preserves the existing **mode posture**.
+  `Enforce` -> kill, `Audit` -> log, `Disabled` -> no-install,
+  exactly as `seccomp.rs::build_bpf_program` already branches.
+  The `OPEN_PINCERY_SANDBOX_FLOOR=relaxed` + `ALLOW_UNSAFE=true`
+  escape valve from AC-84 does NOT relax the seccomp layer — the
+  relaxed floor only downgrades Landlock ABI (per
+  `scaffolding/design.md` Open Question resolution at design.md:2467
+  area). Operators who need to shed seccomp specifically must use
+  `SandboxProfile.seccomp = false` or `SandboxMode::Disabled`,
+  exactly as today.
+- **T-AC77-9** AC-77 does NOT relax the AC-83/AC-85
+  FullyEnforced-or-refuse posture. `pincery-init` already verifies
+  `Seccomp: 2` in `/proc/self/status` after `apply_seccomp`; an
+  empty `policy.seccomp_bpf` is currently log-and-skip but, when
+  combined with `SandboxProfile.seccomp = true`,
+  `compose_seccomp_program` MUST return a non-empty allowlist
+  program. This is preserved.
+- **T-AC77-10** AC-77 is **architecture-aware via seccompiler**.
+  `seccompiler::SeccompFilter::new(... target_arch ...)` already
+  reads `std::env::consts::ARCH`. Adding allowlist entries by name
+  (`libc::SYS_*` constants) means the resolution to the right
+  syscall number for x86_64 / aarch64 happens at compile time per
+  arch. CI (x86_64) is the primary proof; aarch64 is not in v9 CI.
+  The test asserts on `cfg(target_arch = "x86_64")` only; aarch64
+  is a follow-up validated via devshell when an operator runs there.
+
+## Key Links (AC -> Design -> Test -> Proof)
+
+- **L-AC77-1** `AC-77` -> `src/runtime/sandbox/seccomp.rs` rewrite:
+  `denied_syscalls()` -> `allowed_syscalls()` (Vec<i64>) +
+  `clone_namespace_arg_rules()` (Vec<(i64, Vec<SeccompRule>)>) ->
+  `build_bpf_program(SandboxMode)` returns inverted-posture filter
+  -> consumed unchanged by both `compose_seccomp_fd` (bwrap path) and
+  `compose_seccomp_program` (pincery-init path) -> **planned test**
+  `tests/seccomp_allowlist_test.rs::allowlist_blocks_io_uring_setup`
+  asserts SIGSYS exit; **runtime proof** CI privileged
+  `sandbox real-bwrap smoke` job runs the test in the production
+  pipeline.
+- **L-AC77-2** `AC-77` -> `tests/seccomp_allowlist_test.rs`
+  positive-control test re-runs the AC-76 12-payload corpus
+  (`tests/sandbox_escape_test.rs::*` re-execution under the new
+  allowlist) -> **planned proof** CI privileged sandbox-smoke job
+  shows all 12 payloads still blocked with the same or upgraded
+  signature.
+- **L-AC77-3** `AC-77` -> `src/models/event.rs`
+  `EventType::SandboxSyscallDenied` registration -> **planned test**
+  `tests/event_log_test.rs` (or a new `seccomp_event_test.rs`)
+  asserts the event type round-trips through the DB and lint
+  catalog -> **runtime proof** CI's existing event-type lint job
+  + a sandbox-smoke run that triggers a SIGSYS and asserts the
+  corresponding event row appears in the test DB.
+- **L-AC77-4** `AC-77` -> `src/runtime/sandbox/bwrap.rs`
+  `RealSandbox::run` post-wait branch: detect SIGSYS exit, capture
+  `syscall_nr` from audit netlink (or `None` fallback), call
+  `models::event::append_event(SandboxSyscallDenied { ... })` ->
+  **planned test** unit test on the SIGSYS-detection helper +
+  integration test that runs an `io_uring_setup` payload and
+  asserts the event appears -> **runtime proof** CI sandbox-smoke
+  privileged job.
+- **L-AC77-5** `AC-77` -> `scaffolding/design.md` "external
+  integrations" row for `seccompiler` (line 2444) — already says
+  "syscall allowlist", which is now finally true. No design.md
+  edit required by ANALYZE; BUILD's RECONCILE phase will confirm.
+- **L-AC77-6** `AC-77` -> AC-76 G1b privesc tests
+  (`privesc_setuid_exec_blocked`, `privesc_cap_sys_admin_blocked`,
+  `privesc_user_ns_elevation_blocked` in
+  `tests/sandbox_escape_test.rs`) -> existing assertion lists
+  already accept `bad system call`, signal-31 / 159 exit, and the
+  bwrap EPERM strings; SIGSYS upgrades or matches each of them ->
+  **runtime proof** CI sandbox-smoke job's existing G1b assertions
+  remain green without test edits. If any signature requires
+  widening, that is captured under Slice G2c.
+
+## Acceptance Criteria Coverage (AC-77 slice)
+
+| AC    | Truth(s)            | Planned test                                                                                                                                                                                                                            | Planned runtime proof                                                                          |
+| ----- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| AC-77 | T-AC77-1, T-5, T-10 | `tests/seccomp_allowlist_test.rs::allowlist_program_uses_default_deny` (build the BpfProgram, decompile/inspect via seccompiler API or `bpfvm`-style golden, assert mismatch_action == KillProcess in Enforce, == Log in Audit)         | CI sandbox-smoke job logs program metadata at install                                          |
+| AC-77 | T-AC77-2, T-3       | `tests/seccomp_allowlist_test.rs::allowlist_covers_happy_path_workloads` (run each AC-76 happy-path command via `RealSandbox::run` under `SandboxMode::Enforce`; assert exit 0)                                                         | CI sandbox-smoke job: existing AC-76 happy-path baseline (currently green) remains green       |
+| AC-77 | T-AC77-3, T-4       | `tests/seccomp_allowlist_test.rs::allowlist_blocks_io_uring_setup` + `..._blocks_bpf` + `..._blocks_perf_event_open` + `..._blocks_user_ns_clone` (each payload SIGSYS-exits 159 with `bad system call` in stderr)                      | CI sandbox-smoke job: 4 new SIGSYS payloads green                                              |
+| AC-77 | T-AC77-6, T-4       | `tests/seccomp_allowlist_test.rs::sigsys_emits_sandbox_syscall_denied_event` (trigger denied syscall; assert `events` table row appears with `event_type = sandbox_syscall_denied` and `payload.syscall_nr` is the expected number)     | CI sandbox-smoke job: event row visible in test DB after run                                   |
+| AC-77 | T-AC77-7            | (existing, no edits) `tests/sandbox_escape_test.rs::*` 12-payload suite re-runs under the new allowlist                                                                                                                                 | CI run on the AC-77 PR shows all 12 G1a/b/c/d payloads remain blocked (no signature regression) |
+| AC-77 | T-AC77-8, T-9       | `tests/seccomp_allowlist_test.rs::audit_mode_logs_instead_of_kills` (run a denied syscall under `SandboxMode::Audit`; assert exit 0 / non-SIGSYS AND a `sandbox_syscall_denied` event with `mode=audit`)                                | CI sandbox-smoke job: audit-mode payload completes; event row present                          |
+
+## Scope Reduction Risks
+
+- **R-AC77-1 (highest) — "Inverted denylist" allowlist.** The
+  cheapest path to a green BUILD is to take the current 11-entry
+  denylist, name it "denied" inside an otherwise-`Allow` filter
+  with `mismatch_action = KillProcess`, and call it an allowlist.
+  This would technically flip the posture but ship a one-syscall
+  effective allowlist that immediately SIGSYS-kills `echo`. The
+  inverse failure mode is shipping an allowlist so wide it is
+  effectively a denylist (e.g. allowing the entire `_x86_64`
+  syscall surface and only excluding the named escape primitives).
+  **Mitigation**: AC coverage row 2 (happy-path) AND row 3 (denied
+  primitives) are both required-green. The test
+  `allowlist_program_uses_default_deny` additionally asserts the
+  allowlist size is in `60..=120` syscalls (a hand-rolled cap that
+  rejects "allow everything"). If a real workload pushes past 120,
+  the cap is raised in scope.md, not silently in BUILD.
+- **R-AC77-2 — Empirical strace omitted in favor of "common-sense
+  defaults".** The scope.md text is explicit: "sourced from
+  empirical strace of the 12 built-in tools". BUILD may be tempted
+  to skip the strace pass and hand-roll a list from the
+  `seccomp-defaults`-style examples in seccompiler docs. **Mitigation**:
+  Slice G2a's deliverable is a checked-in trace artifact under
+  `tests/fixtures/seccomp/strace_*.txt` (or equivalent) that
+  the allowlist source comments cite by line; the regen-on-new-tool
+  diff-fail (scope.md AC-77 part 3) is wired in Slice G2c. If the
+  fixture is missing, REVIEW must reject the slice.
+- **R-AC77-3 — `clone` allowed bare, namespace bits not filtered.**
+  The seccompiler arg-filter is non-trivial; the cheapest BUILD is
+  `(SYS_clone, vec![])` -> bare allow. This would mean an attacker
+  inside the sandbox could in principle call
+  `clone(CLONE_NEWUSER|CLONE_NEWNS, ...)` and the seccomp layer
+  would not fire — defense would fall entirely to AC-86's
+  `--disable-userns` and bwrap's mount-ns lock. **Mitigation**:
+  T-AC77-4 makes the arg filter non-optional; the
+  `allowlist_blocks_user_ns_clone` test asserts SIGSYS rather than
+  EPERM (which would prove only the bwrap layer fired). For
+  `clone3`, the bare allow is documented and tied to AC-86 in the
+  module header, not silently accepted.
+- **R-AC77-4 — `sandbox_syscall_denied` event silently dropped.**
+  The cheapest path to "tests pass" is to plumb the event type
+  through the catalog but not actually emit it — the AC-76 SIGSYS
+  exit code alone would still close the existing tests.
+  **Mitigation**: AC coverage row 4 makes the event-row assertion
+  required-green. The event must contain a non-null `syscall_nr`
+  on kernels with audit netlink available (T-AC77-6); on kernels
+  without, `-1` is documented and tested with a stubbed audit
+  source (mirroring the AC-88 stubbing pattern).
+
+## Clarifications Needed
+
+- **C-AC77-1 — Audit netlink correlation reuse.** AC-77 needs the
+  syscall number to populate `sandbox_syscall_denied.syscall_nr`.
+  The AC-88 reader (`src/observability/landlock_audit.rs`) already
+  consumes `AUDIT_LANDLOCK_*` records; `AUDIT_SECCOMP` is a
+  different record type but on the same netlink socket.
+  **Bounded assumption for ANALYZE**: the AC-88 reader is extended
+  in Slice G2b to also surface `AUDIT_SECCOMP` records, reusing
+  the same PID/timestamp correlation strategy. If extending the
+  reader proves architecturally awkward, a parallel reader in
+  `src/observability/seccomp_audit.rs` is acceptable; either way,
+  the assumption is "the netlink path generalizes". This does not
+  change the pass/fail meaning of AC-77 — the fallback
+  (`syscall_nr = -1`, exit-code-only proof) is also tested.
+- **C-AC77-2 — Raw socket denial layer.** AC-76 G1d's network
+  payload `raw_socket_open_blocked` currently relies on AC-86's
+  `--cap-drop ALL` removing `CAP_NET_RAW`; the kernel returns
+  EPERM from `socket(AF_INET, SOCK_RAW, ...)`. Should AC-77
+  additionally arg-filter `socket(2)` to deny `AF_PACKET` and
+  `SOCK_RAW` at the seccomp layer (defense-in-depth, two-layer
+  block)? **Bounded assumption for ANALYZE**: NO for v9 — AC-77
+  ships the syscall-number allowlist + the named negative-fixture
+  set; `socket` arg-filtering is deferred to a v10 hardening pass
+  and noted as such in the seccomp module header. AC-76 G1d's
+  test continues to assert the existing EPERM signature; nothing
+  regresses. If REVIEW disagrees, `socket` arg-filter is a Slice
+  G2c addition, not a re-ANALYZE.
+- **C-AC77-3 — AC-66 business tools not yet in v9.** scope.md
+  AC-77 names "the 12 built-in tools" and lists `http_get`,
+  `file_read`, `db_query`. AC-66 (Tool Catalog Expansion) is
+  Phase F1 and has not landed in v9 yet (Phase G is still mid-flight).
+  **Bounded assumption for ANALYZE**: the v9 AC-77 allowlist is
+  derived from the workloads that ACTUALLY run in v9 today (AC-53
+  command shapes, AC-76 escape-suite payloads, pincery-init,
+  glibc/musl startup). When AC-66 lands, its slice is responsible
+  for re-running the strace-and-diff regen and adding any new
+  syscalls under the AC-77 source-of-truth (this is the diff-fail
+  test scope.md calls for). The AC-77 source comment must call
+  this out so the next ANALYZE for AC-66 picks it up.
+- **C-AC77-4 — libseccomp vs seccompiler.** scope.md "Stack" line
+  lists both `libseccomp` and `seccompiler` as the choice; the
+  current code uses `seccompiler` only (no `libseccomp` system
+  dep). **Bounded assumption for ANALYZE**: stay on `seccompiler`
+  — it already supports allowlists and arg-filter rules, the BPF
+  emission path is proven by AC-53 / G0a, and adding a
+  `libseccomp` system-binary dep would break devshell parity for
+  Mac/Windows contributors. design.md line 2444 says
+  "`libseccomp` / `seccompiler` crate" — the slash is interpreted
+  as "either is acceptable; we ship seccompiler". No design.md
+  edit required.
+- **C-AC77-5 — `clone3` bare-allow with cap+userns lockout.**
+  Documented above (T-AC77-4) — calling out here so the next
+  reviewer sees it without hunting through Truths. The
+  alternative (deny `clone3` entirely) is rejected because tokio
+  may use `clone3` for thread creation on glibc >= 2.34 and
+  recent kernels; denying it would SIGSYS the runtime startup.
+  Bounded; not blocking.
+
+## Build Order
+
+- **G2a — Empirical syscall corpus capture.** Run `strace -f -e
+trace=all -o trace.txt` against each AC-76 happy-path command
+  inside the production sandbox profile (devshell + privileged CI
+  job). Aggregate the union of syscalls observed. Check the
+  fixture into `tests/fixtures/seccomp/` with a manifest naming
+  the source command and the kernel/glibc version that produced
+  it. No `src/` changes.
+- **G2b — Allowlist source-of-truth + filter rewrite.** Edit
+  `src/runtime/sandbox/seccomp.rs`: replace `denied_syscalls()`
+  with `allowed_syscalls()` (alphabetized `Vec<i64>`) and a
+  `clone_namespace_arg_rules()` helper returning
+  `Vec<(i64, Vec<SeccompRule>)>`. Flip
+  `SeccompFilter::new(...mismatch_action..., ...match_action...)`
+  to `mismatch_action = KillProcess` (Enforce) / `Log` (Audit) and
+  `match_action = Allow`. Module header rewritten to document
+  the new posture; the "denylist not yet a true allowlist"
+  comment is replaced with the allowlist rationale. Both
+  `compose_seccomp_fd` and `compose_seccomp_program` (consumed by
+  bwrap and pincery-init respectively) are unchanged.
+- **G2c — `sandbox_syscall_denied` event + audit netlink
+  extension.** Register `EventType::SandboxSyscallDenied` in
+  `src/models/event.rs` (or `src/models/events.rs`). Extend
+  `src/observability/landlock_audit.rs` (or add a sibling
+  `seccomp_audit.rs`) to surface `AUDIT_SECCOMP` records,
+  populate `syscall_nr`, and emit one event per SIGSYS observed.
+  Wire the parent post-wait branch in `src/runtime/sandbox/bwrap.rs`
+  to emit the event when `WIFSIGNALED && WTERMSIG == SIGSYS`,
+  using the audit reader for `syscall_nr` when available and
+  `-1` otherwise.
+- **G2d — Test suite + AC-76 corpus re-verification.** Add
+  `tests/seccomp_allowlist_test.rs` with the seven planned tests
+  (program-shape, happy-path, four SIGSYS payloads, audit-mode,
+  event emission). Re-run the full AC-76 12-payload suite under
+  the new allowlist; if any signature widens (e.g. a privesc
+  payload now exits 159 instead of bwrap-EPERM), the
+  `assert_payload_blocked` signature list is extended in the same
+  slice. CI privileged sandbox-smoke job is the runtime proof.
+- **G2e — Regen-on-new-tool diff-fail wiring.** A test
+  `tests/seccomp_allowlist_test.rs::allowlist_matches_observed_corpus`
+  re-runs the strace pass at test time (when
+  `OPEN_PINCERY_RUN_AC77_REGEN=1` is set, mirroring the AC-84
+  positive-test gate pattern) and diff-fails if the observed
+  syscall set is not a subset of the allowlist. Default-off so
+  unprivileged CI doesn't regress; on the privileged sandbox
+  smoke job, the gate flag is set.
+- **G2f — Documentation pass.** Update the `seccomp.rs` module
+  header to describe the allowlist as the new ground truth (no
+  more "shipped a denylist" disclaimer); add a one-line entry to
+  `CHANGELOG.md` under v9 Phase G; update the `seccomp` row in
+  `scaffolding/design.md` external-integrations table during
+  RECONCILE if the test-strategy column needs widening
+  ("Unit + adversarial allowlist test + 12-payload re-verify").
+
+## Complexity Exceptions
+
+- **CE-AC77-1 — `seccomp.rs` may exceed 300 LOC.** The current file
+  is ~250 LOC of denylist-shaped code. The allowlist is 60-120
+  syscall entries (one line each), plus the `clone` arg-rule
+  helper, plus an extended module header documenting the audit
+  reader integration and the `clone3`/`socket` deferred-hardening
+  notes. Estimated post-G2 size: 450-550 LOC. This is a justified
+  exception per scope.md "Complexity Brake" — the BPF program is
+  by nature a long flat table; splitting it would harm reviewability.
+  If it crosses 600 LOC, the syscall table moves to a JSON fixture
+  loaded at compile time, but the v9 expectation is one Rust file.
+- **CE-AC77-2 — Audit netlink reader may grow.** Extending the
+  AC-88 reader to handle `AUDIT_SECCOMP` records adds ~80-150 LOC
+  to `src/observability/landlock_audit.rs` (renamed conceptually
+  to `kernel_audit.rs` if the split is taken). The 300-LOC ceiling
+  may be approached. If REVIEW finds it exceeds, splitting along
+  record-type lines (`landlock_audit.rs` keeps Landlock,
+  `seccomp_audit.rs` adds Seccomp, both share a `netlink.rs`
+  helper) is the planned refactor.
 
 # Readiness: Open Pincery — v9 Phase G0f (AC-88 Kernel Audit Integration)
 
@@ -475,23 +874,23 @@ user-ns elevation. Resource, network, and the synthesized
 
 ## Acceptance Criteria Coverage
 
-| AC ID | Build Slice | Test / Proof | Runtime Verification | Status |
-| ----- | ----------- | ------------ | -------------------- | ------ |
+| AC ID | Build Slice                                                             | Test / Proof                                                                                        | Runtime Verification                                                                                                                                                               | Status                               |
+| ----- | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
 | AC-76 | G1b: 3 privesc payloads (setuid exec, CAP_SYS_ADMIN, user-ns elevation) | `tests/sandbox_escape_test.rs` extended (three new `#[tokio::test]` functions); reuses G1a harness. | Privileged CI `sandbox-smoke` job runs all 7 payloads (4 FS + 3 privesc) and fails if any block is missing or any payload succeeds. Local devshell self-skips strict-floor checks. | G1b in progress; G1c/G1d/G1e queued. |
 
 ## Scope Reduction Risks
 
 - **Test passes because the setuid binary is missing**: explicit
   acceptable signature — `assert_payload_blocked` accepts "no such
-  file or directory" because *absence* of the setuid binary inside
+  file or directory" because _absence_ of the setuid binary inside
   the sandbox is itself a valid block (the binary cannot escalate
   what is not reachable). This is documented in T-AC76-G1b-2 #1.
 - **Payload "blocks" because the shell is not present**: guarded by
   the G1a precondition gate (bwrap on PATH, Landlock supported, ABI
-  >= floor) plus the privileged CI image which carries coreutils,
-  `unshare`, and `su`/`sudo`/`passwd`.
+  > = floor) plus the privileged CI image which carries coreutils,
+  > `unshare`, and `su`/`sudo`/`passwd`.
 - **Effective uid not actually checked**: setuid payload uses
-  `id -u` *after* the candidate exec; an unconditional non-zero
+  `id -u` _after_ the candidate exec; an unconditional non-zero
   exit from a missing binary still requires a recognised signature.
 - **Floor relaxation creep**: T-AC76-G1b-3 explicitly forbids the
   relaxed/allow-unsafe/force-partial knobs.
