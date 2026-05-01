@@ -77,3 +77,6 @@ getresuid  # glibc-2.39 init-time uid read; CI dmesg syscall=118 (runs 252162969
 getresgid  # glibc-2.39 init-time gid read; CI dmesg syscall=120 (run 25216646797).
 capget     # paired read for capset; safe.
 capset     # glibc-2.39 init-time ambient-cap drop; CI dmesg syscall=126 (run 25216780344). Defense-in-depth: bwrap cap-drop ALL + PR_SET_NO_NEW_PRIVS prevent any privilege gain (kernel returns EPERM).
+landlock_create_ruleset  # CI dmesg syscall=444 (run 25216950177). Required when pincery-init runs under an externally-installed seccomp filter. Landlock is monotonic; cannot weaken existing policy.
+landlock_add_rule        # paired with landlock_create_ruleset.
+landlock_restrict_self   # paired with landlock_create_ruleset; only tightens.

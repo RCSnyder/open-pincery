@@ -138,10 +138,11 @@ pub const ALLOWLIST_SIZE_CEILING: usize = 120;
 ///
 /// Sources (see module header):
 /// - `tests/fixtures/seccomp/observed_syscalls.txt` (41 syscalls)
-/// - `tests/fixtures/seccomp/additions.txt` (32 manually-justified,
+/// - `tests/fixtures/seccomp/additions.txt` (35 manually-justified,
 ///   including 11 Rust-runtime + modern-glibc residuals added by
-///   the AC-77 verify-fix and 4 (getresuid, getresgid, capget,
-///   capset) added by verify-fix-2 from kernel
+///   the AC-77 verify-fix and 7 (getresuid, getresgid, capget,
+///   capset, landlock_create_ruleset, landlock_add_rule,
+///   landlock_restrict_self) added by verify-fix-2 from kernel
 ///   SECCOMP_RET_KILL_PROCESS dmesg evidence)
 ///
 /// `clone` is intentionally absent here -- it is added with an
@@ -251,10 +252,25 @@ fn allowed_syscalls() -> Vec<i64> {
         //    capset call is one that drops or no-ops capability
         //    sets. glibc-2.39 init calls capset on Ubuntu 24.04
         //    to drop ambient caps post-exec.
+        //
+        //    `landlock_create_ruleset`, `landlock_add_rule`, and
+        //    `landlock_restrict_self` are needed when pincery-init
+        //    runs under an externally-installed seccomp filter
+        //    (e.g. the test harness in seccomp_allowlist_test, or
+        //    any future architecture where seccomp is applied by
+        //    bwrap before pincery-init starts). Allowing them is
+        //    safe because Landlock is *monotonic*: rulesets can
+        //    only tighten access, never widen it. An attacker
+        //    with the post-seccomp ability to call these syscalls
+        //    cannot weaken the existing Landlock policy or escape
+        //    the filesystem sandbox.
         libc::SYS_getresuid,
         libc::SYS_getresgid,
         libc::SYS_capget,
         libc::SYS_capset,
+        libc::SYS_landlock_create_ruleset,
+        libc::SYS_landlock_add_rule,
+        libc::SYS_landlock_restrict_self,
     ]
 }
 
