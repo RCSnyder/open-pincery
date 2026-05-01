@@ -212,7 +212,21 @@ impl ToolExecutor for ProcessExecutor {
             Ok(Ok(out)) => ExecResult::Ok {
                 stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
                 stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-                exit_code: out.status.code().unwrap_or(-1),
+                // AC-77 / G2c: surface signal-induced terminations
+                // via the POSIX `128 + signum` convention so SIGSYS
+                // (31) appears as exit_code 159 to callers, matching
+                // the bwrap path.
+                exit_code: out.status.code().unwrap_or_else(|| {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::process::ExitStatusExt;
+                        return out.status.signal().map(|s| 128 + s).unwrap_or(-1);
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        -1
+                    }
+                }),
                 audit_pids,
             },
             Ok(Err(e)) => ExecResult::Err(format!("wait failed: {e}")),

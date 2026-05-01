@@ -800,7 +800,15 @@ impl ToolExecutor for RealSandbox {
             Ok(Ok(out)) => ExecResult::Ok {
                 stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
                 stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-                exit_code: out.status.code().unwrap_or(-1),
+                // AC-77 / G2c: when the child is killed by signal,
+                // `code()` is None. Translate via POSIX/shell
+                // convention `128 + signum` so callers can detect
+                // SIGSYS (signal 31 -> exit_code 159) without a
+                // schema change.
+                exit_code: out.status.code().unwrap_or_else(|| {
+                    use std::os::unix::process::ExitStatusExt;
+                    out.status.signal().map(|s| 128 + s).unwrap_or(-1)
+                }),
                 audit_pids: audit_pids.into_iter().collect(),
             },
             Ok(Err(e)) => ExecResult::Err(format!("wait failed: {e}")),

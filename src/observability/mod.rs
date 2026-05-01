@@ -9,4 +9,5 @@ pub mod landlock_audit;
 pub mod landlock_audit_netlink;
 pub mod logging;
 pub mod metrics;
+pub mod seccomp_audit;
 pub mod server;

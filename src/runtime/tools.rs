@@ -16,6 +16,8 @@ use crate::models::{credential, event};
 use crate::observability::landlock_audit;
 use crate::observability::metrics as m;
 #[cfg(target_os = "linux")]
+use crate::observability::seccomp_audit;
+#[cfg(target_os = "linux")]
 use crate::runtime::sandbox::preflight::{KernelProbe, RealKernelProbe};
 
 /// AC-43 (v7): prefix tagging env-var values that must be resolved from
@@ -267,6 +269,37 @@ pub async fn dispatch_tool(
                 }
             }
 
+            // AC-77 / Slice G2c: SIGSYS-induced termination signals a
+            // seccomp default-deny hit. Emit a `sandbox_syscall_denied`
+            // event with `syscall_nr = -1` fallback. Audit-netlink
+            // AUDIT_SECCOMP correlation lands in the follow-up sub-slice.
+            #[cfg(target_os = "linux")]
+            if execution.exit_code == seccomp_audit::SIGSYS_EXIT_CODE {
+                let seccomp_ctx = seccomp_audit::SeccompAuditContext {
+                    agent_id,
+                    wake_id: Some(wake_id),
+                    tool_name: name.clone(),
+                    audit_pids: execution.audit_pids.clone(),
+                };
+                match seccomp_audit::append_sandbox_syscall_denied_event(pool, &seccomp_ctx, None)
+                    .await
+                {
+                    Ok(_) => {
+                        info!(
+                            event = seccomp_audit::SANDBOX_SYSCALL_DENIED_EVENT,
+                            tool = %name,
+                            exit_code = execution.exit_code,
+                            "Appended sandbox_syscall_denied event (SIGSYS observed; syscall_nr=-1 fallback)"
+                        );
+                    }
+                    Err(e) => warn!(
+                        error = %e,
+                        tool = %name,
+                        "Failed to append sandbox_syscall_denied event"
+                    ),
+                }
+            }
+
             execution.result
         }
         "plan" => {
@@ -450,6 +483,11 @@ async fn emit_credential_unresolved(
 
 struct ShellExecution {
     result: ToolResult,
+    /// Final exit code surfaced to the caller. Signal-induced
+    /// terminations are translated to `128 + signum` (POSIX
+    /// convention) so SIGSYS appears as 159. -1 if no code and no
+    /// signal could be observed (e.g. wait error / timeout).
+    exit_code: i32,
     #[cfg(target_os = "linux")]
     audit_pids: Vec<u32>,
 }
@@ -482,22 +520,26 @@ async fn execute_shell(
             };
             ShellExecution {
                 result: ToolResult::Output(truncated),
+                exit_code,
                 #[cfg(target_os = "linux")]
                 audit_pids: _audit_pids,
             }
         }
         ExecResult::Timeout => ShellExecution {
             result: ToolResult::Error("Shell execution timed out".into()),
+            exit_code: -1,
             #[cfg(target_os = "linux")]
             audit_pids: Vec::new(),
         },
         ExecResult::Rejected(reason) => ShellExecution {
             result: ToolResult::Error(format!("Shell execution rejected: {reason}")),
+            exit_code: -1,
             #[cfg(target_os = "linux")]
             audit_pids: Vec::new(),
         },
         ExecResult::Err(e) => ShellExecution {
             result: ToolResult::Error(format!("Shell execution failed: {e}")),
+            exit_code: -1,
             #[cfg(target_os = "linux")]
             audit_pids: Vec::new(),
         },
