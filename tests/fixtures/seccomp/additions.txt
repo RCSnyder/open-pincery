@@ -74,3 +74,4 @@ pselect6  # signal-aware select used by glibc's pthread_kill / nptl signal handl
 # verify_fully_enforced path which runs after apply_seccomp.
 # Pure read, no escape primitive.
 getresuid  # glibc-2.39 init-time uid read; CI dmesg syscall=118 (runs 25216296931, 25216465822).
+getresgid  # glibc-2.39 init-time gid read; CI dmesg syscall=120 (run 25216646797).

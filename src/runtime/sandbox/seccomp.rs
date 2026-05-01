@@ -138,10 +138,11 @@ pub const ALLOWLIST_SIZE_CEILING: usize = 120;
 ///
 /// Sources (see module header):
 /// - `tests/fixtures/seccomp/observed_syscalls.txt` (41 syscalls)
-/// - `tests/fixtures/seccomp/additions.txt` (29 manually-justified,
+/// - `tests/fixtures/seccomp/additions.txt` (30 manually-justified,
 ///   including 11 Rust-runtime + modern-glibc residuals added by
-///   the AC-77 verify-fix and 1 (getresuid) added by verify-fix-2
-///   from kernel SECCOMP_RET_KILL_PROCESS dmesg evidence)
+///   the AC-77 verify-fix and 2 (getresuid, getresgid) added by
+///   verify-fix-2 from kernel SECCOMP_RET_KILL_PROCESS dmesg
+///   evidence)
 ///
 /// `clone` is intentionally absent here -- it is added with an
 /// argument filter via [`clone_arg_rules`].
@@ -237,10 +238,12 @@ fn allowed_syscalls() -> Vec<i64> {
         //    part of init-time security hardening; the call fires
         //    inside pincery-init after apply_seccomp during the
         //    verify_fully_enforced read of /proc/self/status.
-        //    `getresuid` is a pure read of the calling process's
-        //    own uids -- it has no security implication and
-        //    cannot be used as an escape primitive.
+        //    `getresuid` and `getresgid` are pure reads of the
+        //    calling process's own uids/gids -- they have no
+        //    security implication and cannot be used as escape
+        //    primitives.
         libc::SYS_getresuid,
+        libc::SYS_getresgid,
     ]
 }
 
