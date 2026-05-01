@@ -1,0 +1,36 @@
+# AC-77 Slice G2a — manual additions to the empirical corpus.
+#
+# Each entry has format:
+#   <syscall_name>  # <rationale>
+#
+# Rationale must name *why* the syscall is required despite not being
+# captured by `scripts/capture_seccomp_corpus.sh` against the AC-76
+# happy-path command set. Lines starting with `#` are comments.
+#
+# Additions are deliberately minimal: the only programs that ever run
+# under the AC-77 seccomp filter are dash (`sh -c <command>`) and the
+# coreutils invoked from it. Rust/tokio binaries do **not** run inside
+# the sandbox; their syscalls are out of scope.
+#
+# This file is parsed by
+# `tests/seccomp_allowlist_test.rs::allowlist_matches_observed_corpus`
+# (gated on `OPEN_PINCERY_RUN_AC77_REGEN=1`) — every additions entry
+# must be in `allowed_syscalls()` for the regen test to pass.
+
+exit_group  # mandatory: every program terminates via exit_group(2). strace -c omits it for the parent it is summarizing, so the empirical capture missed it.
+exit  # legacy single-thread exit path; glibc may still emit it for some abort sequences.
+prctl  # pincery-init verify_no_new_privs (PR_GET_NO_NEW_PRIVS) runs after the seccomp install (T-AC77-2c).
+futex  # glibc internal locks (e.g. malloc arenas, stdio file locks) call futex unconditionally even in single-threaded programs.
+clone3  # modern glibc (>=2.34) uses clone3 for fork(); not all happy-path commands fork (echo, true), so a minimal capture may miss it. Allowed bare; namespace lockout enforced by AC-86 cap-drop + bwrap --disable-userns (T-AC77-4).
+restart_syscall  # kernel re-entry after EINTR; any signal-interrupted syscall in dash or coreutils returns through it.
+tgkill  # abort(3) and glibc's assertion-failure path send SIGABRT via tgkill; mandatory for any panic path.
+nanosleep  # `timeout 1s sh -c ...` (AC-76 fork-bomb / pid-exhaustion harness shape) sleeps via nanosleep; coreutils sleep(1) likewise.
+clock_nanosleep  # glibc on some configs prefers clock_nanosleep over nanosleep for the same primitives.
+clock_gettime  # `date(1)`, `timeout(1)` deadline computation, glibc startup time probes. vDSO is preferred but the syscall fallback is required.
+ppoll  # dash pipeline wait + glibc signal-aware poll variant. Used by `cat | tr | wc` style pipelines beyond what the minimal corpus exercised.
+poll  # legacy poll variant; some coreutils still emit it.
+sigaltstack  # glibc thread / signal-stack setup at program startup; not always captured by strace -c on simple builtins.
+fcntl  # FD_CLOEXEC setup and pipe configuration in dash; ubiquitous in glibc startup.
+getcwd  # dash `$PWD` probe and many coreutils relative-path resolution.
+readlinkat  # glibc `/proc/self/exe` lookup and dash `command -v` resolution.
+uname  # glibc startup probe and `uname(1)`; not on the minimal echo path but standard.
