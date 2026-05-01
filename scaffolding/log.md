@@ -2084,3 +2084,15 @@
 - **Changes**: `src/runtime/sandbox/seccomp.rs`, `tests/fixtures/seccomp/additions.txt`, `tests/sandbox_escape_test.rs`, `tests/seccomp_allowlist_test.rs`, `.github/workflows/ci.yml`, `scaffolding/log.md`.
 - **Retries**: 0 (after BLOCKED resolution)
 - **Next**: RECONCILE → VERIFY agent → DEPLOY (PR merge decision is operator pause).
+
+## RECONCILE — 2026-05-01T (post AC-77 verify-fix-2)
+
+- **Trigger**: User-requested 7-axis reconcile after AC-77 verify-fix-2 closed on commit 047d148 (CI run 25217799988 fully green).
+- **Axes checked**: directory structure, interfaces, AC-* coverage, external integrations, stack/deploy, log accuracy, readiness/traceability.
+- **Cosmetic drift**: none.
+- **Structural drift fixed**:
+  - `scaffolding/design.md`: allowlist size citations stale ("~70 entries: 41 empirical + 28 manual" / "additions.txt 28 entries") — updated to "75 entries: 40 from observed_syscalls.txt + 35 from additions.txt; clone routed to clone_arg_rules" in 3 locations (seccomp.rs tree entry, additions.txt tree entry, seccompiler integrations row). Commit `0fca3e7`.
+  - `scaffolding/readiness.md`: AC-77 coverage row for T-AC77-8/T-9 cited a non-existent test name (`audit_mode_logs_instead_of_kills`) and an over-broad combined assertion (no-SIGSYS AND event row). Verify-fix-2 commit e3e3a58 relaxed the integration test to negative-only (no SIGSYS) and split event-row coverage into `tests/sigsys_event_test.rs` (Enforce path) + unit tests (`build_program_audit_uses_log_on_mismatch`, `enforce_and_audit_programs_differ`). Coverage row updated to match shipped tests. Commit `4d4fff9`.
+- **Spec-violating drift**: none. AC-* IDs and acceptance meanings unchanged; allowlist size 75 remains within the documented `40..=120` bounds; no integrations added/removed; ESCAPE_PRIMITIVES intact (incl. fanotify_init/fanotify_mark added during prior G2 work, already covered by 100e24c reconcile).
+- **Confidence**: REPAIRED.
+- **Next**: VERIFY agent re-runs full AC-77 evidence pass against commit chain 047d148 → 0fca3e7 → 4d4fff9.
