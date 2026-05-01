@@ -61,3 +61,11 @@ sched_getaffinity  # glibc startup may call sched_getaffinity for thread-pool si
 tkill  # glibc abort(3) fallback when tgkill is unavailable; defensive twin of tgkill.
 readlink  # legacy form of readlinkat; glibc may emit it for /proc/self/exe lookup on some configurations.
 pselect6  # signal-aware select used by glibc's pthread_kill / nptl signal handling on some paths.
+
+# -- AC-77 verify-fix-2 (kernel-evidence) --
+# Captured from CI run 25216296931 dmesg: every SECCOMP_RET_KILL_PROCESS
+# audit record reported `arch=c000003e syscall=118` from libc text. On
+# x86_64 syscall 118 is setresgid. glibc-2.39 emits it post-init even
+# when the effective gid is unchanged; defense-in-depth: cap-drop ALL +
+# NO_NEW_PRIVS already prevent any credential change taking effect.
+setresgid  # glibc-2.39 init-time hardening; CI dmesg syscall=118 (run 25216296931).

@@ -138,9 +138,10 @@ pub const ALLOWLIST_SIZE_CEILING: usize = 120;
 ///
 /// Sources (see module header):
 /// - `tests/fixtures/seccomp/observed_syscalls.txt` (41 syscalls)
-/// - `tests/fixtures/seccomp/additions.txt` (28 manually-justified,
+/// - `tests/fixtures/seccomp/additions.txt` (29 manually-justified,
 ///   including 11 Rust-runtime + modern-glibc residuals added by
-///   the AC-77 verify-fix)
+///   the AC-77 verify-fix and 1 (setresgid) added by verify-fix-2
+///   from kernel SECCOMP_RET_KILL_PROCESS dmesg evidence)
 ///
 /// `clone` is intentionally absent here -- it is added with an
 /// argument filter via [`clone_arg_rules`].
@@ -225,6 +226,20 @@ fn allowed_syscalls() -> Vec<i64> {
         libc::SYS_tkill,
         libc::SYS_readlink,
         libc::SYS_pselect6,
+        // -- AC-77 verify-fix-2: kernel dmesg evidence (CI run
+        //    25216296931) showed every SECCOMP_RET_KILL_PROCESS
+        //    record reporting `syscall=118 arch=c000003e` from
+        //    libc text (ip=0x7f...aeb). On x86_64, syscall 118
+        //    is `setresgid`. glibc-2.39 issues it as part of its
+        //    init-time security hardening even when the effective
+        //    gid is unchanged; this fires after apply_seccomp
+        //    inside pincery-init's verify_fully_enforced read of
+        //    /proc/self/status. Allowing the bare syscall is safe:
+        //    the surrounding sandbox already drops CAP_SETGID via
+        //    NO_NEW_PRIVS + cap-drop ALL, so any setresgid call
+        //    that would change credentials is rejected by the
+        //    kernel with EPERM regardless of seccomp.
+        libc::SYS_setresgid,
     ]
 }
 
