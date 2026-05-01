@@ -1,5 +1,19 @@
 # Open Pincery — Experiment Log
 
+## BUILD v9 — Slice G2b: AC-77 default-deny allowlist + clone arg-filter — 2026-05-01T03:30Z
+
+- **Gate**: PASS (attempt 1) for the slice's verification ladder; the post-build gate runs after G2c..G2f.
+- **Commit**: `a89d4a5` on `v6-01_implementation`.
+- **Slice goal**: Convert `src/runtime/sandbox/seccomp.rs` from an 11-entry denylist (mismatch_action=Allow) into a 58-entry default-deny allowlist with KillProcess on mismatch (Enforce) / Log on mismatch (Audit), and move SYS_clone behind an argument-filter that blocks `CLONE_NEWUSER | CLONE_NEWNS`.
+- **Changed**: `src/runtime/sandbox/seccomp.rs` — full rewrite (+351 / -121 LOC). New: `ESCAPE_PRIMITIVES` const (17 syscalls), `ALLOWLIST_SIZE_FLOOR=40`, `ALLOWLIST_SIZE_CEILING=120`, `allowed_syscalls() -> Vec<i64>`, `clone_arg_rules() -> Result<Vec<(i64, Vec<SeccompRule>)>, String>` using `SeccompCondition::new(0, Qword, MaskedEq((CLONE_NEWUSER|CLONE_NEWNS) as u64), 0)`, `assert_no_escape_primitives`, rewritten `build_bpf_program(mode)` with size + escape-primitive guards, non-x86_64 stub returning Err, 8 unit tests gated `cfg(target_arch="x86_64")`.
+- **Not touched**: bwrap.rs (still calls `compose_seccomp_fd` unchanged), pincery_init.rs, event-log code, tests/.
+- **Verification ladder**: (1) parse: file accepted by `create_file`; (2) compile: `cargo build --lib` clean on `rust:1.95` Linux x86_64 in Docker (host is Windows; Linux-cfg-gated code requires container). Tests not yet executed — the unit tests are pure / no SIGSYS observation; runtime behavior tests live in G2d.
+- **Allowlist composition**: 41 empirical (observed_syscalls.txt minus SYS_clone) + 17 manual additions = 58 entries (within R-AC77-1 [40..=120]). Empirical block alphabetized; additions block grouped by purpose (process-exit, threading, sleep, signals, fs introspection).
+- **Posture**: Enforce → mismatch_action=KillProcess (SIGSYS, exit 159); Audit → mismatch_action=Log; both use match_action=Allow. clone3 is bare-allow with namespace lockout deferred to AC-86 (--disable-userns + cap-drop ALL + UID drop) per T-AC77-4.
+- **Concerns**: (a) Doc/scaffolding still references `denied_syscalls()` — RECONCILE will update sandbox-architecture-audit.md and design.md; (b) cargo clippy + the 8 unit tests have not yet executed end-to-end on Linux (G2d will own the integration test pass that exercises this).
+- **Retries**: 1.
+- **Next**: G2c — register `EventType::SandboxSyscallDenied` in `src/models/event.rs`, extend `src/observability/landlock_audit.rs` (or split a `seccomp_audit.rs` if it crosses 300 LOC) to surface AUDIT_SECCOMP records, wire bwrap parent post-wait branch to detect `WIFSIGNALED && WTERMSIG == SIGSYS` and emit the event with `syscall_nr` from the audit netlink (or -1 fallback).
+
 ## ANALYZE v9 — AC-77 (Seccomp default-deny allowlist) — 2026-05-01T01:35Z
 
 - **Gate**: PASS (attempt 1).
