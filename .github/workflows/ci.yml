@@ -107,7 +107,8 @@ jobs:
               apt-get update
               apt-get install -y --no-install-recommends \
                 bubblewrap slirp4netns uidmap libseccomp-dev libseccomp2 \
-                pkg-config build-essential ca-certificates curl git libssl-dev libpq-dev socat
+                pkg-config build-essential ca-certificates curl git libssl-dev libpq-dev socat \
+                iputils-ping
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
                 | sh -s -- -y --default-toolchain 1.88.0 --profile minimal
               export PATH=/tmp/cargo/bin:$PATH
