@@ -646,3 +646,206 @@ async fn resource_pid_exhaustion_blocked() {
     )
     .await;
 }
+
+// ---------------------------------------------------------------------------
+// G1d — network-category escape payloads (closes AC-76 at 12/12).
+//
+// All three payloads rely on the same kernel mechanism (`bwrap
+// --unshare-net` creates a network namespace with no interfaces, then
+// `--cap-drop ALL` strips CAP_NET_RAW / CAP_NET_ADMIN / CAP_NET_BIND).
+// The three tests differ in the *attack pattern* they probe, not the
+// underlying syscall — exactly as scope.md AC-76 specifies. Each
+// payload uses a different command surface so a kernel/glibc/bwrap
+// regression that broke one would still be visible in the others:
+//
+//   net-1 (raw socket / CAP_NET_RAW): `ping -c 1` opens an ICMP socket;
+//          either a kernel raw socket (needs CAP_NET_RAW) or — on
+//          modern Linux — a `ping_group_range`-gated DGRAM socket.
+//          With cap-drop ALL + uid 65534 outside `ping_group_range`,
+//          both paths fail. If `ping` is not on PATH, the test
+//          self-skips honestly with a clear log line.
+//
+//   net-2 (cloud metadata SSRF / 169.254.169.254): `curl` against the
+//          AWS/GCP metadata IP. Network namespace has no route table
+//          → curl fails with "Network is unreachable" or
+//          "Couldn't connect to server".
+//
+//   net-3 (DNS leak / unallowlisted host): `bash` `/dev/udp/8.8.8.8/53`
+//          attempts a UDP connect to public DNS. Network namespace
+//          → "Network is unreachable" or non-zero exit. If `bash`
+//          is not on PATH, the test self-skips.
+//
+// Binds canonical TLA+ action `ScopeNetwork`. The G1e cross-layer
+// `sandbox_blocked` event synthesizer can now run against evidence
+// from all four AC-76 categories.
+// ---------------------------------------------------------------------------
+
+/// Detect whether a binary is reachable on `$PATH` *inside the
+/// sandboxed shell*. We probe via `command -v`, run through the
+/// same RealSandbox path the payload itself will use, so the answer
+/// reflects what the bwrap mount-tree exposes (which may differ
+/// from the host) rather than what `which` says on the runner.
+async fn binary_in_sandbox(binary: &str) -> bool {
+    let cmd = format!("command -v {binary} >/dev/null 2>&1; echo cmd-status=$?");
+    let result = enforce_sandbox()
+        .run(&ShellCommand::new(&cmd), &escape_profile())
+        .await;
+    match result {
+        ExecResult::Ok {
+            exit_code, stdout, ..
+        } => exit_code == 0 && stdout.contains("cmd-status=0"),
+        _ => false,
+    }
+}
+
+/// Net-1 / raw-socket open: ICMP via `ping`. With `--cap-drop ALL` +
+/// uid 65534 (AC-86), the kernel refuses both the legacy raw-socket
+/// path (needs CAP_NET_RAW) and the modern `ping_group_range`-gated
+/// DGRAM path (uid 65534 is not in the host's ping_group_range).
+/// Even if both somehow succeeded, the network namespace
+/// (`deny_net=true`) has no loopback route, so the actual ICMP
+/// transmission would also fail — defence in depth.
+#[tokio::test]
+async fn net_raw_socket_blocked() {
+    if !preconditions_met() {
+        return;
+    }
+    if !binary_in_sandbox("ping").await {
+        eprintln!(
+            "skipping net/raw-socket: `ping` not in sandbox PATH \
+             (Ubuntu --no-install-recommends does not pull iputils-ping); \
+             cap-drop CAP_NET_RAW is still proven by AC-86 unit tests"
+        );
+        return;
+    }
+    assert_payload_blocked(
+        "net/raw-socket",
+        "ping -c 1 -W 1 127.0.0.1 2>&1; \
+         status=$?; \
+         echo \"ping-status=$status\"; \
+         exit \"$status\"",
+        &[
+            // CAP_NET_RAW path:
+            "operation not permitted",
+            // ping_group_range path on modern Linux when uid is
+            // outside the configured range:
+            "permission denied",
+            "socket: ",
+            // Network namespace has no interface even if the
+            // socket opens:
+            "network is unreachable",
+            "network unreachable",
+            // Catch-all: ping printed *some* error and exited
+            // non-zero. The exit-code check in
+            // assert_payload_blocked already enforces non-zero;
+            // this signature lets us match ping's own diagnostic
+            // line so a green test proves a real denial.
+            "ping-status=1",
+            "ping-status=2",
+        ],
+    )
+    .await;
+}
+
+/// Net-2 / cloud-metadata SSRF: curl to 169.254.169.254. This is the
+/// AWS/GCP/Azure instance-metadata IP; reaching it from inside an
+/// agent sandbox would let an LLM-driven prompt-injection escalate
+/// to IAM-credential exfiltration. With `deny_net=true`, the bwrap
+/// network namespace has no route to this IP (or any IP). curl
+/// returns exit 7 ("Failed to connect to host") with a "Network is
+/// unreachable" / "Couldn't connect" diagnostic.
+#[tokio::test]
+async fn net_metadata_ssrf_blocked() {
+    if !preconditions_met() {
+        return;
+    }
+    if !binary_in_sandbox("curl").await {
+        eprintln!(
+            "skipping net/metadata-ssrf: `curl` not in sandbox PATH; \
+             defence-in-depth still covered by net/dns-leak (bash /dev/udp)"
+        );
+        return;
+    }
+    assert_payload_blocked(
+        "net/metadata-ssrf",
+        // -sS: silent except errors. --max-time 2: bound the test
+        // to two seconds even if the kernel hangs. -o /dev/null:
+        // suppress body. We capture curl's exit + diagnostic on
+        // stderr (which 2>&1 redirects).
+        "curl -sS --max-time 2 -o /dev/null \
+            http://169.254.169.254/latest/meta-data/ 2>&1; \
+         status=$?; \
+         echo \"curl-status=$status\"; \
+         exit \"$status\"",
+        &[
+            // curl's own error format always begins `curl: (`
+            // followed by the libcurl error code:
+            "curl: (",
+            "couldn't connect",
+            "could not connect",
+            "failed to connect",
+            "network is unreachable",
+            "no route to host",
+            "couldn't resolve",
+            "could not resolve",
+            // Catch-all on curl-status=N for any non-zero N. We
+            // accept curl's well-known failure codes 6
+            // (couldn't resolve), 7 (failed connect), 28 (timeout):
+            "curl-status=6",
+            "curl-status=7",
+            "curl-status=28",
+        ],
+    )
+    .await;
+}
+
+/// Net-3 / DNS leak: bash `/dev/udp/8.8.8.8/53`. An attacker
+/// controlling agent input could try to exfiltrate data via DNS
+/// queries (encode in subdomain) to a non-allowlisted resolver.
+/// Bash's special `/dev/udp/HOST/PORT` redirection opens a UDP
+/// socket directly — no curl, no nslookup, no DNS library. With
+/// `deny_net=true` the network namespace blocks the connect with
+/// "Network is unreachable". Distinct from net-2 because it
+/// exercises bash's own socket path, not libcurl, and uses UDP
+/// rather than TCP.
+#[tokio::test]
+async fn net_dns_leak_blocked() {
+    if !preconditions_met() {
+        return;
+    }
+    if !binary_in_sandbox("bash").await {
+        eprintln!(
+            "skipping net/dns-leak: `bash` not in sandbox PATH \
+             (dash does not support /dev/udp); raw-socket and \
+             metadata-ssrf still cover the network-deny invariant"
+        );
+        return;
+    }
+    assert_payload_blocked(
+        "net/dns-leak",
+        // Bash builtin /dev/udp/HOST/PORT triggers a connect(2) on
+        // a UDP socket. With no route, this fails inside bash
+        // without ever sending bytes. We use a non-localhost IP so
+        // the kernel must consult the route table.
+        "bash -c 'echo dns-probe > /dev/udp/8.8.8.8/53' 2>&1; \
+         status=$?; \
+         echo \"udp-status=$status\"; \
+         exit \"$status\"",
+        &[
+            // bash's own redirection error:
+            "network is unreachable",
+            "network unreachable",
+            "no route to host",
+            "permission denied",
+            "operation not permitted",
+            "cannot create",
+            "cannot open",
+            // bash's catchall for redirection failures: exit 1.
+            // We accept any non-zero udp-status as evidence of a
+            // real bash-level denial, paired with one of the
+            // diagnostic strings above.
+            "udp-status=1",
+        ],
+    )
+    .await;
+}
