@@ -138,7 +138,9 @@ pub const ALLOWLIST_SIZE_CEILING: usize = 120;
 ///
 /// Sources (see module header):
 /// - `tests/fixtures/seccomp/observed_syscalls.txt` (41 syscalls)
-/// - `tests/fixtures/seccomp/additions.txt` (17 manually-justified)
+/// - `tests/fixtures/seccomp/additions.txt` (28 manually-justified,
+///   including 11 Rust-runtime + modern-glibc residuals added by
+///   the AC-77 verify-fix)
 ///
 /// `clone` is intentionally absent here -- it is added with an
 /// argument filter via [`clone_arg_rules`].
@@ -205,6 +207,24 @@ fn allowed_syscalls() -> Vec<i64> {
         libc::SYS_getcwd,
         libc::SYS_readlinkat,
         libc::SYS_uname,
+        // -- Rust runtime + modern-glibc residual set (verify-fix
+        //    after VERIFY caught /bin/true SIGSYS in the privileged
+        //    smoke job). pincery-init's verify_no_new_privs and
+        //    verify_fully_enforced run AFTER apply_seccomp, and the
+        //    user binary's glibc-2.39 dynamic linker on Ubuntu 24.04
+        //    uses modern variants (statx, faccessat2, ...) that the
+        //    host-side strace -c capture missed.
+        libc::SYS_statx,
+        libc::SYS_faccessat2,
+        libc::SYS_gettid,
+        libc::SYS_madvise,
+        libc::SYS_mremap,
+        libc::SYS_getdents64,
+        libc::SYS_sched_yield,
+        libc::SYS_sched_getaffinity,
+        libc::SYS_tkill,
+        libc::SYS_readlink,
+        libc::SYS_pselect6,
     ]
 }
 
@@ -384,7 +404,7 @@ mod tests {
     fn allowlist_size_within_bounds() {
         let n = allowed_syscalls().len();
         assert!(
-            n >= ALLOWLIST_SIZE_FLOOR && n <= ALLOWLIST_SIZE_CEILING,
+            (ALLOWLIST_SIZE_FLOOR..=ALLOWLIST_SIZE_CEILING).contains(&n),
             "allowlist size {n} out of bounds [{ALLOWLIST_SIZE_FLOOR}..={ALLOWLIST_SIZE_CEILING}]"
         );
     }

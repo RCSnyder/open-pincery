@@ -7,10 +7,26 @@
 # captured by `scripts/capture_seccomp_corpus.sh` against the AC-76
 # happy-path command set. Lines starting with `#` are comments.
 #
-# Additions are deliberately minimal: the only programs that ever run
-# under the AC-77 seccomp filter are dash (`sh -c <command>`) and the
-# coreutils invoked from it. Rust/tokio binaries do **not** run inside
-# the sandbox; their syscalls are out of scope.
+# Additions cover three populations:
+#   1. dash (`sh -c <command>`) and the coreutils invoked from it.
+#   2. The user binary's glibc-2.39 dynamic-linker startup on Ubuntu
+#      24.04 (kernel 6.x), which uses some modern syscalls that the
+#      `strace -c` host-side capture in `capture_seccomp_corpus.sh`
+#      missed because the AC-76 corpus binaries used the older
+#      variants on the capture host.
+#   3. The `pincery-init` Rust wrapper's residual syscalls between
+#      `apply_seccomp` (last apply step) and `execvp(user_argv)`.
+#      Specifically `verify_no_new_privs` (one prctl) and
+#      `verify_fully_enforced` (Rust `std::fs::read_to_string` of
+#      `/proc/self/status`, which on Rust 1.83+/Linux uses statx +
+#      File internals) both run while the seccomp filter is active.
+#
+# Failing to allow population (3) is a v9 BUILD bug that VERIFY
+# caught: the original "Rust binaries do not run inside the sandbox"
+# assumption was wrong, /bin/true (and 9 of 12 AC-76 escape payloads)
+# SIGSYS-killed in the privileged smoke job, and the empirical
+# corpus had to be widened. See `scaffolding/log.md` AC-77 verify-fix
+# entry.
 #
 # This file is parsed by
 # `tests/seccomp_allowlist_test.rs::allowlist_matches_observed_corpus`
@@ -34,3 +50,14 @@ fcntl  # FD_CLOEXEC setup and pipe configuration in dash; ubiquitous in glibc st
 getcwd  # dash `$PWD` probe and many coreutils relative-path resolution.
 readlinkat  # glibc `/proc/self/exe` lookup and dash `command -v` resolution.
 uname  # glibc startup probe and `uname(1)`; not on the minimal echo path but standard.
+statx  # glibc 2.34+ dynamic linker uses statx for ld.so.cache + library metadata; Rust `std::fs` uses statx to size buffers in `read_to_string`. pincery-init verify_fully_enforced reads /proc/self/status this way. Primary fix for the v9 verify-FAIL where /bin/true SIGSYS-killed.
+faccessat2  # modern glibc replaces access(2) with faccessat2(2) on some configurations; defensive against capture-host vs runner-host glibc skew.
+gettid  # Rust `std::thread::current()` and panic / log paths read TID; pincery-init touches it during verify_*.
+madvise  # Rust default allocator (System) calls madvise(MADV_DONTNEED) on heap shrink; glibc malloc uses MADV_FREE on free of large blocks.
+mremap  # glibc realloc() of large blocks uses mremap to grow in-place; can be hit by Rust String allocations during status parsing.
+getdents64  # directory enumeration -- not used by /bin/true, but `command -v echo`, `id`, and shell PATH search may scan dirs. Defensive.
+sched_yield  # Rust spin-based primitives and glibc futex contention path can fall back to sched_yield.
+sched_getaffinity  # glibc startup may call sched_getaffinity for thread-pool sizing even in single-threaded binaries.
+tkill  # glibc abort(3) fallback when tgkill is unavailable; defensive twin of tgkill.
+readlink  # legacy form of readlinkat; glibc may emit it for /proc/self/exe lookup on some configurations.
+pselect6  # signal-aware select used by glibc's pthread_kill / nptl signal handling on some paths.

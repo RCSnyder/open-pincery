@@ -220,7 +220,7 @@ impl ToolExecutor for ProcessExecutor {
                     #[cfg(unix)]
                     {
                         use std::os::unix::process::ExitStatusExt;
-                        return out.status.signal().map(|s| 128 + s).unwrap_or(-1);
+                        out.status.signal().map(|s| 128 + s).unwrap_or(-1)
                     }
                     #[cfg(not(unix))]
                     {

@@ -1,5 +1,21 @@
 # Open Pincery — Experiment Log
 
+## VERIFY-FIX v9 — AC-77 allowlist widening + clippy + CI wiring — 2026-05-01T08:00Z
+
+- **Trigger**: VERIFY at `100e24c` returned **FAIL**. Three blockers:
+  1. **Allowlist too narrow at runtime** — the privileged sandbox-smoke job on `100e24c` (run `25203264021` job `73898424698`) showed `real_sandbox_runs_trivial_true` exiting 159 (SIGSYS, 128+31) and 9 of 12 AC-76 escape-suite payloads regressing with `non-zero exit but no denial signature`. Root cause: `tests/fixtures/seccomp/additions.txt` header asserted "Rust/tokio binaries do **not** run inside the sandbox; their syscalls are out of scope" — but that assumption is **wrong**. `pincery-init`'s `verify_no_new_privs` and `verify_fully_enforced` (the latter calls `std::fs::read_to_string("/proc/self/status")`) execute AFTER `apply_seccomp` and exercise modern Rust + glibc-2.39 syscalls (statx, gettid, madvise, ...) that the host-side `strace -c` capture in `scripts/capture_seccomp_corpus.sh` did not see.
+  2. **Clippy `-D warnings` failed** — `src/runtime/sandbox/mod.rs:223` (`needless_return`) and `src/runtime/sandbox/seccomp.rs:387` (`manual_range_contains`).
+  3. **CI workflow gap** — `.github/workflows/ci.yml` enumerates the privileged smoke job's `--test` list explicitly; `seccomp_allowlist_test` was missing, so even a working live-bwrap path would not be exercised in CI.
+- **Fix**: widen `allowed_syscalls()` with 11 manually-justified Rust-runtime + modern-glibc residuals (`statx`, `faccessat2`, `gettid`, `madvise`, `mremap`, `getdents64`, `sched_yield`, `sched_getaffinity`, `tkill`, `readlink`, `pselect6`); update `additions.txt` header to correctly explain the three populations (dash+coreutils / glibc dynamic linker / pincery-init Rust residual); fix both clippy lints; add `--test seccomp_allowlist_test` to the privileged smoke job. Allowlist size goes from 57 → 68 (still within `[40, 120]` floor/ceiling). Module header `additions.txt` count updated 17 → 28.
+- **Local evidence (rust:1.95 Linux container)**:
+  - `cargo build --lib --tests` — clean.
+  - `cargo test --lib seccomp` — 17/17 unit tests pass (including `allowlist_size_within_bounds` at 68 entries, `allowlist_covers_observed_corpus`, `allowlist_excludes_escape_primitives`).
+  - `cargo clippy --all-targets -- -D warnings` — clean (was 2 errors).
+- **Live evidence**: pending CI run on the verify-fix commit; the privileged sandbox-smoke job and the postgres-attached `cargo test --all` job will both exercise the new allowlist plus the wired-in `seccomp_allowlist_test`.
+- **Documents updated**: `tests/fixtures/seccomp/additions.txt`, `src/runtime/sandbox/seccomp.rs`, `src/runtime/sandbox/mod.rs`, `.github/workflows/ci.yml`, `scaffolding/log.md`.
+- **No scope reduction**: still default-deny, still `KillProcess` on Enforce, still arg-filtered `clone`, still 19-entry `ESCAPE_PRIMITIVES` install-time invariant, still `sandbox_syscall_denied` event with `syscall_nr=-1` fallback. The allowlist grew by 11 entries, all justified inline.
+- **Next**: push, await CI, re-VERIFY against the green pipeline.
+
 ## RECONCILE v9 — AC-77 post-BUILD/REVIEW drift sweep — 2026-05-01T05:30Z
 
 - **Trigger**: standard reconcile pass after AC-77 BUILD + REVIEW closed at HEAD `512f3f5` (branch `v6-01_implementation`); commit range `0b02558..512f3f5` covers G2a (`e08a15b`), G2b (`a89d4a5`), G2c (`a96499e`), G2d (`81571db`), G2e+G2f (`5982ab3`), review-fix (`c440489`), re-review fix (`512f3f5`).

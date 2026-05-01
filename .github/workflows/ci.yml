@@ -125,6 +125,7 @@ jobs:
                          --test sandbox_seccomp_test --test sandbox_cgroup_test \
                          --test sandbox_preflight_test \
                          --test sandbox_escape_test \
+                         --test seccomp_allowlist_test \
                          --no-fail-fast \
                          -- --nocapture --test-threads=1
             ' | tee "$OUT"
