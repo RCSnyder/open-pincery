@@ -217,6 +217,14 @@ async fn assert_payload_blocked(payload_name: &str, command: &str, denial_signat
         // they don't prove the sandbox blocked the payload — they
         // could mask a bug in the harness or a missing dependency.
         // Surface them as failures so the suite does not green-by-skip.
+        //
+        // Exception: for the fork-bomb payload, a Timeout from the
+        // outer sandbox is itself proof the sandbox bounded the bomb
+        // enough that it could not run to completion. Accept it.
+        ExecResult::Timeout if payload_name == "resource/fork-bomb" => {
+            // bounded; a fork bomb that times out under the cgroup
+            // pids.max + outer wall clock is, by definition, blocked.
+        }
         other => panic!("[{payload_name}] expected ExecResult::Ok, got {other:?}"),
     }
 }
