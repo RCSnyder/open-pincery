@@ -116,9 +116,18 @@ jobs:
               bwrap --version
               # Sanity-check: bwrap actually creates a user+pid ns.
               bwrap --unshare-user --unshare-pid --dev-bind / / /bin/true
+              # AC-77 verify-fix-2 diagnostic: clear the kernel ring
+              # buffer before tests so any seccomp KILL_PROCESS audit
+              # records the kernel emits during the run are easy to
+              # locate. SECCOMP_RET_KILL_PROCESS produces
+              #   audit: type=1326 ... syscall=NN compat=0 ip=0x... code=0x80000000
+              # in dmesg even without auditd; that NN is the missing
+              # entry the empirical capture script did not see.
+              dmesg -C 2>/dev/null || true
               # Run every real-bwrap suite as a single cargo invocation
               # so target/ is shared. --test-threads=1 matches production
               # because tempdirs + procfs probes are not thread-safe.
+              set +e
               cargo test --test sandbox_real_smoke --test sandbox_landlock_test \
                          --test sandbox_uid_drop_test \
                          --test landlock_scope_test \
@@ -128,6 +137,13 @@ jobs:
                          --test seccomp_allowlist_test \
                          --no-fail-fast \
                          -- --nocapture --test-threads=1
+              TEST_EXIT=$?
+              set -e
+              echo "=== AC-77 KERNEL SECCOMP/AUDIT LOG (post-test dmesg) ==="
+              dmesg 2>/dev/null | grep -iE "seccomp|audit:|type=1326|type=SECCOMP" \
+                || echo "(no kernel seccomp/audit lines captured)"
+              echo "=== END AC-77 KERNEL LOG ==="
+              exit $TEST_EXIT
             ' | tee "$OUT"
           # Fail if the suite ran zero tests -- would mean the
           # bwrap probe or Linux gate silently skipped our evidence.
