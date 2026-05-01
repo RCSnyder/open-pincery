@@ -487,4 +487,86 @@ mod tests {
         assert_eq!(n as usize, expected_bytes.len());
         assert_eq!(buf, expected_bytes);
     }
+
+    /// AC-77 / G2e: the checked-in empirical strace corpus must be a
+    /// subset of [`allowed_syscalls`] -- otherwise we have shipped an
+    /// allowlist that demonstrably fails the AC-76 happy-path corpus.
+    /// Every observed name must (a) resolve to a known SYS_* constant
+    /// AND (b) appear in the allowlist (or be SYS_clone, which is in
+    /// the arg-filter rules).
+    #[test]
+    fn allowlist_covers_observed_corpus() {
+        let observed = include_str!("../../../tests/fixtures/seccomp/observed_syscalls.txt");
+        let allow: std::collections::HashSet<i64> = allowed_syscalls().into_iter().collect();
+        for raw in observed.lines() {
+            let name = raw.trim();
+            if name.is_empty() || name.starts_with('#') {
+                continue;
+            }
+            let nr = syscall_nr_by_name(name).unwrap_or_else(|| {
+                panic!("observed syscall {name:?} has no libc::SYS_* mapping in this build")
+            });
+            if nr == libc::SYS_clone {
+                // clone is filtered via clone_arg_rules() rather than
+                // listed bare in allowed_syscalls().
+                continue;
+            }
+            assert!(
+                allow.contains(&nr),
+                "observed syscall {name} (#{nr}) is missing from the allowlist; \
+                 update src/runtime/sandbox/seccomp.rs::allowed_syscalls or \
+                 re-run scripts/capture_seccomp_corpus.sh"
+            );
+        }
+    }
+
+    /// Hand-rolled name -> SYS_* mapping for the empirical corpus.
+    /// Kept inside the test module so it cannot drift into production
+    /// code paths; only the regen-time check uses it.
+    fn syscall_nr_by_name(name: &str) -> Option<i64> {
+        Some(match name {
+            "access" => libc::SYS_access,
+            "arch_prctl" => libc::SYS_arch_prctl,
+            "brk" => libc::SYS_brk,
+            "clone" => libc::SYS_clone,
+            "close" => libc::SYS_close,
+            "dup2" => libc::SYS_dup2,
+            "execve" => libc::SYS_execve,
+            "fadvise64" => libc::SYS_fadvise64,
+            "fstat" => libc::SYS_fstat,
+            "getegid" => libc::SYS_getegid,
+            "geteuid" => libc::SYS_geteuid,
+            "getgid" => libc::SYS_getgid,
+            "getpid" => libc::SYS_getpid,
+            "getppid" => libc::SYS_getppid,
+            "getrandom" => libc::SYS_getrandom,
+            "getuid" => libc::SYS_getuid,
+            "ioctl" => libc::SYS_ioctl,
+            "lseek" => libc::SYS_lseek,
+            "mmap" => libc::SYS_mmap,
+            "mprotect" => libc::SYS_mprotect,
+            "munmap" => libc::SYS_munmap,
+            "newfstatat" => libc::SYS_newfstatat,
+            "openat" => libc::SYS_openat,
+            "pipe2" => libc::SYS_pipe2,
+            "pread64" => libc::SYS_pread64,
+            "prlimit64" => libc::SYS_prlimit64,
+            "read" => libc::SYS_read,
+            "rseq" => libc::SYS_rseq,
+            "rt_sigaction" => libc::SYS_rt_sigaction,
+            "rt_sigprocmask" => libc::SYS_rt_sigprocmask,
+            "rt_sigreturn" => libc::SYS_rt_sigreturn,
+            "rt_sigsuspend" => libc::SYS_rt_sigsuspend,
+            "set_robust_list" => libc::SYS_set_robust_list,
+            "set_tid_address" => libc::SYS_set_tid_address,
+            "setpgid" => libc::SYS_setpgid,
+            "statfs" => libc::SYS_statfs,
+            "timer_create" => libc::SYS_timer_create,
+            "timer_settime" => libc::SYS_timer_settime,
+            "vfork" => libc::SYS_vfork,
+            "wait4" => libc::SYS_wait4,
+            "write" => libc::SYS_write,
+            _ => return None,
+        })
+    }
 }
