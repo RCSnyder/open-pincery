@@ -2689,3 +2689,98 @@ grows beyond 450 lines, split parser/correlation into separate files.
 None. Live audit availability is an environment precondition, not an AC
 ambiguity. ABI < 7 degrades observability only; sandbox enforcement
 remains active.
+
+### v9 G3 DESIGN — AC-78 Event-Log Hash Chain (2026-05-01)
+
+Make `Inv_AuditChainBeforeExecution` real (currently a `VerifyAuditChain` cosmetic stand-in per TLA+ v3.2 F4). Tampering with `events.content` after-the-fact is silent today; this AC makes any post-insert mutation detectable by a verify pass.
+
+#### Architecture
+
+A per-agent SHA-256 hash chain over events, computed by a Postgres trigger that holds a row lock on the preceding event for the same agent. A new background `verify_audit_chain` job (and `pcy audit verify` CLI) walks every chain and emits `audit_chain_verified` or `audit_chain_broken { agent_id, first_divergent_event_id }` events.
+
+**Chain root**: per-agent (not per-workspace). Rationale: every event already has `agent_id NOT NULL` (no JOIN required in the trigger), `idx_events_agent_created` already orders within an agent, and concurrent multi-agent inserts within one workspace need not serialize. Workspace-level walking is cheap (UNION over agents).
+
+**Hash input** (canonical, deterministic): `prev_hash || event_type || canonical_json(content_fields) || created_at_micros`, where `content_fields` is the JSON serialization of the immutable event fields in fixed order: `agent_id, event_type, source, wake_id, tool_name, tool_input, tool_output, content, termination_reason`. NULL → empty JSON null. `created_at_micros` is the trigger-assigned `created_at` truncated to microseconds (Postgres's native `timestamptz` precision). The chain genesis (no prior event for agent) uses `prev_hash = ""` (empty string), `entry_hash = sha256(empty || …)`.
+
+#### Directory Structure (additions)
+
+```
+migrations/
+  20260501000001_add_event_hash_chain.sql       # ALTER TABLE + trigger fn + trigger
+src/
+  cli/
+    audit.rs                                    # `pcy audit verify` subcommand
+  background/
+    audit_chain.rs                              # verify_audit_chain(pool) loop + once
+src/api/
+  audit.rs                                      # GET /api/audit/chain/verify (admin)
+tests/
+  audit_chain_test.rs                           # 3 tests: happy / tamper-detect / concurrent
+```
+
+#### Interfaces
+
+- **DB schema delta**:
+  - `events.prev_hash TEXT NULL` (nullable in migration; trigger fills on insert; backfill makes existing rows form a chain in `(agent_id, created_at, id)` order; `ALTER COLUMN ... SET NOT NULL` after backfill).
+  - `events.entry_hash TEXT NULL` → same pattern, then `NOT NULL`.
+  - Index `idx_events_agent_chain_walk ON events(agent_id, created_at, id)` already covered by existing `idx_events_agent_created` plus `id` tiebreak; add only if EXPLAIN shows we still need it.
+- **Trigger function** `events_chain_compute_hash() RETURNS TRIGGER`:
+  - `BEFORE INSERT FOR EACH ROW`. Selects `id, entry_hash` of the current latest event for `NEW.agent_id` with `FOR UPDATE` (row lock prevents two concurrent inserts on the same agent racing into the same prev). Computes `NEW.entry_hash := encode(sha256(coalesce(NEW.prev_hash,'') || NEW.event_type || canonical_payload || to_char(NEW.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'))::bytea, 'hex')` using `pgcrypto`. Sets `NEW.prev_hash` from selected hash (or empty string for genesis).
+  - Concurrency: SERIALIZABLE-friendly. Two inserts for the same agent race; the second blocks on `FOR UPDATE` of the first's row until commit.
+- **Verify path** `verify_audit_chain(pool, AgentId) -> ChainStatus`:
+  - `ChainStatus::Verified { events: u64, last_hash: String }` or `ChainStatus::Broken { first_divergent_event_id: Uuid, expected_hash: String, actual_hash: String }`.
+  - Walks `SELECT id, prev_hash, entry_hash, … FROM events WHERE agent_id = $1 ORDER BY created_at, id`, recomputes each hash, compares to stored `entry_hash`. First mismatch returns `Broken`.
+  - Workspace verifier loops all agents in workspace; emits one `audit_chain_verified` or `audit_chain_broken` event **per agent** with structured payload.
+- **CLI** `pcy audit verify [--agent <id>] [--workspace <id>]`:
+  - Defaults to current context's workspace. Prints per-agent `OK (n events)` or `BROKEN at event <id>` with non-zero exit on any break.
+- **HTTP** `POST /api/audit/chain/verify` (workspace-admin gated): runs verifier, returns JSON `{ agents: [{ agent_id, status: "verified"|"broken", … }] }`.
+- **Background invocation**: at startup (post-migration, post-DB-bootstrap, before listener bind) the server runs one verify pass per workspace. Failure to verify aborts startup with exit code 5 unless `OPEN_PINCERY_AUDIT_CHAIN_FLOOR=relaxed` + `OPEN_PINCERY_ALLOW_UNSAFE=true` (matches AC-84 relaxed-floor pattern).
+
+#### Event Types (additions)
+
+- `audit_chain_verified` (source = `runtime`, payload `{ agent_id, events_in_chain, last_entry_hash }`)
+- `audit_chain_broken` (source = `runtime`, payload `{ agent_id, first_divergent_event_id, expected_hash, actual_hash, events_walked }`)
+
+#### Backfill Strategy
+
+Migration step ordering:
+1. `ALTER TABLE events ADD COLUMN prev_hash TEXT, ADD COLUMN entry_hash TEXT;`
+2. `CREATE EXTENSION IF NOT EXISTS pgcrypto;` (idempotent).
+3. Recursive CTE walks each `agent_id`'s events in `(created_at, id)` order, computing the chain forward and writing both columns. Single statement, deterministic.
+4. `ALTER TABLE events ALTER COLUMN prev_hash SET NOT NULL, ALTER COLUMN entry_hash SET NOT NULL;`
+5. `CREATE FUNCTION events_chain_compute_hash() …` and trigger.
+
+For empty databases (fresh installs), steps 1–2 are no-ops on data; step 3 backfills zero rows; steps 4–5 install constraints+trigger.
+
+#### External Integrations & Test Strategy
+
+| Integration         | Failure mode                                      | Test strategy            |
+| ------------------- | ------------------------------------------------- | ------------------------ |
+| Postgres pgcrypto   | Extension missing → migration fails fast         | Live (CI Postgres 16 has pgcrypto) |
+| Trigger row lock    | Deadlock on multi-agent insert                    | Live concurrent inserts test |
+| Backfill            | Crash mid-backfill → partial NULLs                | Migration is single tx; rollback-safe |
+
+#### Observability
+
+- Structured tracing on every verify: `audit.chain.verify { agent_id, events, status }`.
+- Prometheus counter `open_pincery_audit_chain_verified_total{status}` and gauge `open_pincery_audit_chain_last_verify_seconds`.
+
+#### Complexity Exceptions
+
+None. Migration is single file <100 lines; verifier is <200 lines; CLI subcommand <80 lines.
+
+#### Open Questions
+
+None. Per-agent vs per-workspace chain choice documented above (per-agent). Canonical-JSON serialization deterministic via Postgres `to_jsonb` with explicit column ordering.
+
+#### Test Strategy (one row per AC sub-claim)
+
+| Sub-claim                                  | Test                                                                                                  |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| T-AC78-1: clean chain verifies             | `tests/audit_chain_test.rs::happy_path_chain_verifies` inserts 10k events, verifier returns Verified  |
+| T-AC78-2: tamper detected                  | `tests/audit_chain_test.rs::manual_update_breaks_chain` does `UPDATE events SET content='evil'`, verifier returns Broken with the right event_id |
+| T-AC78-3: concurrent inserts intact        | `tests/audit_chain_test.rs::concurrent_inserts_preserve_chain` spawns 8 tasks each inserting 200 events for the same agent, then verifies |
+| T-AC78-4: trigger genesis                  | unit test: first event for an agent has prev_hash = '' and entry_hash matches reference computation   |
+| T-AC78-5: pcy CLI exits non-zero on break  | `tests/cli_audit_test.rs` shells out and asserts exit code                                            |
+| T-AC78-6: startup verify gates server      | integration: tamper a row on a DB, restart server, assert exit code 5                                 |
+
