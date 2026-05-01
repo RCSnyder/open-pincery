@@ -63,9 +63,14 @@ readlink  # legacy form of readlinkat; glibc may emit it for /proc/self/exe look
 pselect6  # signal-aware select used by glibc's pthread_kill / nptl signal handling on some paths.
 
 # -- AC-77 verify-fix-2 (kernel-evidence) --
-# Captured from CI run 25216296931 dmesg: every SECCOMP_RET_KILL_PROCESS
-# audit record reported `arch=c000003e syscall=118` from libc text. On
-# x86_64 syscall 118 is setresgid. glibc-2.39 emits it post-init even
-# when the effective gid is unchanged; defense-in-depth: cap-drop ALL +
-# NO_NEW_PRIVS already prevent any credential change taking effect.
-setresgid  # glibc-2.39 init-time hardening; CI dmesg syscall=118 (run 25216296931).
+# Captured from CI runs 25216296931 and 25216465822 dmesg: every
+# SECCOMP_RET_KILL_PROCESS audit record reported
+# `arch=c000003e syscall=118` originating from libc text. On x86_64
+# `ausyscall --dump` resolves: 117=setresuid, 118=getresuid,
+# 119=setresgid, 120=getresgid. So the missing syscall is
+# `getresuid` -- a pure read of the calling process's own real,
+# effective, and saved uids. glibc-2.39 emits it post-init even
+# when the credentials are unchanged, inside pincery-init's
+# verify_fully_enforced path which runs after apply_seccomp.
+# Pure read, no escape primitive.
+getresuid  # glibc-2.39 init-time uid read; CI dmesg syscall=118 (runs 25216296931, 25216465822).
