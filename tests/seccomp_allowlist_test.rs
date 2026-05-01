@@ -238,3 +238,59 @@ async fn unshare_does_not_sigsys_when_seccomp_disabled() {
         other => panic!("expected ExecResult::Ok, got {other:?}"),
     }
 }
+
+/// AC-77 G2d.4 (review R2): in `SandboxMode::Audit` the same
+/// `unshare(2)` call that would SIGSYS in Enforce mode must instead
+/// proceed to completion. The seccomp filter built for Audit mode
+/// uses `mismatch_action=Log` + `match_action=Allow`, so the kernel
+/// logs the violation to the audit subsystem but lets the syscall
+/// run. `unshare -U /bin/true` succeeds (uid 65534 inside the bwrap
+/// userns can re-unshare its own user namespace) and `/bin/true`
+/// returns 0.
+///
+/// This is the runtime evidence backing readiness `T-AC77-1`'s
+/// "Audit -> Log" half. Without this test, only the BPF-program
+/// shape is verified (that Enforce and Audit produce *different*
+/// programs); kernel-level semantics remain unverified.
+#[tokio::test]
+async fn audit_mode_logs_instead_of_killing() {
+    if !preconditions_met() {
+        return;
+    }
+    if !binary_in_sandbox("unshare") {
+        eprintln!("skipping: unshare(1) not in sandbox PATH");
+        return;
+    }
+
+    let result = sandbox(SandboxMode::Audit)
+        .run(
+            &ShellCommand::new("unshare -U /bin/true"),
+            &seccomp_profile(true),
+        )
+        .await;
+    match result {
+        ExecResult::Ok {
+            exit_code,
+            stdout,
+            stderr,
+            ..
+        } => {
+            assert_ne!(
+                exit_code, SIGSYS_EXIT_CODE,
+                "Audit mode must NOT kill on disallowed syscall; got SIGSYS \
+                 (exit {SIGSYS_EXIT_CODE}). The kernel is treating the filter as \
+                 Enforce-style KillProcess instead of Log. \
+                 stdout={stdout:?} stderr={stderr:?}"
+            );
+            // unshare -U /bin/true should now actually succeed since
+            // the kernel logs and allows. /bin/true returns 0.
+            assert_eq!(
+                exit_code, 0,
+                "Audit mode passthrough should let unshare -U /bin/true \
+                 proceed to /bin/true (exit 0); got exit_code={exit_code}; \
+                 stdout={stdout:?} stderr={stderr:?}"
+            );
+        }
+        other => panic!("expected ExecResult::Ok, got {other:?}"),
+    }
+}

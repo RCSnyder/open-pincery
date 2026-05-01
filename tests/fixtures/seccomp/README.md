@@ -48,7 +48,8 @@ then update `allowed_syscalls()` in `src/runtime/sandbox/seccomp.rs`
 to include the new entries (and bump the `additions.txt` rationale
 if any of them are no longer additions).
 
-The diff-fail test
-`tests/seccomp_allowlist_test.rs::allowlist_matches_observed_corpus`
-(gated on `OPEN_PINCERY_RUN_AC77_REGEN=1`) is the runtime guard that
-catches drift between this corpus and the source-of-truth.
+The drift guard
+`src/runtime/sandbox/seccomp.rs::tests::allowlist_covers_observed_corpus`
+(unit test, reads this corpus via `include_str!`) catches drift
+between this fixture and the source-of-truth `allowed_syscalls()`.
+It runs on every build with no env-var gating.

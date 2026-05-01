@@ -24,9 +24,11 @@
 //! When a new built-in tool extends the syscall surface (e.g. AC-66
 //! Tool Catalog Expansion) the operator re-runs
 //! `scripts/capture_seccomp_corpus.sh` and updates this list. The
-//! diff-fail test
-//! `tests/seccomp_allowlist_test.rs::allowlist_matches_observed_corpus`
-//! (gated on `OPEN_PINCERY_RUN_AC77_REGEN=1`) catches drift.
+//! drift guard
+//! [`tests::allowlist_covers_observed_corpus`] (a unit test in this
+//! file that reads the static fixture via `include_str!`) fires at
+//! every build whenever an entry from `observed_syscalls.txt` is
+//! missing from `allowed_syscalls()` -- no env-var gating required.
 //!
 //! ## `clone` argument filtering
 //!
@@ -104,6 +106,8 @@ use crate::config::SandboxMode;
 pub const ESCAPE_PRIMITIVES: &[i64] = &[
     libc::SYS_bpf,
     libc::SYS_delete_module,
+    libc::SYS_fanotify_init,
+    libc::SYS_fanotify_mark,
     libc::SYS_finit_module,
     libc::SYS_init_module,
     libc::SYS_io_uring_enter,
