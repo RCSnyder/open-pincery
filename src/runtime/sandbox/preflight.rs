@@ -513,6 +513,152 @@ pub fn parse_bwrap_version(raw: &str) -> Option<(u32, u32, u32)> {
     Some((major, minor, patch))
 }
 
+// ---------------------------------------------------------------------------
+// Slice G1c.x.2: memory.max startup gate
+// ---------------------------------------------------------------------------
+
+/// Outcome of [`evaluate_memory_gate`] — the pure decision function
+/// behind the runtime memory.max startup gate. Kept separate from
+/// [`MemoryProbeOutcome`] (which only describes the kernel's
+/// behavior) because the gate also folds in operator intent
+/// (`SandboxMode::Enforce` plus `OPEN_PINCERY_ALLOW_UNSAFE`).
+///
+/// The variants form an ordered escalation that mirrors the
+/// existing `FloorOutcome` / `FloorError` split:
+///
+/// - [`Self::Enforced`] — probe proved the cap; startup continues.
+/// - [`Self::AcknowledgedUnsafe`] — probe failed but the operator
+///   has armed `allow_unsafe`; startup continues with a warning.
+/// - [`Self::Refuse`] — probe failed and `allow_unsafe` is not
+///   set; startup must abort with exit 4.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryGateDecision {
+    /// `memory.max` is empirically enforced on this host.
+    Enforced,
+    /// Probe says caps are not enforced (or could not run), but
+    /// `OPEN_PINCERY_ALLOW_UNSAFE=true` lets the operator override.
+    /// `reason` is the verbatim probe evidence/skip reason — it
+    /// MUST appear in the corresponding warning event so the
+    /// override is auditable.
+    AcknowledgedUnsafe { reason: String },
+    /// Probe says caps are not enforced and the override is not
+    /// armed. Startup must refuse to boot.
+    Refuse { reason: String },
+}
+
+/// Pure decision function: given a probe outcome and the operator's
+/// `allow_unsafe` flag, decide whether the runtime is safe to boot
+/// in `SandboxMode::Enforce`.
+///
+/// Caller is expected to have already filtered out non-Enforce
+/// modes (Audit / Disabled don't apply caps so the gate has no
+/// signal to evaluate).
+///
+/// Test seam: this is the only function that needs unit coverage.
+/// `enforce_memory_cap_at_startup` is a thin shim over the real
+/// probe + this evaluator + `tracing` calls.
+#[cfg(target_os = "linux")]
+fn evaluate_memory_gate(
+    outcome: crate::runtime::sandbox::cgroup::MemoryProbeOutcome,
+    allow_unsafe: bool,
+) -> MemoryGateDecision {
+    use crate::runtime::sandbox::cgroup::MemoryProbeOutcome;
+    match outcome {
+        MemoryProbeOutcome::Enforced => MemoryGateDecision::Enforced,
+        MemoryProbeOutcome::NotEnforced { evidence } => {
+            if allow_unsafe {
+                MemoryGateDecision::AcknowledgedUnsafe { reason: evidence }
+            } else {
+                MemoryGateDecision::Refuse { reason: evidence }
+            }
+        }
+        MemoryProbeOutcome::Skipped { reason } => {
+            // Probe couldn't run — treat as "unverified". In Enforce
+            // mode unverified is identical to NotEnforced from a
+            // safety standpoint: we cannot prove the cap will hold.
+            if allow_unsafe {
+                MemoryGateDecision::AcknowledgedUnsafe {
+                    reason: format!("probe skipped: {reason}"),
+                }
+            } else {
+                MemoryGateDecision::Refuse {
+                    reason: format!("probe skipped: {reason}"),
+                }
+            }
+        }
+    }
+}
+
+/// Run the memory.max startup gate.
+///
+/// Only meaningful under [`SandboxMode::Enforce`]. `Audit` mode
+/// runs the policy engine without applying caps, so memory
+/// enforcement is irrelevant; `Disabled` mode bypasses the
+/// sandbox entirely and is already gated by the `allow_unsafe`
+/// pair in `Config::from_env`.
+///
+/// In Enforce mode this calls
+/// [`crate::runtime::sandbox::cgroup::probe_memory_max_enforcement`],
+/// emits one of three structured events
+/// (`sandbox_memory_cap_enforced` / `sandbox_memory_cap_unenforced_acknowledged`
+/// / `sandbox_memory_cap_unenforced`), and returns `Err(4)` on
+/// `Refuse`. Exit code 4 matches the existing kernel-floor
+/// preflight (`enforce_kernel_floor_at_startup`) so operators
+/// see a single distinct exit code for "kernel/runtime
+/// preconditions for the sandbox are not met".
+///
+/// Returns `Ok(())` when:
+/// - mode is not `Enforce` (gate is not applicable), or
+/// - probe returned [`MemoryProbeOutcome::Enforced`], or
+/// - probe failed but `allow_unsafe` is armed (operator override).
+///
+/// Returns `Err(4)` when probe failed and `allow_unsafe` is not
+/// armed.
+#[cfg(target_os = "linux")]
+pub fn enforce_memory_cap_at_startup(
+    mode: crate::config::SandboxMode,
+    allow_unsafe: bool,
+) -> Result<(), i32> {
+    use crate::config::SandboxMode;
+    use crate::runtime::sandbox::cgroup::probe_memory_max_enforcement;
+
+    if !matches!(mode, SandboxMode::Enforce) {
+        // Audit / Disabled: caps would not be applied even if
+        // probe said Enforced. Skip silently — the surrounding
+        // startup path already logs the chosen mode.
+        return Ok(());
+    }
+
+    let outcome = probe_memory_max_enforcement();
+    match evaluate_memory_gate(outcome, allow_unsafe) {
+        MemoryGateDecision::Enforced => {
+            tracing::info!(
+                event = "sandbox_memory_cap_enforced",
+                "Empirical memory.max probe confirmed cgroup v2 enforcement"
+            );
+            Ok(())
+        }
+        MemoryGateDecision::AcknowledgedUnsafe { reason } => {
+            tracing::warn!(
+                event = "sandbox_memory_cap_unenforced_acknowledged",
+                reason = %reason,
+                "memory.max enforcement unverified; continuing because OPEN_PINCERY_ALLOW_UNSAFE=true"
+            );
+            Ok(())
+        }
+        MemoryGateDecision::Refuse { reason } => {
+            tracing::error!(
+                event = "sandbox_memory_cap_unenforced",
+                reason = %reason,
+                "memory.max enforcement could not be verified; refusing to boot in SandboxMode::Enforce \
+                 (set OPEN_PINCERY_ALLOW_UNSAFE=true to override, or fix the host's cgroup memory delegation)"
+            );
+            Err(4)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -846,6 +992,125 @@ mod tests {
             ..StubKernelProbe::compliant()
         };
         let rc = run_startup_preflight_with(&probe, &relaxed_env());
+        assert_eq!(rc, Ok(()));
+    }
+
+    // ---------------------------------------------------------------
+    // Slice G1c.x.2: memory.max startup-gate evaluator
+    // ---------------------------------------------------------------
+
+    #[cfg(target_os = "linux")]
+    use crate::runtime::sandbox::cgroup::MemoryProbeOutcome;
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn memory_gate_enforced_passes_regardless_of_allow_unsafe() {
+        // Probe proved enforcement — `allow_unsafe` is irrelevant.
+        // The probe outcome is the strongest possible signal and
+        // overrides operator-intent flags.
+        assert_eq!(
+            evaluate_memory_gate(MemoryProbeOutcome::Enforced, false),
+            MemoryGateDecision::Enforced
+        );
+        assert_eq!(
+            evaluate_memory_gate(MemoryProbeOutcome::Enforced, true),
+            MemoryGateDecision::Enforced
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn memory_gate_not_enforced_refuses_without_allow_unsafe() {
+        let evidence = "dd exited with code 0 after allocating 67108864B against a 8388608B cap";
+        let decision = evaluate_memory_gate(
+            MemoryProbeOutcome::NotEnforced {
+                evidence: evidence.into(),
+            },
+            false,
+        );
+        match decision {
+            MemoryGateDecision::Refuse { reason } => assert_eq!(reason, evidence),
+            other => panic!("expected Refuse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn memory_gate_not_enforced_acknowledged_with_allow_unsafe() {
+        let evidence = "dd exited with code 0 after allocating 67108864B against a 8388608B cap";
+        let decision = evaluate_memory_gate(
+            MemoryProbeOutcome::NotEnforced {
+                evidence: evidence.into(),
+            },
+            true,
+        );
+        match decision {
+            MemoryGateDecision::AcknowledgedUnsafe { reason } => assert_eq!(reason, evidence),
+            other => panic!("expected AcknowledgedUnsafe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn memory_gate_skipped_refuses_without_allow_unsafe() {
+        // Skipped is treated as identical-to-NotEnforced for safety:
+        // we cannot prove the cap holds, so default-deny applies.
+        let decision = evaluate_memory_gate(
+            MemoryProbeOutcome::Skipped {
+                reason: "cgroup v2 not writable".into(),
+            },
+            false,
+        );
+        match decision {
+            MemoryGateDecision::Refuse { reason } => {
+                assert!(
+                    reason.starts_with("probe skipped: "),
+                    "skip reason should be prefixed for log clarity, got {reason}"
+                );
+                assert!(reason.contains("cgroup v2 not writable"));
+            }
+            other => panic!("expected Refuse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn memory_gate_skipped_acknowledged_with_allow_unsafe() {
+        let decision = evaluate_memory_gate(
+            MemoryProbeOutcome::Skipped {
+                reason: "dd spawn failed: ENOENT".into(),
+            },
+            true,
+        );
+        match decision {
+            MemoryGateDecision::AcknowledgedUnsafe { reason } => {
+                assert!(reason.contains("dd spawn failed"));
+            }
+            other => panic!("expected AcknowledgedUnsafe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn enforce_memory_cap_at_startup_skips_audit_mode() {
+        // Audit mode never applies caps. The gate must not run the
+        // probe (it would be wasted work) and must always return Ok.
+        // This is a behavioral test of the public entry point — we
+        // can call it directly because the early return short-circuits
+        // before any probe attempt.
+        let rc = enforce_memory_cap_at_startup(crate::config::SandboxMode::Audit, false);
+        assert_eq!(rc, Ok(()));
+        let rc = enforce_memory_cap_at_startup(crate::config::SandboxMode::Audit, true);
+        assert_eq!(rc, Ok(()));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn enforce_memory_cap_at_startup_skips_disabled_mode() {
+        // Disabled mode is gated separately by ResolvedSandboxMode +
+        // OPEN_PINCERY_ALLOW_UNSAFE; the memory gate must defer to
+        // that and not run the probe.
+        let rc = enforce_memory_cap_at_startup(crate::config::SandboxMode::Disabled, true);
         assert_eq!(rc, Ok(()));
     }
 }

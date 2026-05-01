@@ -26,6 +26,15 @@ async fn main() {
     }
 
     let config = config::Config::from_env().expect("Failed to load configuration");
+
+    #[cfg(target_os = "linux")]
+    if let Err(code) = runtime::sandbox::preflight::enforce_memory_cap_at_startup(
+        config.sandbox.mode,
+        config.sandbox.allow_unsafe,
+    ) {
+        std::process::exit(code);
+    }
+
     let pool = db::create_pool(&config.database_url)
         .await
         .expect("Failed to create database pool");
