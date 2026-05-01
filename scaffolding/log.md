@@ -1,5 +1,21 @@
 # Open Pincery — Experiment Log
 
+## RECONCILE v9 — AC-77 post-BUILD/REVIEW drift sweep — 2026-05-01T05:30Z
+
+- **Trigger**: standard reconcile pass after AC-77 BUILD + REVIEW closed at HEAD `512f3f5` (branch `v6-01_implementation`); commit range `0b02558..512f3f5` covers G2a (`e08a15b`), G2b (`a89d4a5`), G2c (`a96499e`), G2d (`81571db`), G2e+G2f (`5982ab3`), review-fix (`c440489`), re-review fix (`512f3f5`).
+- **Verdict**: REPAIRED. No spec-violating drift; structural drift in two documents fixed.
+- **Axis 1 — Directory structure**: `scaffolding/design.md` updated. Added `src/observability/seccomp_audit.rs` (NEW in G2c, 220 LOC, 5 unit tests + 2 review-fix tests). Added `scripts/capture_seccomp_corpus.sh` (G2a). Added `tests/fixtures/seccomp/{observed_syscalls.txt,additions.txt,README.md}` (G2a). Added `tests/seccomp_allowlist_test.rs` (G2d, 3 tests, cfg=linux). Added `tests/sigsys_event_test.rs` (review-fix R1, cfg=linux per re-review). Removed stale `runtime/sandbox/profiles/seccomp.json` reference (the allowlist is Rust source, not a JSON profile).
+- **Axis 2 — Interfaces**: `scaffolding/design.md` annotated. The `seccomp.rs` line was rewritten to call out `allowed_syscalls()` + `clone_arg_rules()` + `ESCAPE_PRIMITIVES` + `ALLOWLIST_SIZE_FLOOR/CEILING` (40..=120) + `Enforce=KillProcess (SIGSYS exit 159)` / `Audit=Log` posture. The `bwrap.rs` and `mod.rs` lines now mention the POSIX `128 + signum` signal-to-exit translation that surfaces SIGSYS as exit_code 159 to callers. The `ExecResult::Ok { stdout, stderr, exit_code: i32, audit_pids }` shape was already in design.md from AC-88 and matches the code; `ShellExecution` is an internal struct in `src/runtime/tools.rs` (no design.md surface).
+- **Axis 3 — Acceptance criteria**: `scaffolding/scope.md` AC-77 still describes what was built. AC-77 traceability intact: scope.md AC-77 → readiness.md `T-AC77-1..10` → tests `seccomp_allowlist_test.rs` + `sigsys_event_test.rs` + 13 unit tests in `seccomp.rs` and `seccomp_audit.rs`. No scope reduction, no placeholders. Scope text uses "approximately 60-80 syscalls"; shipped allowlist is 58 entries (within the `[40, 120]` runtime guard) — the scope wording is intentionally a range, no edit needed.
+- **Axis 4 — External integrations**: `scaffolding/design.md` integration table row for seccomp rewritten. Replaced the misleading "`libseccomp` / `seccompiler` crate — Profile load fails → exec refuses — Unit: load profile + assert denied syscalls error" entry (no JSON profile is loaded; no `libseccomp` system dep) with the actual `seccompiler 0.5` shape including the size guards, escape-primitive negative control, clone arg-filter, and the unit + integration test inventory. No new crates added; `libc::SYS_*` constants used as documented.
+- **Axis 5 — Stack & deploy**: No `Cargo.toml` change in the AC-77 range; lockfile unchanged; no deploy config change. CLEAN.
+- **Axis 6 — Log accuracy**: `git log 0b02558..512f3f5` matches the entries already in log.md (G2a..G2f, review-fix, re-review fix all logged). CLEAN.
+- **Axis 7 — Readiness / traceability**: `scaffolding/readiness.md` AC-77 addendum (lines ~175+) still matches what shipped — `Truths`, `Key Links`, AC Coverage table, Build Order, Scope Reduction Risks, Complexity Exceptions all consistent with the shipped allowlist. The AC-76 / G1c historical addendum (line ~92) refers to "AC-77 seccomp denylist" — preserved as a point-in-time record of the state when G1c was admitted; not back-rewritten.
+- **Drift fixes — also outside scaffolding**: `docs/security/sandbox-architecture-audit.md` annotated with a top-of-file RECONCILE update, the §1.1 layer 3 row flipped from ⚠️ to ✅ RESOLVED, and §3.1 [CRITICAL] finding marked RESOLVED with a pointer to commit `5982ab3` and the new `allowed_syscalls()` / `clone_arg_rules()` / `ESCAPE_PRIMITIVES` shape. Historical analysis kept verbatim for the audit trail.
+- **Documents updated**: `scaffolding/design.md`, `scaffolding/log.md` (this entry), `docs/security/sandbox-architecture-audit.md`.
+- **Confidence**: REPAIRED.
+- **Next**: VERIFY (run all tests, exercise each AC-77 truth with real evidence, then DEPLOY decision).
+
 ## BUILD v9 — Slices G2d+G2e+G2f: AC-77 integration tests + corpus-subset guard + CHANGELOG — 2026-05-01T05:00Z
 
 - **Gate**: PASS (attempt 1).

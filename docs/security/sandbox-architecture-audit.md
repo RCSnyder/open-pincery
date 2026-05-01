@@ -6,6 +6,8 @@
 **Scope:** `src/runtime/sandbox/{bwrap,landlock,seccomp,cgroup}.rs`
 **Trigger:** PR #4 sandbox CI failing with `bwrap: Failed to make / slave: Operation not permitted` on Ubuntu 24.04 (kernel 6.8) and WSL2 (kernel 6.6) when `SandboxProfile { landlock: true, seccomp: true }`.
 
+> **Update 2026-05-01 (RECONCILE):** Finding **§3.1 (seccomp denylist)** is **RESOLVED by AC-77** — commit `5982ab3` on branch `v6-01_implementation` shipped a default-deny allowlist (≈58 entries sourced empirically + manually-justified additions), `clone` argument-filter blocking `CLONE_NEWUSER | CLONE_NEWNS`, `ESCAPE_PRIMITIVES` negative control, `ALLOWLIST_SIZE_FLOOR/CEILING` install-time guards, and `mismatch_action=KillProcess` (SIGSYS exit 159) in `Enforce` mode / `Log` in `Audit` mode. The `denied_syscalls()` symbol no longer exists; `allowed_syscalls()` + `clone_arg_rules()` are the new primitives in `src/runtime/sandbox/seccomp.rs`. SIGSYS terminations emit a `sandbox_syscall_denied` event via `src/observability/seccomp_audit.rs`.
+
 ---
 
 ## TL;DR
@@ -32,7 +34,7 @@ The fix is a small **`pincery-init` exec wrapper** that runs _inside_ the bwrap 
 | --- | ------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------ |
 | 1   | Mount/PID/IPC/UTS/cgroup namespace isolation      | `bwrap --unshare-{user,pid,ipc,uts,cgroup-try,net}`                  | ✅ implemented                             |
 | 2   | Resource quota                                    | cgroup v2 `pincery-<uuid>` (memory/pids/cpu) attached post-spawn     | ✅ implemented                             |
-| 3   | Syscall filtering                                 | seccomp-bpf **denylist** (11 syscalls) injected via `--seccomp <fd>` | ⚠️ implemented but denylist (anti-pattern) |
+| 3   | Syscall filtering                                 | seccomp-bpf **default-deny allowlist** (~58 syscalls + `clone` arg-filter) injected via `--seccomp <fd>` | ✅ RESOLVED by AC-77 (was denylist anti-pattern; see §3.1)
 | 4   | Path-based MAC                                    | Landlock V1 PathBeneath rules installed in parent `pre_exec`         | ❌ broken — see §2                         |
 | 5   | UID/GID/capability drop                           | not implemented                                                      | ❌ missing                                 |
 | 6   | L7 egress allowlist (slirp4netns + envoy/HAProxy) | not implemented                                                      | ❌ missing                                 |
@@ -125,7 +127,9 @@ A principal-engineer review surfaces five further issues. Each is rated by sever
 
 ### 3.1 [CRITICAL] Seccomp is a **denylist**, not an allowlist
 
-**Code:** `src/runtime/sandbox/seccomp.rs::denied_syscalls()` blocks 11 syscalls; `mismatch_action=Allow`.
+> **✅ RESOLVED in AC-77 (2026-05-01, commit `5982ab3`).** `denied_syscalls()` removed. New `allowed_syscalls()` returns ~58 entries sourced from `tests/fixtures/seccomp/observed_syscalls.txt` plus `additions.txt`; `clone_arg_rules()` masks `CLONE_NEWUSER | CLONE_NEWNS`; `clone3` namespace lockout is delegated to AC-86 (`bwrap --disable-userns` + `--cap-drop ALL` + UID drop) per readiness `T-AC77-4`. `mismatch_action=KillProcess` (SIGSYS exit 159) in `Enforce`, `Log` in `Audit`. `ESCAPE_PRIMITIVES` (17 syscalls incl. `bpf`, `mount`, `umount2`, `pivot_root`, `*_module`, `kexec_*`, `reboot`, `ptrace`, `io_uring_*`, `perf_event_open`, `name_to_handle_at`, `open_by_handle_at`, `fanotify_*`) is asserted absent at install time. `ALLOWLIST_SIZE_FLOOR=40 / CEILING=120` guards reject install when the allowlist drifts. SIGSYS termination emits a `sandbox_syscall_denied` event (AUDIT_SECCOMP correlation deferred to G2c.2). The historical analysis below is retained for record.
+
+**Code (historical):** `src/runtime/sandbox/seccomp.rs::denied_syscalls()` blocks 11 syscalls; `mismatch_action=Allow`.
 
 **Why it's a critical defect:**
 

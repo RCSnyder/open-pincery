@@ -2307,16 +2307,16 @@ src/
   runtime/
     observability/
       redaction.rs                # AC-74 tracing/event redaction layer
+      seccomp_audit.rs            # AC-77 sandbox_syscall_denied event payload + audit-record parser + DB emit helper
     sandbox/
-      mod.rs                      # SandboxedExecutor entry + compose()
-      bwrap.rs                    # Bubblewrap wrapper (namespaces, --disable-userns, uid/gid/cap drop, bind mounts)
+      mod.rs                      # SandboxedExecutor entry + compose() (POSIX 128+signum signal->exit_code translation in ProcessExecutor)
+      bwrap.rs                    # Bubblewrap wrapper (namespaces, --disable-userns, uid/gid/cap drop, bind mounts; POSIX 128+signum signal->exit_code translation so SIGSYS surfaces as exit_code 159)
       init_policy.rs              # parent -> pincery-init policy, including AC-87 landlock_scopes bitmap
-      seccomp.rs                  # seccompiler allowlist loader
+      seccomp.rs                  # AC-77 seccompiler default-deny allowlist (~58 entries) + clone arg-filter (CLONE_NEWUSER|CLONE_NEWNS lockout) + ESCAPE_PRIMITIVES negative control + ALLOWLIST_SIZE_FLOOR/CEILING bounds (40..=120); Enforce=KillProcess (SIGSYS exit 159), Audit=Log
       landlock.rs                 # landlock filesystem ruleset + raw ABI-6 IPC scope installer
       cgroup.rs                   # cgroup v2 write helpers (cgroups-rs)
       netns.rs                    # slirp4netns proxy + egress allowlist plumbing
       profiles/
-        seccomp.json              # vetted syscall allowlist
         bwrap_args.toml           # default bind-mount / env layout
     secret_proxy.rs               # AC-71 unix-socket server + client stub
     tools/
@@ -2346,8 +2346,16 @@ docs/runbooks/
 Dockerfile.devshell               # AC-75 pinned Ubuntu 24.04 dev shell image
 scripts/devshell.sh               # AC-75 Linux/macOS wrapper
 scripts/devshell.ps1              # AC-75 PowerShell wrapper
+scripts/capture_seccomp_corpus.sh # AC-77 strace-based syscall corpus capture (regenerates tests/fixtures/seccomp/observed_syscalls.txt)
 tests/
+  fixtures/
+    seccomp/
+      observed_syscalls.txt       # AC-77 empirical corpus (kernel 6.6 / glibc 2.39 / x86_64) sourcing the allowlist
+      additions.txt               # AC-77 manually-justified additions (exit_group, clone3, prctl, futex, sleep / signal / fs-introspection helpers)
+      README.md                   # AC-77 fixture provenance + regeneration recipe
   sandbox_escape_test.rs          # AC-53 12-payload matrix
+  seccomp_allowlist_test.rs       # AC-77 happy-path + unshare SIGSYS + audit-mode no-SIGSYS (3 cfg(linux) integration tests)
+  sigsys_event_test.rs            # AC-77 review-fix R1: SIGSYS termination emits sandbox_syscall_denied event
   landlock_scope_test.rs          # AC-87 abstract-socket + signal scope live proof
   sandbox_mode_test.rs            # AC-73 enforce/audit/disabled
   sandbox_perf_test.rs            # AC-73 p95 budget
@@ -2441,7 +2449,7 @@ network_blocked   { tool_call_id, destination_host, destination_port, protocol }
 | Integration                                          | Purpose                    | Failure mode                                                                                                                                                                                                                                                                                                                            | Test strategy                                                                                           |
 | ---------------------------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `bubblewrap` binary                                  | Namespace isolation        | Missing / ns disabled → exec refuses, `sandbox_unavailable`; nested userns not disabled → AC-86 smoke fails                                                                                                                                                                                                                             | Live on ubuntu-24.04 CI; AC-86 smoke asserts uid/gid/caps and `unshare -U` denial; ignored on non-Linux |
-| `libseccomp` / `seccompiler` crate                   | Syscall allowlist          | Profile load fails → exec refuses                                                                                                                                                                                                                                                                                                       | Unit: load profile + assert denied syscalls error                                                       |
+| `seccompiler` crate (0.5)                             | AC-77 default-deny syscall allowlist (~58 entries) + `clone` arg-filter + ESCAPE_PRIMITIVES negative control + ALLOWLIST_SIZE_FLOOR/CEILING bounds | `build_bpf_program` returns `Err` and exec refuses if size guards trip or any escape primitive is present in the allowlist; `Enforce` mode uses `mismatch_action=KillProcess` (SIGSYS exit 159), `Audit` uses `mismatch_action=Log` | Unit: 8 tests in `seccomp.rs` (program shape, escape-primitive absence, size bounds, clone arg-filter, corpus-subset guard); 5 tests in `seccomp_audit.rs` (audit-record parser, payload, event emit). Integration: `tests/seccomp_allowlist_test.rs` (3 happy-path + SIGSYS + audit-mode-no-SIGSYS) and `tests/sigsys_event_test.rs`; live on privileged sandbox-smoke CI |
 | Landlock ABI + `landlock` crate + raw ABI-6 syscalls | FS confinement + IPC floor | Startup preflight fails closed if ABI < 6 in strict mode; relaxed mode only downgrades to ABI >= 1 with `OPEN_PINCERY_ALLOW_UNSAFE=true`; no bwrap-only fallback. `landlock = 0.4` handles filesystem rules; `pincery-init` uses raw `landlock_create_ruleset` / `landlock_restrict_self` only for `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL`.                                                                                 | Live in privileged sandbox-smoke; AC-84 positive process tests run with `OPEN_PINCERY_RUN_AC84_POSITIVE=1`; AC-87 `tests/landlock_scope_test.rs` proves abstract-socket denial and signal EPERM on ABI >= 6 |
 | `slirp4netns`                                        | Egress proxy + allowlist   | Missing → exec refuses                                                                                                                                                                                                                                                                                                                  | Live: allowed host succeeds, denied host blocks                                                         |
 | `cgroups-rs`                                         | Resource limits            | cgroup v2 not mounted → exec refuses                                                                                                                                                                                                                                                                                                    | Live: small OOM / PID thresholds                                                                        |
@@ -2451,7 +2459,7 @@ network_blocked   { tool_call_id, destination_host, destination_port, protocol }
 ### Observability
 
 - **Logs**: every sandbox layer failure → structured `error!` with `layer`, `kind`, `tool_call_id`. No plaintext credentials are ever logged (secret proxy scrubs at IPC boundary).
-- **New event types**: `sandbox_blocked`, `sandbox_would_block`, `sandbox_mode_changed`, `sandbox_mode_default`, `sandbox_self_test_failed`, `sandbox_scope_unavailable`, `network_blocked`, `secret_injected`, `credential_plaintext_rejected`, `credential_requested`, `credential_deposited`, `credential_request_rejected`, `deposit_attempt`, `rate_limit_exceeded`.
+- **New event types**: `sandbox_blocked`, `sandbox_would_block`, `sandbox_mode_changed`, `sandbox_mode_default`, `sandbox_self_test_failed`, `sandbox_scope_unavailable`, `sandbox_syscall_denied` (AC-77; `{tool_name, agent_id, wake_id, correlation_pids, syscall_nr, syscall_name, audit_pid, audit_epoch_millis, record_correlated}` — emitted on SIGSYS-terminated tool invocation, `syscall_nr=-1` until G2c.2 wires AUDIT_SECCOMP correlation), `network_blocked`, `secret_injected`, `credential_plaintext_rejected`, `credential_requested`, `credential_deposited`, `credential_request_rejected`, `deposit_attempt`, `rate_limit_exceeded`.
 - **Counters (stdout / structured)**: `sandbox_exec_total{outcome}`, `egress_attempts_total{decision}`, `secret_resolutions_total{mode}`, `tenancy_queries_total{workspace_id}`.
 - **CLI verbs added**: `pcy session {list,revoke,refresh}`, `pcy user {add,list,set-role,delete}`, `pcy credential request {list,approve,reject}`, `pcy agent network {allow,list,revoke}`, `pcy events archive`, `pcy cost`.
 
