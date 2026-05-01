@@ -1,13 +1,15 @@
 # Readiness: Open Pincery — current slice pointer
 
-> Current admission gate: **Phase G Slice G2 / AC-77 (Seccomp
-> Default-Deny Allowlist)**. The AC-77 addendum is appended below the
-> AC-76 / G1c addendum that preceded it. AC-76 closed at 12/12 on
-> 2026-04-30 (CI run `25197562247`) — all four payload categories
-> (FS, privesc, resource, network) runtime-verified. G1b (privesc)
-> closed CI-green at `8935fd7` on 2026-04-29; its addendum is retained
-> verbatim further down. G1a (FS), G1c (resource), G1d (network), and
-> G0f / AC-88 addenda are all retained as historical record.
+> Current admission gate: **Phase G Slice G3 / AC-78 (Event-Log Hash
+> Chain — make `Inv_AuditChainBeforeExecution` real)**. The AC-78
+> addendum is appended below the AC-77 / G2 addendum that preceded it.
+> AC-77 admission landed at `1743aa7` on `v6-01_implementation`; AC-76
+> closed at 12/12 on 2026-04-30 (CI run `25197562247`) — all four
+> payload categories (FS, privesc, resource, network) runtime-verified.
+> G1b (privesc) closed CI-green at `8935fd7` on 2026-04-29; its
+> addendum is retained verbatim further down. G1a (FS), G1c (resource),
+> G1d (network), and G0f / AC-88 addenda are all retained as historical
+> record.
 
 ---
 
@@ -568,6 +570,456 @@ trace=all -o trace.txt` against each AC-76 happy-path command
   record-type lines (`landlock_audit.rs` keeps Landlock,
   `seccomp_audit.rs` adds Seccomp, both share a `netlink.rs`
   helper) is the planned refactor.
+
+---
+
+# Readiness: Open Pincery — v9 Phase G Slice G3 (AC-78 Event-Log Hash Chain)
+
+> This addendum covers Slice G3 / AC-78 only. It is the admission gate
+> between the v9 G3 DESIGN addendum (`scaffolding/design.md` line 2693,
+> committed `1743aa7` on `v6-01_implementation`) and the BUILD slices
+> G3a..G3e listed under "Build Order". AC-78 makes
+> `Inv_AuditChainBeforeExecution` real: today the `VerifyAuditChain`
+> step in TLA+ is a cosmetic stand-in (v3.2 F4 note) and post-insert
+> mutation of `events.content` is silent. AC-78 ships a SHA-256
+> per-agent hash chain computed by a Postgres trigger under a row
+> lock on the preceding event, a `verify_audit_chain` walker invoked
+> from `pcy audit verify`, the HTTP admin endpoint, and a startup
+> gate. None of AC-76, AC-77, AC-83..AC-88 is changed by this slice.
+
+## Verdict
+
+READY for Slice G3 / AC-78. The DESIGN addendum resolves all open
+questions (per-agent chain, canonical-JSON column ordering,
+microsecond `created_at` precision, pgcrypto extension, backfill via
+recursive CTE in a single transaction, startup-gate exit code 5 with
+the same `relaxed`/`ALLOW_UNSAFE` escape pattern as AC-84). Every
+sub-claim below maps to a planned test and a planned runtime proof,
+and the bounded clarifications listed do not change the pass/fail
+meaning of `tests/audit_chain_test.rs`.
+
+## Truths
+
+- **T-AC78-1 (chain root is per-agent, not per-workspace)** Every
+  row in `events` participates in exactly one chain, keyed by
+  `agent_id`. The chain genesis (no prior event for that agent) has
+  `prev_hash = ''` (empty string, not NULL); the first
+  `entry_hash = hex(sha256('' || event_type || canonical_payload || created_at_micros))`.
+  No JOIN to `agents` or `workspaces` is required to compute or
+  verify the chain. Workspace-level walks are a UNION over the
+  workspace's agents.
+- **T-AC78-2 (hash input is canonical and deterministic)** The
+  pre-image is `prev_hash || event_type || canonical_payload || created_at_micros`,
+  where `canonical_payload` is `to_jsonb(...)` over the immutable
+  event columns in fixed order
+  `agent_id, event_type, source, wake_id, tool_name, tool_input, tool_output, content, termination_reason`
+  and `created_at_micros` is `to_char(NEW.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`
+  (microsecond precision matching Postgres `timestamptz`). NULL
+  columns serialize as JSON `null`, not the empty string. Both
+  the trigger and the Rust verifier produce byte-identical
+  pre-images for the same row, or the verifier fails closed.
+- **T-AC78-3 (trigger holds a row lock on the preceding event)** The
+  `BEFORE INSERT FOR EACH ROW` trigger
+  `events_chain_compute_hash()` selects the current latest event
+  for `NEW.agent_id` with `ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE`.
+  Two concurrent inserts for the same agent serialize on that
+  row lock; the second waits for the first to commit before it
+  computes its own `prev_hash`. Inserts for different agents do
+  not contend. Genesis (no prior row) takes no lock; the first
+  concurrent genesis insert wins arbitrarily and the second sees
+  it via the same `FOR UPDATE` re-query and chains on top.
+- **T-AC78-4 (post-insert UPDATE breaks the chain detectably)** Any
+  `UPDATE events SET content = ...` (or any other column listed
+  in T-AC78-2's payload set) that lands after a row's
+  `entry_hash` is computed produces a row whose stored
+  `entry_hash` no longer matches `sha256(stored_prev_hash || stored_event_type || canonical_payload(stored_columns) || stored_created_at_micros)`.
+  The next `verify_audit_chain` pass detects the mismatch and
+  returns `ChainStatus::Broken { first_divergent_event_id, expected_hash, actual_hash }`
+  with the offending event id. Subsequent rows in the chain are
+  not re-verified once a break is found.
+- **T-AC78-5 (verifier emits a per-agent event of known type)**
+  Every `verify_audit_chain` invocation emits exactly one event
+  per agent: either `audit_chain_verified` with payload
+  `{ agent_id, events_in_chain, last_entry_hash }`, or
+  `audit_chain_broken` with payload
+  `{ agent_id, first_divergent_event_id, expected_hash, actual_hash, events_walked }`.
+  Both types are registered in the event-type catalog and lint;
+  both have `source = 'runtime'`. The verifier itself is the
+  emitter, not the trigger.
+- **T-AC78-6 (`pcy audit verify` is non-zero on any break)** The
+  CLI subcommand `pcy audit verify [--agent <id>] [--workspace <id>]`
+  defaults to the current context's workspace, walks every agent
+  in scope, prints `OK (n events)` or `BROKEN at event <id>` per
+  agent, and exits with a non-zero status if any agent's chain is
+  broken. Exit code 0 only when every walked chain verifies.
+- **T-AC78-7 (HTTP admin endpoint exists and is workspace-scoped)**
+  `POST /api/audit/chain/verify` is gated to workspace-admin
+  membership, runs the same verifier path used by the CLI, and
+  returns
+  `{ "agents": [{ "agent_id": "...", "status": "verified" | "broken", ... }] }`.
+  Cross-workspace access is forbidden by the AC-65 tenancy
+  middleware; an admin in workspace A cannot verify chains in
+  workspace B.
+- **T-AC78-8 (startup gate aborts on broken chain)** At server
+  startup — after migrations and DB bootstrap, before the HTTP
+  listener binds — the runtime invokes a single verify pass over
+  every agent in every workspace. If any chain is `Broken`, the
+  process logs a structured `audit_chain_broken` line, emits the
+  corresponding event, and exits with code 5 (distinct from
+  AC-84's exit code 4). The override is
+  `OPEN_PINCERY_AUDIT_CHAIN_FLOOR=relaxed` AND
+  `OPEN_PINCERY_ALLOW_UNSAFE=true`; either alone is rejected and
+  fails closed. Relaxed mode demotes the abort to a single
+  `audit_chain_floor_relaxed` warning event and proceeds.
+- **T-AC78-9 (backfill is single-transaction, deterministic)** The
+  migration `20260501000001_add_event_hash_chain.sql` runs in one
+  transaction: ADD COLUMN nullable, CREATE EXTENSION pgcrypto,
+  recursive CTE backfill ordered by `(agent_id, created_at, id)`,
+  ALTER COLUMN SET NOT NULL, CREATE FUNCTION + CREATE TRIGGER. A
+  crash mid-migration rolls back to v8-shape — no partial NULLs,
+  no half-installed trigger. Empty-database installs succeed
+  with zero rows backfilled.
+- **T-AC78-10 (existing event writers use the trigger, not Rust
+  computation)** `append_event` and `append_event_tx` in
+  `src/models/event.rs` keep their current
+  `INSERT INTO events (...) RETURNING *` shape. They do not
+  compute `prev_hash` or `entry_hash` in Rust. The trigger fills
+  both columns server-side; the `RETURNING *` then surfaces them
+  to the application. No call site needs to change. Background
+  jobs, API handlers, sandbox event emitters, and tests all
+  inherit the chain transparently.
+- **T-AC78-11 (verifier never mutates the events table)** The
+  Rust verifier in `src/background/audit_chain.rs` issues only
+  `SELECT` against `events`. It writes one row to `events` per
+  walked agent — but only via the standard `append_event`
+  emitter, which goes through the trigger like any other event.
+  No `UPDATE events`, no `DELETE FROM events`, ever, in any AC-78
+  code path. Rejected explicitly: a "self-heal" mode that would
+  rewrite `entry_hash` after a detected break.
+
+## Key Links (AC -> Design -> Test -> Proof)
+
+- **L-AC78-1 (T-AC78-1, T-AC78-2, T-AC78-3, T-AC78-9)** AC-78 ->
+  `migrations/20260501000001_add_event_hash_chain.sql` (new file:
+  ALTER TABLE adds `prev_hash TEXT`, `entry_hash TEXT`; CREATE
+  EXTENSION pgcrypto; recursive-CTE backfill; SET NOT NULL on
+  both columns; CREATE FUNCTION `events_chain_compute_hash()`;
+  CREATE TRIGGER `events_chain_compute_hash_trigger BEFORE INSERT
+  ON events FOR EACH ROW EXECUTE FUNCTION events_chain_compute_hash()`)
+  -> **planned test**
+  `tests/audit_chain_test.rs::genesis_event_uses_empty_prev_hash`
+  + `..::trigger_assigns_prev_hash_from_previous_event` -> **runtime
+  proof** the migration runs in CI as part of the existing sqlx
+  migrate step; the test inserts via `append_event` and reads
+  back the new columns via `SELECT prev_hash, entry_hash FROM events`.
+- **L-AC78-2 (T-AC78-2, T-AC78-4)** AC-78 ->
+  `src/background/audit_chain.rs` `verify_audit_chain(pool, agent_id) -> ChainStatus`
+  walks the chain, recomputes the canonical pre-image in Rust
+  using the same column order and microsecond timestamp format
+  as the trigger, and `subtle::ConstantTimeEq`-compares the
+  computed hash against the stored `entry_hash` -> **planned
+  test**
+  `tests/audit_chain_test.rs::happy_path_chain_verifies` (10k
+  events, returns `Verified { events: 10000, last_hash }`) +
+  `..::manual_update_breaks_chain` (`UPDATE events SET content = 'evil' WHERE id = $target`,
+  asserts `Broken { first_divergent_event_id == $target }`) ->
+  **runtime proof** integration test runs against a real
+  Postgres in CI; tampered row's id matches the broken-event id
+  in the returned status and the emitted event payload.
+- **L-AC78-3 (T-AC78-3)** AC-78 ->
+  `events_chain_compute_hash()` row lock + `tests/audit_chain_test.rs::concurrent_inserts_preserve_chain`
+  (8 tokio tasks, each inserts 200 events for the same agent;
+  after `join_all`, the verifier walks 1600 events and returns
+  `Verified`) -> **runtime proof** the test re-runs in CI on the
+  privileged DB-test job; deadlock or a duplicated `prev_hash`
+  pointing two children at the same parent surfaces as a
+  `Broken` verdict and fails the test.
+- **L-AC78-4 (T-AC78-5, T-AC78-10)** AC-78 ->
+  `src/models/event.rs` registers `EventType::AuditChainVerified`
+  and `EventType::AuditChainBroken` in the catalog (the same
+  catalog AC-77 extends with `SandboxSyscallDenied`); `append_event`
+  / `append_event_tx` are unchanged otherwise -> **planned test**
+  `tests/event_log_test.rs` (or `tests/audit_chain_test.rs`)
+  asserts both event types round-trip through the DB, satisfy
+  the existing event-type lint, and that the verifier emits one
+  per walked agent with the correct payload shape -> **runtime
+  proof** CI's existing event-type lint job + the audit-chain
+  test asserts the row lands in `events` with the expected
+  `event_type`.
+- **L-AC78-5 (T-AC78-6)** AC-78 -> `src/cli/audit.rs` adds
+  subcommand `pcy audit verify [--agent <id>] [--workspace <id>]`
+  wired through the existing `clap` command tree -> **planned
+  test**
+  `tests/cli_audit_test.rs::pcy_audit_verify_exits_nonzero_on_break`
+  shells out, asserts exit code != 0 and stderr contains
+  `BROKEN at event <id>`; companion test
+  `..::pcy_audit_verify_exits_zero_on_clean_chain` -> **runtime
+  proof** CLI e2e test runs in CI; existing
+  `tests/cli_e2e_test.rs` harness pattern is reused.
+- **L-AC78-6 (T-AC78-7)** AC-78 -> `src/api/audit.rs` adds
+  `POST /api/audit/chain/verify` registered in the OpenAPI doc
+  alongside existing audit endpoints; gated by the workspace-admin
+  middleware (existing pattern from `src/api/credentials.rs` or
+  similar admin routes) -> **planned test**
+  `tests/api_test.rs::audit_chain_verify_returns_per_agent_status`
+  + `..::audit_chain_verify_rejects_non_admin` +
+  `..::audit_chain_verify_is_workspace_scoped` -> **runtime
+  proof** existing API integration harness runs against the test
+  Postgres.
+- **L-AC78-7 (T-AC78-8)** AC-78 -> `src/main.rs` startup
+  sequence inserts a call to a new
+  `enforce_audit_chain_floor_at_startup(&pool)` after migrations
+  and DB bootstrap, before the listener bind. The function
+  iterates workspaces, walks each agent's chain, and exits with
+  code 5 on any unrelaxed `Broken` verdict; relaxed-mode emits
+  `audit_chain_floor_relaxed` and proceeds -> **planned test**
+  `tests/audit_chain_test.rs::startup_gate_aborts_on_tampered_chain`
+  spawns the server binary against a DB with a tampered row,
+  asserts exit code 5; companion
+  `..::startup_gate_proceeds_under_relaxed_floor_with_allow_unsafe`
+  asserts exit code 0 plus the warning event row -> **runtime
+  proof** integration test reuses the startup-process pattern
+  from `tests/sandbox_preflight_test.rs` AC-84 fail-closed
+  process tests.
+- **L-AC78-8 (T-AC78-11)** AC-78 -> code review +
+  `tests/audit_chain_test.rs::verifier_does_not_mutate_events`
+  inserts a known chain, runs verify, then re-reads every row
+  and asserts every column except the two newly-emitted
+  `audit_chain_*` events is byte-identical to the pre-verify
+  snapshot -> **runtime proof** test row-count and column-hash
+  comparison.
+
+## Acceptance Criteria Coverage (AC-78 slice)
+
+| AC    | Truth(s)                            | Planned test                                                                                                                                                                                                                          | Planned runtime proof                                                                                                |
+| ----- | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| AC-78 | T-AC78-1, T-AC78-2, T-AC78-9        | `tests/audit_chain_test.rs::genesis_event_uses_empty_prev_hash` + `..::trigger_assigns_prev_hash_from_previous_event` + migration backfill smoke (`tests/migrations_test.rs` or similar) on a seeded v8-shape dump                      | CI sqlx-migrate step runs migration; test asserts column shape and trigger output on real Postgres                   |
+| AC-78 | T-AC78-2                            | unit test `audit_chain::canonical_payload_matches_postgres_jsonb` (insert via trigger, recompute pre-image in Rust, byte-compare against `to_jsonb` output retrieved via a debug query)                                                | DB-backed test in CI                                                                                                  |
+| AC-78 | T-AC78-2, T-AC78-4                  | `tests/audit_chain_test.rs::happy_path_chain_verifies` (10k events) + `..::manual_update_breaks_chain` (`UPDATE` on `content`, expect `Broken { first_divergent_event_id }`)                                                              | CI DB-test job; tampered-row id == reported broken-event id                                                          |
+| AC-78 | T-AC78-3                            | `tests/audit_chain_test.rs::concurrent_inserts_preserve_chain` (8 tasks × 200 events for one agent; verify clean afterwards)                                                                                                            | CI DB-test job; if the row lock fails the test surfaces a `Broken` verdict                                           |
+| AC-78 | T-AC78-5, T-AC78-10                 | `tests/audit_chain_test.rs::verifier_emits_audit_chain_verified_event` + `..::verifier_emits_audit_chain_broken_event_with_correct_id` + event-type lint pass                                                                            | CI DB-test job + existing event-type lint job                                                                        |
+| AC-78 | T-AC78-6                            | `tests/cli_audit_test.rs::pcy_audit_verify_exits_nonzero_on_break` + `..::pcy_audit_verify_exits_zero_on_clean_chain`                                                                                                                    | CI CLI-e2e job                                                                                                        |
+| AC-78 | T-AC78-7                            | `tests/api_test.rs::audit_chain_verify_returns_per_agent_status` + `..::audit_chain_verify_rejects_non_admin` + `..::audit_chain_verify_is_workspace_scoped`                                                                              | CI API-integration job                                                                                                |
+| AC-78 | T-AC78-8                            | `tests/audit_chain_test.rs::startup_gate_aborts_on_tampered_chain` (exit 5) + `..::startup_gate_proceeds_under_relaxed_floor_with_allow_unsafe`                                                                                          | CI startup-process test (same harness as AC-84)                                                                      |
+| AC-78 | T-AC78-11                           | `tests/audit_chain_test.rs::verifier_does_not_mutate_events`                                                                                                                                                                            | CI DB-test job                                                                                                        |
+
+## Scope Reduction Risks
+
+- **R-AC78-1 (highest) — "Compute the hash in Rust only, skip the
+  Postgres trigger."** The cheapest BUILD path is to compute
+  `prev_hash` / `entry_hash` inside `append_event` / `append_event_tx`
+  and pass them as bind parameters to the `INSERT`. This appears
+  to satisfy the AC, but it has two fatal failure modes: (a) any
+  future event writer that bypasses these helpers (raw
+  `sqlx::query` in a background job, a future migration, a
+  manual `psql` insert) silently breaks the chain without
+  detection until the next verify; (b) two concurrent
+  `append_event` calls for the same agent both read the same
+  "latest" event and produce two children with the same
+  `prev_hash`, branching the chain. **Mitigation**: the design
+  mandates a Postgres trigger holding a row lock on the
+  preceding event. The trigger is the single authoritative
+  writer of `prev_hash` / `entry_hash`; the Rust path does not
+  bind these columns. Coverage rows for T-AC78-3 and T-AC78-10
+  are required-green. The trigger's installation is asserted by
+  a unit test that runs `SELECT pg_get_triggerdef(...)` and
+  diffs against a golden snapshot; if BUILD ships the
+  Rust-only path, that test fails.
+- **R-AC78-2 — Skip backfill on the assumption that v9 production
+  databases are empty.** Any installation that has run v8 has
+  `events` rows. Skipping the recursive-CTE backfill ships a
+  schema where existing rows have NULL `prev_hash` /
+  `entry_hash`, the `SET NOT NULL` step fails, and the migration
+  rolls back — but the cheaper escape is to leave the columns
+  nullable and have the verifier "skip" rows with NULL hashes.
+  That would mean tampering with any historical row remains
+  silent forever. **Mitigation**: the migration's recursive-CTE
+  backfill is required (T-AC78-9). The `SET NOT NULL` step is
+  the gate that ensures BUILD cannot ship the nullable
+  fallback. A migration-against-v8-snapshot test
+  (`tests/upgrade_from_v8_test.rs` already exists per the AC-65
+  pattern; an AC-78 case is added) re-asserts this. If a real
+  installation has too many events for one transaction, that is
+  a P1 to be raised under "Clarifications Needed", not a silent
+  scope reduction.
+- **R-AC78-3 — Per-workspace shortcut instead of per-agent.** The
+  cheapest cross-agent verifier is one chain per workspace, not
+  one per agent. That would avoid the workspace-walks-via-UNION
+  in `verify_audit_chain` but would force every insert across
+  every agent in a workspace to serialize on a single row lock,
+  and would require a JOIN in the trigger to find the latest
+  event in the workspace (since `events.workspace_id` does not
+  exist directly — it is reached through `agents.workspace_id`).
+  Performance under multi-agent workloads collapses.
+  **Mitigation**: the design pins per-agent (T-AC78-1). The
+  trigger SELECT is `WHERE agent_id = NEW.agent_id`, no JOIN.
+  Coverage row for T-AC78-3 (concurrent inserts) targets a
+  single agent; an additional informal expectation is that
+  inserts across distinct agents do not contend, which the
+  concurrent test partly probes by parameterizing the agent set
+  in a follow-up assertion. If BUILD silently switches to
+  per-workspace, the 8-task concurrent test will surface
+  contention and the workspace-UNION verifier path will not be
+  needed.
+- **R-AC78-4 — Relaxed-floor escape hatch becomes the default.**
+  The `OPEN_PINCERY_AUDIT_CHAIN_FLOOR=relaxed +
+  OPEN_PINCERY_ALLOW_UNSAFE=true` pair (T-AC78-8) exists for
+  operators recovering a tampered DB. The cheap path is to ship
+  with relaxed semantics on by default in dev/test fixtures so
+  developers don't trip over the startup gate. That would mean
+  the gate is never exercised in CI, and a tampering bug ships
+  unnoticed. **Mitigation**: the default in `src/config.rs` and
+  in `tests/fixtures/` is the strict floor; the relaxed pair is
+  set explicitly only by
+  `..::startup_gate_proceeds_under_relaxed_floor_with_allow_unsafe`
+  and by the runbook documented in `docs/runbooks/audit_chain_recovery.md`
+  (added in slice G3e). The default-strict assertion is
+  re-asserted by `tests/env_example_test.rs` extension and by
+  the existing `tests/compose_env_test.rs` pattern.
+- **R-AC78-5 — Drop the `audit_chain_broken` payload detail.** A
+  `Broken` event with only `agent_id` (no
+  `first_divergent_event_id`, `expected_hash`, `actual_hash`,
+  `events_walked`) tells operators "something is wrong" but
+  forces a manual walk to find it. **Mitigation**: T-AC78-5 is
+  explicit about the payload shape; the
+  `..::verifier_emits_audit_chain_broken_event_with_correct_id`
+  test asserts every named field is present and non-empty.
+- **R-AC78-6 — Verifier "self-heals" by rewriting `entry_hash`.**
+  Once a break is detected, the cheapest user-experience fix is
+  to rewrite the chain forward from the break and emit
+  `audit_chain_repaired`. This destroys the entire purpose of
+  the chain. **Mitigation**: T-AC78-11 is non-negotiable;
+  `tests/audit_chain_test.rs::verifier_does_not_mutate_events`
+  asserts no `UPDATE`/`DELETE` against `events` lands during
+  any verify. REVIEW must reject any code path with a write
+  against `events` outside of `append_event` / `append_event_tx`.
+
+## Clarifications Needed
+
+- **C-AC78-1 — Hash hex case.** Postgres `encode(..., 'hex')`
+  emits lowercase hex; Rust's common `hex` crate emits lowercase
+  by default but `format!("{:x}", ...)` and the `subtle` crate
+  do not normalize case. **Bounded assumption for ANALYZE**:
+  both the trigger and the Rust verifier use lowercase hex; the
+  byte-compare in the verifier compares the raw 32 bytes
+  (decoded once via `hex::decode`) rather than string-comparing
+  the encoded form, eliminating case ambiguity. Does not change
+  pass/fail meaning.
+- **C-AC78-2 — Backfill transaction size on large DBs.** The
+  recursive-CTE backfill in a single transaction is fine for v9
+  test fixtures and any reasonable v8 install (events tables
+  with O(10^5)–O(10^6) rows). On hypothetical multi-million-row
+  installs the migration could time out or balloon WAL.
+  **Bounded assumption for ANALYZE**: v9 ships with the single-
+  transaction backfill; if a real operator hits a timeout,
+  remediation is an out-of-band batched backfill script
+  documented in `docs/runbooks/audit_chain_backfill.md`. v9 is
+  a single-tenant self-hosted product; this is acceptable.
+- **C-AC78-3 — `pcy audit verify` default scope.** scope.md AC-78
+  says "invoked from `pcy audit verify`"; design.md says "defaults
+  to current context's workspace". **Bounded assumption for
+  ANALYZE**: the default is the current CLI context's workspace
+  (`OPEN_PINCERY_WORKSPACE` env or `~/.config/open-pincery/context`),
+  walking every agent in that workspace; `--agent <id>` narrows
+  to a single agent; `--workspace <id>` overrides. This matches
+  every other `pcy *` subcommand's scoping convention. Does not
+  change AC pass/fail.
+- **C-AC78-4 — Startup-gate verify is N+1 against agent count.**
+  At very large agent counts the startup verify could push
+  startup latency past the AC-72 readiness budget. **Bounded
+  assumption for ANALYZE**: v9's expected agent count per
+  workspace is O(10^1)–O(10^2); the startup verify cost is
+  bounded by event count, which is the same set of rows the
+  background `verify_audit_chain` job already walks daily.
+  Acceptable for v9; if real-world growth makes this hot, a
+  Bloom-filter / last-known-good-hash short-circuit is a v10
+  optimization.
+- **C-AC78-5 — Audit-chain verifier cadence after startup.**
+  Design says "background `verify_audit_chain` job"; scope says
+  "invoked from `pcy audit verify` and at startup". **Bounded
+  assumption for ANALYZE**: v9 ships the startup pass and the
+  CLI/HTTP on-demand path; an automatic background tick (e.g.
+  hourly) is **deferred** to a v9.x slice (or v10) and noted as
+  such in the module header. The infrastructure (the verifier
+  function) is reusable; only the scheduler hook is deferred.
+  Does not change AC-78 pass/fail; the scope.md text accepts
+  "invoked from `pcy audit verify` and at startup" as
+  sufficient.
+
+None of the clarifications above changes the pass/fail meaning of
+any AC-78 truth. AC-78 is admitted to BUILD.
+
+## Build Order
+
+- **G3a — Migration + trigger.** Add
+  `migrations/20260501000001_add_event_hash_chain.sql` with the
+  full sequence in T-AC78-9: ADD COLUMN nullable → CREATE
+  EXTENSION pgcrypto → recursive-CTE backfill ordered by
+  `(agent_id, created_at, id)` → SET NOT NULL → CREATE FUNCTION
+  `events_chain_compute_hash()` → CREATE TRIGGER. No `src/`
+  changes. Verified by `cargo sqlx migrate run` against a fresh
+  DB and against a v8-shape snapshot; unit test
+  `tests/audit_chain_test.rs::genesis_event_uses_empty_prev_hash`
+  + `..::trigger_assigns_prev_hash_from_previous_event` pass at
+  the end of this slice.
+- **G3b — Verifier + new event types.** Add
+  `src/background/audit_chain.rs` with `ChainStatus`,
+  `verify_audit_chain(pool, agent_id) -> ChainStatus`, and a
+  `verify_workspace(pool, workspace_id) -> Vec<AgentChainSummary>`
+  helper. Register `EventType::AuditChainVerified` and
+  `EventType::AuditChainBroken` in `src/models/event.rs` (or the
+  events catalog module). The verifier emits one event per
+  walked agent via `append_event`. No CLI / API / startup
+  wiring yet. Tests `..::happy_path_chain_verifies`,
+  `..::manual_update_breaks_chain`,
+  `..::concurrent_inserts_preserve_chain`,
+  `..::verifier_does_not_mutate_events`,
+  `..::verifier_emits_audit_chain_verified_event`,
+  `..::verifier_emits_audit_chain_broken_event_with_correct_id`
+  pass at the end of this slice.
+- **G3c — CLI + HTTP surface.** Add
+  `src/cli/audit.rs::verify` subcommand wired into the existing
+  `pcy audit` clap tree (or create the `audit` parent if
+  absent). Add `src/api/audit.rs::POST /api/audit/chain/verify`
+  registered with the OpenAPI doc, gated by the workspace-admin
+  middleware. Tests
+  `tests/cli_audit_test.rs::pcy_audit_verify_exits_zero_on_clean_chain`
+  / `..::pcy_audit_verify_exits_nonzero_on_break` and
+  `tests/api_test.rs::audit_chain_verify_*` pass at the end of
+  this slice.
+- **G3d — Startup gate.** Add
+  `enforce_audit_chain_floor_at_startup(&pool)` invoked from
+  `src/main.rs` after migrations and DB bootstrap, before the
+  listener bind. Wire `OPEN_PINCERY_AUDIT_CHAIN_FLOOR` and the
+  shared `OPEN_PINCERY_ALLOW_UNSAFE` env to the same enum
+  pattern AC-84 uses. Tests
+  `..::startup_gate_aborts_on_tampered_chain` (exit 5) and
+  `..::startup_gate_proceeds_under_relaxed_floor_with_allow_unsafe`
+  pass at the end of this slice.
+- **G3e — Documentation + lint pass.** Update the events-table
+  row in `scaffolding/design.md` Directory Structure / Interfaces
+  if RECONCILE finds drift; add `docs/runbooks/audit_chain_recovery.md`
+  describing tamper-detection response and the relaxed-floor
+  override; update `CHANGELOG.md` under v9 Phase G with a
+  one-line entry. Add the `events_chain_compute_hash` trigger
+  source-of-truth comment cross-referencing AC-78 and the
+  canonical-JSON column order.
+
+## Complexity Exceptions
+
+None. The DESIGN addendum's "Complexity Exceptions" entry already
+states "None": the migration is single-file < 100 lines; the
+verifier is < 200 lines; the CLI subcommand is < 80 lines; the
+startup gate reuses the AC-84 pattern. No file is expected to
+breach the 300-LOC ceiling. If BUILD discovers the verifier
+exceeds 250 LOC, splitting along
+`audit_chain.rs` (verify_workspace, verify_audit_chain,
+ChainStatus) and `audit_chain_canonical.rs` (pre-image
+computation + microsecond timestamp formatter) is the planned
+refactor and is recorded here pre-emptively as a contingent — not
+admitted — exception.
+
+---
 
 # Readiness: Open Pincery — v9 Phase G0f (AC-88 Kernel Audit Integration)
 
