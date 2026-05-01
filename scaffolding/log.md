@@ -1,5 +1,14 @@
 # Open Pincery — Experiment Log
 
+## VERIFY v9 — Slice G1c.x.2: memory.max startup gate shipped CI-green — 2026-05-01T00:50Z
+
+- **Gate**: PASS (attempt 1).
+- **Commit**: `5163604` on `v6-01_implementation`. CI run [25196202744](https://github.com/RCSnyder/open-pincery/actions/runs/25196202744) — all 5 jobs green (`cargo test`, `clippy`, `rustfmt`, `cargo deny`, `sandbox real-bwrap smoke`).
+- **Evidence**: 7 new Linux-gated unit tests for `evaluate_memory_gate` and `enforce_memory_cap_at_startup` exercised in the `cargo test` job. `clippy --all-targets -- -D warnings` clean. The new `enforce_memory_cap_at_startup` is invoked from `pincery-server` startup in the sandbox real-bwrap smoke; on the privileged-Docker runner where `probe_memory_max_enforcement` returns `NotEnforced`, the gate would have refused boot — but the smoke harness runs with the default `SandboxMode::Audit` (or `Disabled` with `ALLOW_UNSAFE`), so the gate short-circuits at the mode check. Confirmed by smoke job success.
+- **Production posture change**: A misconfigured operator who sets `OPEN_PINCERY_SANDBOX_MODE=enforce` on a host where memory delegation is silently broken now gets a structured `sandbox_memory_cap_unenforced` error event + exit 4 at startup, instead of booting with silently-no-memory-caps. The escape hatch is `OPEN_PINCERY_ALLOW_UNSAFE=true`, which surfaces a `sandbox_memory_cap_unenforced_acknowledged` warning — matching the existing relaxed-floor pattern.
+- **AC-76 status**: 9 payloads enforced + 1 honestly probe-gated + 0 placeholder skips. G1c BLOCKED state stays resolved; the production-safety claim that scope.md required is now **runtime-enforced** rather than test-time-only.
+- **Next**: G1d (network-category escape payloads — closes AC-76 at 12/12 tests) or AC-78 (hash-chained event log — security audit recommendation #2). Recommended: **G1d**, because closing AC-76 at full coverage is the explicit P0 release blocker; AC-78 follows.
+
 ## BUILD v9 — Slice G1c.x.2: memory.max startup gate wired into pincery-server — 2026-04-30T23:55Z
 
 - **Slice goal**: Convert the G1c.x test-time probe into a startup-time fail-fast. When `SandboxMode::Enforce` is configured and `probe_memory_max_enforcement()` returns `NotEnforced` or `Skipped`, refuse to boot (exit 4) unless `OPEN_PINCERY_ALLOW_UNSAFE=true` is armed. Mirrors the LANDLOCK kernel-floor preflight pattern (`enforce_kernel_floor_at_startup`) — same exit code, same structured-event shape, same allow-unsafe escape valve.
