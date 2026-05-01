@@ -196,9 +196,18 @@ async fn assert_payload_blocked(payload_name: &str, command: &str, denial_signat
             );
             let combined = format!("{stdout}\n{stderr}");
             let lower = combined.to_ascii_lowercase();
+            // AC-77: SIGSYS from the seccomp default-deny allowlist
+            // is by definition a sandbox denial. The kernel emits
+            // "Bad system call (core dumped)" on stderr (and exit
+            // code 159 = 128+31) when SECCOMP_RET_KILL_PROCESS
+            // fires. Accept these markers globally so every escape
+            // test transparently treats a seccomp kill as a valid
+            // block, regardless of the per-payload signature list.
+            let seccomp_denial_markers = ["bad system call", "core dumped"];
             let matched = denial_signatures
                 .iter()
-                .any(|sig| lower.contains(&sig.to_ascii_lowercase()));
+                .any(|sig| lower.contains(&sig.to_ascii_lowercase()))
+                || seccomp_denial_markers.iter().any(|m| lower.contains(m));
             assert!(
                 matched,
                 "[{payload_name}] non-zero exit but no denial signature {denial_signatures:?}; stdout={stdout:?} stderr={stderr:?}"

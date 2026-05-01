@@ -106,16 +106,13 @@ fn sandbox(mode: SandboxMode) -> RealSandbox {
     })
 }
 
-fn binary_in_sandbox(name: &str) -> bool {
+async fn binary_in_sandbox(name: &str) -> bool {
     // Probe the bwrap mount tree the same way it will appear at run
     // time. If `command -v <name>` returns 0, the binary is reachable.
     let probe = ShellCommand::new(format!("command -v {name} >/dev/null 2>&1"));
-    let runtime = tokio::runtime::Runtime::new().expect("runtime");
-    let result = runtime.block_on(async {
-        sandbox(SandboxMode::Enforce)
-            .run(&probe, &seccomp_profile(true))
-            .await
-    });
+    let result = sandbox(SandboxMode::Enforce)
+        .run(&probe, &seccomp_profile(true))
+        .await;
     matches!(result, ExecResult::Ok { exit_code: 0, .. })
 }
 
@@ -177,7 +174,7 @@ async fn unshare_blocked_by_default_deny_allowlist() {
     if !preconditions_met() {
         return;
     }
-    if !binary_in_sandbox("unshare") {
+    if !binary_in_sandbox("unshare").await {
         eprintln!("skipping: unshare(1) not in sandbox PATH");
         return;
     }
@@ -216,7 +213,7 @@ async fn unshare_does_not_sigsys_when_seccomp_disabled() {
     if !preconditions_met() {
         return;
     }
-    if !binary_in_sandbox("unshare") {
+    if !binary_in_sandbox("unshare").await {
         eprintln!("skipping: unshare(1) not in sandbox PATH");
         return;
     }
@@ -257,7 +254,7 @@ async fn audit_mode_logs_instead_of_killing() {
     if !preconditions_met() {
         return;
     }
-    if !binary_in_sandbox("unshare") {
+    if !binary_in_sandbox("unshare").await {
         eprintln!("skipping: unshare(1) not in sandbox PATH");
         return;
     }
