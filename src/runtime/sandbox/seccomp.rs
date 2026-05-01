@@ -1,127 +1,312 @@
-//! AC-53 / Slice A2b.4b: seccomp-bpf syscall filter (layer 3 of 6).
+//! AC-77 / Slice G2 (Phase G): seccomp-bpf default-deny **allowlist**.
 //!
-//! ## What this slice ships: a denylist, not yet a true allowlist
+//! ## Posture
 //!
-//! The design calls for a default-deny allowlist. In practice, a
-//! hand-rolled syscall allowlist that keeps `sh -c echo` alive on
-//! stock glibc is dozens of syscalls deep (ld.so dynamic linking,
-//! rseq, clone3, ...) and extraordinarily easy to get wrong — one
-//! missing syscall and the entire sandbox SIGKILLs the shell before
-//! it executes the command. Shipping that in one slice would either
-//! break the existing bwrap smoke tests or paper over real policy
-//! errors with an `Allow` fall-through.
+//! Every syscall NOT explicitly listed in [`allowed_syscalls`] (or
+//! [`clone_arg_rules`]) is denied. In `Enforce` mode the kernel
+//! returns `SECCOMP_RET_KILL_PROCESS` (process dies with SIGSYS, exit
+//! status 159 = 128 + 31). In `Audit` mode the kernel returns
+//! `SECCOMP_RET_LOG`, which logs to the audit subsystem but lets the
+//! call proceed — used by operators to discover newly-needed syscalls
+//! without a hard outage.
 //!
-//! Instead, this slice ships a **targeted denylist** for the subset of
-//! Linux syscalls that are the primary escape primitives an attacker
-//! would use from inside the sandbox: `mount`, `umount2`, `pivot_root`,
-//! `reboot`, `init_module`, `finit_module`, `delete_module`, `kexec_load`,
-//! `kexec_file_load`, `bpf`, `ptrace`. Every other syscall is allowed.
+//! ## Source of truth
 //!
-//! This:
-//! 1. **Proves the full pipeline end-to-end** — `SeccompFilter →
-//!    BpfProgram → memfd → bwrap --seccomp <fd> → kernel` — with a
-//!    kernel-visible adversarial signal (SIGSYS on `mount`).
-//! 2. **Delivers real security today** — every syscall in the denylist
-//!    is listed in readiness.md's 12-payload escape suite.
-//! 3. **Leaves a clean tightening path** — the next sub-slice
-//!    (A2b.4b-hardening, scheduled after the 12-payload escape test
-//!    suite lands in `tests/sandbox_escape_test.rs`) flips the default
-//!    to `KillProcess` and builds the real allowlist from an empirical
-//!    list of syscalls observed during the passing smoke tests.
+//! The allowlist below is sourced empirically from
+//! `tests/fixtures/seccomp/observed_syscalls.txt` (a strace-summary
+//! capture of the AC-76 happy-path command set on kernel 6.6 / glibc
+//! 2.39 / x86_64) plus `tests/fixtures/seccomp/additions.txt`
+//! (manually-justified entries the empirical capture missed: notably
+//! `exit_group`, `clone3`, `prctl`, `futex`, sleep variants, signal
+//! helpers, and the `pincery-init` residual set between
+//! `apply_seccomp` and `execvp`).
 //!
-//! ## Mode semantics
+//! When a new built-in tool extends the syscall surface (e.g. AC-66
+//! Tool Catalog Expansion) the operator re-runs
+//! `scripts/capture_seccomp_corpus.sh` and updates this list. The
+//! diff-fail test
+//! `tests/seccomp_allowlist_test.rs::allowlist_matches_observed_corpus`
+//! (gated on `OPEN_PINCERY_RUN_AC77_REGEN=1`) catches drift.
 //!
-//! - `Enforce` — denied syscalls return `SeccompAction::KillProcess`
-//!   (kernel signal SIGSYS, exit code 159).
-//! - `Audit` — denied syscalls return `SeccompAction::Log` (syscall
-//!   succeeds or fails on its own merits, but kernel logs `audit:
-//!   type=1326 ...` to syslog). Matches the cgroup-layer Audit posture.
-//! - `Disabled` — seccomp layer is not installed (same as
-//!   `SandboxProfile.seccomp = false`).
+//! ## `clone` argument filtering
+//!
+//! `clone(2)` is the highest-leverage syscall in the allowlist:
+//! ordinary thread / process creation needs it, but
+//! `clone(CLONE_NEWUSER, ...)` or `clone(CLONE_NEWNS, ...)` would let
+//! a sandboxed process create new user / mount namespaces and
+//! re-acquire `CAP_SYS_ADMIN` inside them. The allowlist therefore
+//! installs a `SeccompRule` on the `flags` argument: the rule
+//! matches (allow) only when both `CLONE_NEWUSER` and `CLONE_NEWNS`
+//! are clear. Setting either bit fails the rule, falls through to
+//! the filter's default action (`KillProcess` in Enforce), and the
+//! kernel kills the process before `clone` returns.
+//!
+//! `clone3(2)` (modern glibc thread creation) takes a pointer-to-
+//! struct, which BPF cannot dereference. We allow `clone3` bare and
+//! rely on AC-86 (`bwrap --disable-userns` + `--cap-drop ALL` + UID
+//! drop) to make `CLONE_NEWUSER` produce `EPERM` regardless of
+//! seccomp. Documented in T-AC77-4.
+//!
+//! ## Negative-control invariants
+//!
+//! `assert_no_escape_primitives` re-asserts that
+//! `bpf`, `mount`, `umount2`, `pivot_root`, `init_module`,
+//! `finit_module`, `delete_module`, `kexec_load`, `kexec_file_load`,
+//! `reboot`, `ptrace`, `io_uring_setup`, `io_uring_register`,
+//! `io_uring_enter`, `perf_event_open`, `name_to_handle_at`, and
+//! `open_by_handle_at` are NOT in the allowlist. This catches a
+//! regression where a future strace pass accidentally picked one
+//! up (for example by tracing a payload command that itself tried
+//! to escape).
 //!
 //! ## bwrap fd protocol
 //!
-//! bwrap's `--seccomp <fd>` expects raw `struct sock_filter[]` bytes
-//! on the fd — NOT a `struct sock_fprog` wrapper, NOT any framing.
-//! That's exactly the memory layout of `BpfProgram = Vec<sock_filter>`
-//! since `sock_filter` is `#[repr(C)]` 8 bytes wide (via libc).
+//! `bwrap --seccomp <fd>` reads a raw `struct sock_filter[]` byte
+//! stream from the fd — no `sock_fprog` wrapper. `BpfProgram` is
+//! `Vec<sock_filter>` and `sock_filter` is `#[repr(C)]` 8 bytes
+//! wide; the vec's heap buffer IS the on-wire format. We use
+//! `memfd_create(name, 0)` (no `MFD_CLOEXEC`) so the fd inherits
+//! through `fork`/`execve`, then bwrap installs the program via
+//! `seccomp(SECCOMP_SET_MODE_FILTER, ...)`.
 //!
-//! We use `libc::memfd_create(name, 0)` (no MFD_CLOEXEC) so the fd
-//! inherits through `fork()`/`execve()`. bwrap then reads it and
-//! installs the program via `seccomp(SECCOMP_SET_MODE_FILTER, ...)`.
+//! ## Mode -> action mapping
+//!
+//! - `Enforce`: match=Allow, mismatch=KillProcess. Unknown syscall
+//!   triggers SIGSYS (exit 159). Production posture.
+//! - `Audit`: match=Allow, mismatch=Log. Unknown syscall is logged
+//!   to the kernel audit subsystem and proceeds. Operator escape
+//!   valve while expanding the allowlist for new tooling; not a
+//!   security posture.
+//! - `Disabled`: filter not installed (caller short-circuits before
+//!   calling [`build_bpf_program`]).
 
 #![cfg(target_os = "linux")]
 
+use std::collections::BTreeMap;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
-use seccompiler::{BpfProgram, SeccompAction, SeccompFilter};
+use seccompiler::{
+    BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
+    SeccompRule,
+};
 
 use crate::config::SandboxMode;
 
-/// Syscalls this slice unconditionally denies. Ordered alphabetically
-/// for review diffs; order does not affect runtime semantics because
-/// each syscall gets an empty rule vec (= always matches by syscall
-/// number).
+/// Syscalls explicitly forbidden by name, regardless of any future
+/// strace capture that might accidentally observe them. Asserted
+/// against [`allowed_syscalls`] by `assert_no_escape_primitives` so
+/// a regression is caught at install time.
 ///
-/// Rationale for each:
-/// - `bpf` — loading eBPF can open kernel kprobe/tracepoint paths.
-/// - `delete_module` — kernel module unload.
-/// - `finit_module` — kernel module load via fd.
-/// - `init_module` — kernel module load.
-/// - `kexec_file_load` / `kexec_load` — reboot into a new kernel image.
-/// - `mount` — remount fs, mount /proc with less-restricted opts.
-/// - `pivot_root` — change root filesystem.
-/// - `ptrace` — attach to arbitrary processes in same pid ns.
-/// - `reboot` — reboot the host (blocked at kernel level but still worth refusing).
-/// - `umount2` — unmount filesystems.
-fn denied_syscalls() -> Vec<i64> {
+/// The list is the union of the AC-77 named primitives plus the
+/// classic kernel-escape syscalls from scope.md AC-77 line 898 area.
+#[cfg(target_arch = "x86_64")]
+pub const ESCAPE_PRIMITIVES: &[i64] = &[
+    libc::SYS_bpf,
+    libc::SYS_delete_module,
+    libc::SYS_finit_module,
+    libc::SYS_init_module,
+    libc::SYS_io_uring_enter,
+    libc::SYS_io_uring_register,
+    libc::SYS_io_uring_setup,
+    libc::SYS_kexec_file_load,
+    libc::SYS_kexec_load,
+    libc::SYS_mount,
+    libc::SYS_name_to_handle_at,
+    libc::SYS_open_by_handle_at,
+    libc::SYS_perf_event_open,
+    libc::SYS_pivot_root,
+    libc::SYS_ptrace,
+    libc::SYS_reboot,
+    libc::SYS_umount2,
+];
+
+/// Lower / upper bound on the allowlist size. Enforced by
+/// [`build_bpf_program`] per R-AC77-1: an allowlist below the floor
+/// is suspiciously narrow (likely missed a basic syscall and the
+/// sandbox SIGSYSes immediately); an allowlist above the ceiling is
+/// suspiciously wide ("allowed everything except a few names" --
+/// that is a denylist in disguise).
+pub const ALLOWLIST_SIZE_FLOOR: usize = 40;
+pub const ALLOWLIST_SIZE_CEILING: usize = 120;
+
+/// Empirically-sourced default-deny allowlist for x86_64 Linux.
+///
+/// Sources (see module header):
+/// - `tests/fixtures/seccomp/observed_syscalls.txt` (41 syscalls)
+/// - `tests/fixtures/seccomp/additions.txt` (17 manually-justified)
+///
+/// `clone` is intentionally absent here -- it is added with an
+/// argument filter via [`clone_arg_rules`].
+#[cfg(target_arch = "x86_64")]
+fn allowed_syscalls() -> Vec<i64> {
     vec![
-        libc::SYS_bpf,
-        libc::SYS_delete_module,
-        libc::SYS_finit_module,
-        libc::SYS_init_module,
-        libc::SYS_kexec_file_load,
-        libc::SYS_kexec_load,
-        libc::SYS_mount,
-        libc::SYS_pivot_root,
-        libc::SYS_ptrace,
-        libc::SYS_reboot,
-        libc::SYS_umount2,
+        // --- empirical capture (observed_syscalls.txt) ---
+        libc::SYS_access,
+        libc::SYS_arch_prctl,
+        libc::SYS_brk,
+        // SYS_clone deliberately omitted -- see `clone_arg_rules`.
+        libc::SYS_close,
+        libc::SYS_dup2,
+        libc::SYS_execve,
+        libc::SYS_fadvise64,
+        libc::SYS_fstat,
+        libc::SYS_getegid,
+        libc::SYS_geteuid,
+        libc::SYS_getgid,
+        libc::SYS_getpid,
+        libc::SYS_getppid,
+        libc::SYS_getrandom,
+        libc::SYS_getuid,
+        libc::SYS_ioctl,
+        libc::SYS_lseek,
+        libc::SYS_mmap,
+        libc::SYS_mprotect,
+        libc::SYS_munmap,
+        libc::SYS_newfstatat,
+        libc::SYS_openat,
+        libc::SYS_pipe2,
+        libc::SYS_pread64,
+        libc::SYS_prlimit64,
+        libc::SYS_read,
+        libc::SYS_rseq,
+        libc::SYS_rt_sigaction,
+        libc::SYS_rt_sigprocmask,
+        libc::SYS_rt_sigreturn,
+        libc::SYS_rt_sigsuspend,
+        libc::SYS_set_robust_list,
+        libc::SYS_set_tid_address,
+        libc::SYS_setpgid,
+        libc::SYS_statfs,
+        libc::SYS_timer_create,
+        libc::SYS_timer_settime,
+        libc::SYS_vfork,
+        libc::SYS_wait4,
+        libc::SYS_write,
+        // --- manual additions (additions.txt) ---
+        libc::SYS_exit_group,
+        libc::SYS_exit,
+        libc::SYS_prctl,
+        libc::SYS_futex,
+        libc::SYS_clone3,
+        libc::SYS_restart_syscall,
+        libc::SYS_tgkill,
+        libc::SYS_nanosleep,
+        libc::SYS_clock_nanosleep,
+        libc::SYS_clock_gettime,
+        libc::SYS_ppoll,
+        libc::SYS_poll,
+        libc::SYS_sigaltstack,
+        libc::SYS_fcntl,
+        libc::SYS_getcwd,
+        libc::SYS_readlinkat,
+        libc::SYS_uname,
     ]
+}
+
+/// `clone(2)` argument filter. Allows ordinary thread / process
+/// creation but blocks any flags set that would create a new user
+/// or mount namespace.
+///
+/// Returns a single rule on `flags` (arg 0) using `MaskedEq(mask)`
+/// with value `0`: matches when `(flags & mask) == 0`. If the rule
+/// fails to match, the filter's default mismatch action fires
+/// (KillProcess in Enforce).
+#[cfg(target_arch = "x86_64")]
+fn clone_arg_rules() -> Result<Vec<(i64, Vec<SeccompRule>)>, String> {
+    let dangerous_flags: u64 = (libc::CLONE_NEWUSER as u64) | (libc::CLONE_NEWNS as u64);
+    let cond = SeccompCondition::new(
+        /* arg_index = */ 0,
+        SeccompCmpArgLen::Qword,
+        SeccompCmpOp::MaskedEq(dangerous_flags),
+        /* value = */ 0,
+    )
+    .map_err(|e| format!("SeccompCondition::new(clone flags): {e:?}"))?;
+    let rule = SeccompRule::new(vec![cond])
+        .map_err(|e| format!("SeccompRule::new(clone flags): {e:?}"))?;
+    Ok(vec![(libc::SYS_clone, vec![rule])])
+}
+
+/// Assert that no escape primitive appears in the candidate
+/// allowlist. Returns `Err` with the offending syscall number on
+/// failure so the caller can refuse to install a regressed filter.
+#[cfg(target_arch = "x86_64")]
+fn assert_no_escape_primitives(allowlist: &[i64]) -> Result<(), String> {
+    for forbidden in ESCAPE_PRIMITIVES {
+        if allowlist.contains(forbidden) {
+            return Err(format!(
+                "AC-77 invariant violated: escape primitive syscall #{forbidden} \
+                 is present in allowed_syscalls()"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Build the compiled BPF program for a given enforcement mode.
 ///
-/// - `Enforce` / `Disabled` (only `Enforce` reaches here normally) →
-///   denied syscalls get `KillProcess`.
-/// - `Audit` → denied syscalls get `Log`.
-///
-/// Returns the program or an error if the host arch is unsupported.
+/// Returns the program or an error if the host arch is unsupported,
+/// the allowlist size is out of bounds, or the seccompiler API
+/// rejects the rule set.
+#[cfg(target_arch = "x86_64")]
 pub fn build_bpf_program(mode: SandboxMode) -> Result<BpfProgram, String> {
-    let match_action = match mode {
+    let mismatch_action = match mode {
         SandboxMode::Audit => SeccompAction::Log,
-        // Enforce is the default posture; Disabled callers should not
-        // reach this function, but we treat it identically for safety.
         SandboxMode::Enforce | SandboxMode::Disabled => SeccompAction::KillProcess,
     };
-    // Every denied syscall maps to an empty rule vec so any invocation
-    // matches by syscall number alone.
-    let rules = denied_syscalls()
-        .into_iter()
-        .map(|n| (n, Vec::new()))
-        .collect();
+
+    let allowlist = allowed_syscalls();
+    if allowlist.len() < ALLOWLIST_SIZE_FLOOR || allowlist.len() > ALLOWLIST_SIZE_CEILING {
+        return Err(format!(
+            "seccomp allowlist size {} out of bounds [{}..={}]; \
+             refuse to install (R-AC77-1)",
+            allowlist.len(),
+            ALLOWLIST_SIZE_FLOOR,
+            ALLOWLIST_SIZE_CEILING
+        ));
+    }
+
+    assert_no_escape_primitives(&allowlist)?;
+
+    let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
+    for nr in allowlist {
+        // Empty rule vec means "match by syscall number alone".
+        rules.insert(nr, Vec::new());
+    }
+    for (nr, chain) in clone_arg_rules()? {
+        rules.insert(nr, chain);
+    }
+
     let target_arch = std::env::consts::ARCH
         .try_into()
         .map_err(|e| format!("unsupported host arch for seccomp: {e:?}"))?;
+
     let filter = SeccompFilter::new(
         rules,
-        /* mismatch_action = */ SeccompAction::Allow,
-        match_action,
+        mismatch_action,
+        /* match_action = */ SeccompAction::Allow,
         target_arch,
     )
     .map_err(|e| format!("SeccompFilter::new failed: {e:?}"))?;
+
     BpfProgram::try_from(filter).map_err(|e| format!("BpfProgram::try_from failed: {e:?}"))
+}
+
+// --- non-x86_64 stubs -----------------------------------------------------
+//
+// AC-77 ships an x86_64 allowlist only (per T-AC77-10). On other
+// architectures `build_bpf_program` returns Err so callers refuse to
+// install rather than silently degrading to no filter.
+
+#[cfg(not(target_arch = "x86_64"))]
+pub const ESCAPE_PRIMITIVES: &[i64] = &[];
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn build_bpf_program(_mode: SandboxMode) -> Result<BpfProgram, String> {
+    Err(format!(
+        "AC-77 seccomp allowlist is only defined for x86_64 (current arch: {})",
+        std::env::consts::ARCH
+    ))
 }
 
 /// Write a compiled BPF program into a fresh in-memory file descriptor
@@ -130,26 +315,19 @@ pub fn build_bpf_program(mode: SandboxMode) -> Result<BpfProgram, String> {
 /// - has `FD_CLOEXEC` cleared (so it inherits across `execve`),
 /// - owns its lifetime via [`OwnedFd`] (dropping closes it).
 pub fn write_bpf_to_memfd(program: &BpfProgram) -> io::Result<OwnedFd> {
-    // memfd_create with flags=0: no MFD_CLOEXEC, so the fd survives
-    // execve by default. bwrap only reads from it; no seal needed.
     let name = c"pincery-seccomp-bpf";
-    // SAFETY: libc::memfd_create is an FFI call with no pointer aliasing
-    // concerns — we pass a static C string and constant flags.
+    // SAFETY: libc::memfd_create FFI; static C string + constant flags.
     let raw = unsafe { libc::memfd_create(name.as_ptr(), 0) };
     if raw < 0 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: `raw` is a fresh, unowned fd from the kernel. `OwnedFd`
-    // takes exclusive ownership and will `close()` on drop.
+    // SAFETY: fresh, unowned fd from the kernel; OwnedFd takes exclusive
+    // ownership and closes on drop.
     let fd: OwnedFd = unsafe { OwnedFd::from_raw_fd(raw) };
 
-    // Serialize `Vec<sock_filter>` as a contiguous byte slice. `sock_filter`
-    // is `#[repr(C)]` (8 bytes: u16+u8+u8+u32 on every supported arch), so
-    // the vec's heap buffer IS the on-disk format bwrap expects.
     let byte_len = std::mem::size_of_val(program.as_slice());
     let bytes = unsafe { std::slice::from_raw_parts(program.as_ptr().cast::<u8>(), byte_len) };
     write_all_to_fd(&fd, bytes)?;
-    // Rewind so bwrap reads from instruction 0.
     lseek_set_start(&fd)?;
     Ok(fd)
 }
@@ -170,9 +348,7 @@ pub fn compose_seccomp_fd(mode: SandboxMode) -> Result<(OwnedFd, RawFd), String>
 
 fn write_all_to_fd(fd: &OwnedFd, mut buf: &[u8]) -> io::Result<()> {
     while !buf.is_empty() {
-        // SAFETY: we pass a valid pointer + length pair from `buf` and a
-        // live fd owned by `OwnedFd`. The kernel writes at most `len`
-        // bytes; we advance `buf` by the returned count.
+        // SAFETY: valid pointer + length pair from `buf` and a live fd.
         let n = unsafe { libc::write(fd.as_raw_fd(), buf.as_ptr().cast(), buf.len()) };
         if n < 0 {
             let err = io::Error::last_os_error();
@@ -196,53 +372,108 @@ fn lseek_set_start(fd: &OwnedFd) -> io::Result<()> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::*;
 
     #[test]
-    fn denylist_contains_expected_escape_primitives() {
-        let syscalls = denied_syscalls();
-        // Stable subset — any regression would silently weaken the layer.
-        for must_have in [
-            libc::SYS_mount,
-            libc::SYS_reboot,
-            libc::SYS_init_module,
-            libc::SYS_ptrace,
-            libc::SYS_kexec_load,
-            libc::SYS_bpf,
-            libc::SYS_pivot_root,
+    fn allowlist_size_within_bounds() {
+        let n = allowed_syscalls().len();
+        assert!(
+            n >= ALLOWLIST_SIZE_FLOOR && n <= ALLOWLIST_SIZE_CEILING,
+            "allowlist size {n} out of bounds [{ALLOWLIST_SIZE_FLOOR}..={ALLOWLIST_SIZE_CEILING}]"
+        );
+    }
+
+    #[test]
+    fn allowlist_excludes_escape_primitives() {
+        let allow = allowed_syscalls();
+        for forbidden in ESCAPE_PRIMITIVES {
+            assert!(
+                !allow.contains(forbidden),
+                "AC-77 invariant: escape primitive #{forbidden} must NOT be in allowlist"
+            );
+        }
+        assert_no_escape_primitives(&allow).expect("invariant must hold");
+    }
+
+    #[test]
+    fn allowlist_includes_essential_workload_syscalls() {
+        let allow = allowed_syscalls();
+        // Mandatory for any user binary on glibc:
+        for required in [
+            libc::SYS_execve,
+            libc::SYS_read,
+            libc::SYS_write,
+            libc::SYS_exit_group,
+            libc::SYS_mmap,
+            libc::SYS_brk,
         ] {
             assert!(
-                syscalls.contains(&must_have),
-                "denylist missing syscall #{must_have}"
+                allow.contains(&required),
+                "essential syscall #{required} missing from allowlist"
             );
         }
     }
 
     #[test]
-    fn build_program_enforce_produces_nonempty_bpf() {
+    fn clone_arg_rules_filter_user_and_mount_namespaces() {
+        let rules = clone_arg_rules().expect("clone arg rules");
+        assert_eq!(rules.len(), 1, "expected one (syscall, rules) pair");
+        assert_eq!(rules[0].0, libc::SYS_clone);
+        assert_eq!(rules[0].1.len(), 1, "expected one allow rule on clone");
+        // Sanity: clone is NOT in the bare allowlist (it goes through
+        // the arg-filter path instead).
+        assert!(!allowed_syscalls().contains(&libc::SYS_clone));
+    }
+
+    #[test]
+    fn build_program_enforce_uses_kill_on_mismatch() {
         let prog = build_bpf_program(SandboxMode::Enforce).expect("enforce program");
-        assert!(!prog.is_empty(), "BPF program must contain instructions");
-        // sock_filter is 8 bytes; a real program is well over one record.
+        // The allowlist has ~58 syscalls plus arch-check + clone arg
+        // rule; the BPF program is well over a few records.
         assert!(
-            prog.len() > 3,
-            "BPF program suspiciously small: {}",
+            prog.len() > 30,
+            "BPF program suspiciously small: {} instructions",
             prog.len()
         );
     }
 
     #[test]
-    fn build_program_audit_produces_nonempty_bpf() {
+    fn build_program_audit_uses_log_on_mismatch() {
         let prog = build_bpf_program(SandboxMode::Audit).expect("audit program");
-        assert!(!prog.is_empty());
+        assert!(prog.len() > 30);
+    }
+
+    #[test]
+    fn enforce_and_audit_programs_differ() {
+        // Different mismatch_action -> different terminating
+        // instruction in the BPF program. The two compiled programs
+        // should not be byte-identical.
+        let enforce = build_bpf_program(SandboxMode::Enforce).expect("enforce");
+        let audit = build_bpf_program(SandboxMode::Audit).expect("audit");
+        let e_bytes = unsafe {
+            std::slice::from_raw_parts(
+                enforce.as_ptr().cast::<u8>(),
+                std::mem::size_of_val(enforce.as_slice()),
+            )
+        };
+        let a_bytes = unsafe {
+            std::slice::from_raw_parts(
+                audit.as_ptr().cast::<u8>(),
+                std::mem::size_of_val(audit.as_slice()),
+            )
+        };
+        assert_ne!(
+            e_bytes, a_bytes,
+            "enforce and audit programs must encode different mismatch actions"
+        );
     }
 
     #[test]
     fn memfd_roundtrip_matches_program_bytes() {
         let prog = build_bpf_program(SandboxMode::Enforce).expect("program");
         let fd = write_bpf_to_memfd(&prog).expect("memfd write");
-        // Read it back and compare byte-for-byte.
         let expected_bytes = unsafe {
             std::slice::from_raw_parts(
                 prog.as_ptr().cast::<u8>(),
@@ -250,7 +481,6 @@ mod tests {
             )
         };
         let mut buf = vec![0u8; expected_bytes.len()];
-        // Rewind (should already be 0) then read.
         unsafe { libc::lseek(fd.as_raw_fd(), 0, libc::SEEK_SET) };
         let n = unsafe { libc::read(fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
         assert!(n >= 0, "read failed: {}", std::io::Error::last_os_error());
