@@ -15,6 +15,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use uuid::Uuid;
 
 pub mod agents;
+pub mod audit;
 pub mod bootstrap;
 pub mod credentials;
 pub mod events;
@@ -209,6 +210,7 @@ pub(crate) async fn scoped_agent(
 pub fn router(state: AppState) -> Router {
     let authed = Router::new()
         .merge(agents::router())
+        .merge(audit::router())
         .merge(messages::router())
         .merge(events::router())
         .merge(credentials::router())

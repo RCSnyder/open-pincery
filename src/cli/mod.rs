@@ -104,6 +104,27 @@ enum Commands {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
+    /// AC-78 (v9): walk the event-log hash chain. Exits 0 if every
+    /// walked agent verifies; exits 2 if any chain is broken.
+    Audit {
+        #[command(subcommand)]
+        command: AuditCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AuditCommands {
+    /// Verify the per-agent event-log hash chain.
+    Verify {
+        /// Restrict the walk to one agent UUID.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Restrict the walk to one workspace UUID. Single-workspace
+        /// deployments require this to match the caller's workspace;
+        /// the server rejects cross-workspace requests.
+        #[arg(long)]
+        workspace: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -323,6 +344,17 @@ async fn run_inner() -> Result<ExitCode, AppError> {
         Commands::Completion { shell } => {
             commands::completion::run(shell)?;
             Ok(ExitCode::SUCCESS)
+        }
+        Commands::Audit { command } => {
+            let token = token.clone().ok_or_else(|| {
+                AppError::Unauthorized("missing token; run pcy login first".into())
+            })?;
+            let client = ApiClient::new(url, Some(token));
+            match command {
+                AuditCommands::Verify { agent, workspace } => {
+                    commands::audit::verify(&client, agent, workspace).await
+                }
+            }
         }
     }
 }

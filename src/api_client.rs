@@ -227,4 +227,24 @@ impl ApiClient {
             )))
         }
     }
+
+    /// AC-78: `POST /api/audit/chain/verify` — verifies the chain for
+    /// every agent in the caller's workspace. Returns the full
+    /// response payload (`{ agents: [...], all_verified: bool }`).
+    pub async fn verify_chain_workspace(&self) -> Result<Value, AppError> {
+        let req = self
+            .http
+            .post(format!("{}/api/audit/chain/verify", self.base_url));
+        self.send_json(req, None).await
+    }
+
+    /// AC-78: `POST /api/audit/chain/verify/agents/{id}` — verifies a
+    /// single agent's chain in the caller's workspace.
+    pub async fn verify_chain_agent(&self, agent_id: &str) -> Result<Value, AppError> {
+        let req = self.http.post(format!(
+            "{}/api/audit/chain/verify/agents/{}",
+            self.base_url, agent_id
+        ));
+        self.send_json(req, None).await
+    }
 }
