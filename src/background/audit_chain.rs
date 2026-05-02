@@ -33,8 +33,22 @@
 //! collisions and trivially matches Postgres `int4send(length(b))`.
 
 use chrono::{DateTime, Utc};
+use serde_json::json;
 use sha2::{Digest, Sha256};
+use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::error::AppError;
+use crate::models::event;
+
+/// Event type emitted when a per-agent chain verifies cleanly.
+pub const EVENT_AUDIT_CHAIN_VERIFIED: &str = "audit_chain_verified";
+
+/// Event type emitted when a per-agent chain is broken (tamper detected).
+pub const EVENT_AUDIT_CHAIN_BROKEN: &str = "audit_chain_broken";
+
+/// Source value used by the verifier when appending its own events.
+pub const VERIFIER_EVENT_SOURCE: &str = "runtime";
 
 /// Append a length-prefixed UTF-8 encoding of `field` to `out`.
 ///
@@ -96,6 +110,220 @@ pub fn compute_entry_hash(prev_hash_hex: &str, payload: &[u8]) -> String {
     hasher.update(payload);
     let digest = hasher.finalize();
     hex::encode(digest)
+}
+
+/// Outcome of walking one agent's hash chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChainStatus {
+    /// Every event's stored `entry_hash` matched the recomputed value.
+    Verified {
+        events_in_chain: u64,
+        last_entry_hash: String,
+    },
+    /// First mismatch encountered. `expected_hash` is what the chain
+    /// should have been (recomputed from the prior entry); `actual_hash`
+    /// is what the row currently stores.
+    Broken {
+        first_divergent_event_id: Uuid,
+        expected_hash: String,
+        actual_hash: String,
+        events_walked: u64,
+    },
+}
+
+/// Walk every event for `agent_id` in `(created_at, id)` order,
+/// recomputing the hash chain in Rust and comparing against the
+/// stored `entry_hash` column.
+///
+/// **Read-only**: the function never UPDATEs or DELETEs. T-AC78-11
+/// invariant.
+pub async fn verify_audit_chain(pool: &PgPool, agent_id: Uuid) -> Result<ChainStatus, AppError> {
+    let rows = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            String,
+            String,
+            String,
+            Option<Uuid>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            DateTime<Utc>,
+        ),
+    >(
+        "SELECT id, prev_hash, entry_hash, event_type, source, wake_id,
+                tool_name, tool_input, tool_output, content,
+                termination_reason, created_at
+         FROM events
+         WHERE agent_id = $1
+         ORDER BY created_at ASC, id ASC",
+    )
+    .bind(agent_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut expected_prev = String::new();
+    let mut last_entry_hash = String::new();
+    let mut walked: u64 = 0;
+
+    for (
+        id,
+        prev_hash,
+        entry_hash,
+        event_type,
+        source,
+        wake_id,
+        tool_name,
+        tool_input,
+        tool_output,
+        content,
+        termination_reason,
+        created_at,
+    ) in rows
+    {
+        // Detect prev_hash tampering before recomputing.
+        if prev_hash != expected_prev {
+            return Ok(ChainStatus::Broken {
+                first_divergent_event_id: id,
+                expected_hash: expected_prev,
+                actual_hash: prev_hash,
+                events_walked: walked,
+            });
+        }
+
+        let payload = canonical_payload(
+            &event_type,
+            agent_id,
+            Some(&source),
+            wake_id,
+            tool_name.as_deref(),
+            tool_input.as_deref(),
+            tool_output.as_deref(),
+            content.as_deref(),
+            termination_reason.as_deref(),
+            created_at,
+        );
+        let recomputed = compute_entry_hash(&prev_hash, &payload);
+
+        if recomputed != entry_hash {
+            return Ok(ChainStatus::Broken {
+                first_divergent_event_id: id,
+                expected_hash: recomputed,
+                actual_hash: entry_hash,
+                events_walked: walked,
+            });
+        }
+
+        expected_prev = entry_hash.clone();
+        last_entry_hash = entry_hash;
+        walked += 1;
+    }
+
+    Ok(ChainStatus::Verified {
+        events_in_chain: walked,
+        last_entry_hash,
+    })
+}
+
+/// Verify `agent_id`'s chain and append exactly one
+/// `audit_chain_verified` or `audit_chain_broken` event recording the
+/// outcome. Returns the same `ChainStatus`.
+///
+/// The emitted event itself extends the chain (the trigger fills its
+/// `prev_hash`/`entry_hash` from the previous tail), so calling this
+/// twice in succession produces a clean chain on the second call.
+pub async fn verify_and_emit(pool: &PgPool, agent_id: Uuid) -> Result<ChainStatus, AppError> {
+    let status = verify_audit_chain(pool, agent_id).await?;
+
+    match &status {
+        ChainStatus::Verified {
+            events_in_chain,
+            last_entry_hash,
+        } => {
+            let payload = json!({
+                "agent_id": agent_id,
+                "events_in_chain": events_in_chain,
+                "last_entry_hash": last_entry_hash,
+            });
+            event::append_event(
+                pool,
+                agent_id,
+                EVENT_AUDIT_CHAIN_VERIFIED,
+                VERIFIER_EVENT_SOURCE,
+                None,
+                None,
+                None,
+                Some(&payload.to_string()),
+                None,
+                None,
+            )
+            .await?;
+        }
+        ChainStatus::Broken {
+            first_divergent_event_id,
+            expected_hash,
+            actual_hash,
+            events_walked,
+        } => {
+            let payload = json!({
+                "agent_id": agent_id,
+                "first_divergent_event_id": first_divergent_event_id,
+                "expected_hash": expected_hash,
+                "actual_hash": actual_hash,
+                "events_walked": events_walked,
+            });
+            event::append_event(
+                pool,
+                agent_id,
+                EVENT_AUDIT_CHAIN_BROKEN,
+                VERIFIER_EVENT_SOURCE,
+                None,
+                None,
+                None,
+                Some(&payload.to_string()),
+                None,
+                None,
+            )
+            .await?;
+        }
+    }
+
+    Ok(status)
+}
+
+/// Per-agent verification result inside a workspace pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentChainResult {
+    pub agent_id: Uuid,
+    pub status: ChainStatus,
+}
+
+/// Walk every agent in `workspace_id` and call [`verify_and_emit`]
+/// once per agent. Returns the per-agent outcomes in agent-id order.
+///
+/// Used by the startup gate (G3d) and the `pcy audit verify` CLI
+/// (G3c). The function is read-mostly: it only writes the verifier's
+/// own `audit_chain_*` events, never mutates pre-existing rows.
+pub async fn verify_workspace(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<Vec<AgentChainResult>, AppError> {
+    let agents: Vec<(Uuid,)> =
+        sqlx::query_as("SELECT id FROM agents WHERE workspace_id = $1 ORDER BY id ASC")
+            .bind(workspace_id)
+            .fetch_all(pool)
+            .await?;
+
+    let mut out = Vec::with_capacity(agents.len());
+    for (agent_id,) in agents {
+        let status = verify_and_emit(pool, agent_id).await?;
+        out.push(AgentChainResult { agent_id, status });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
