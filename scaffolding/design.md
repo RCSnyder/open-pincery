@@ -2709,13 +2709,18 @@ migrations/
   20260501000001_add_event_hash_chain.sql       # ALTER TABLE + trigger fn + trigger
 src/
   cli/
-    audit.rs                                    # `pcy audit verify` subcommand
+    commands/
+      audit.rs                                  # `pcy audit verify` subcommand (RECONCILED 2026-05-02: lives under cli/commands/, not cli/)
   background/
-    audit_chain.rs                              # verify_audit_chain(pool) loop + once
+    audit_chain.rs                              # verify_audit_chain (per-agent), verify_workspace, verify_and_emit, enforce_audit_chain_floor_at_startup
 src/api/
-  audit.rs                                      # GET /api/audit/chain/verify (admin)
+  audit.rs                                      # POST /api/audit/chain/verify + POST /api/audit/chain/verify/agents/{id} (workspace-admin gated)
 tests/
-  audit_chain_test.rs                           # 3 tests: happy / tamper-detect / concurrent
+  audit_chain_test.rs                           # trigger + verifier + startup-gate tests (genesis, prev_hash, per-agent isolation, NOT NULL, happy/tamper/concurrent, emitted-event shape, no-mutate invariant, workspace verifier, startup-gate abort + relaxed-floor)
+  audit_api_test.rs                             # HTTP /api/audit/chain/verify (workspace happy + tamper, per-agent cross-workspace 404, non-admin 403)
+  cli_audit_verify_test.rs                      # `pcy audit verify` exit-code 0 (clean) / 2 (broken) e2e
+docs/runbooks/
+  audit_chain_recovery.md                       # operator runbook for exit-code-5 startup refusal (restore / forensic / time-boxed override)
 ```
 
 #### Interfaces
@@ -2733,7 +2738,7 @@ tests/
   - Workspace verifier loops all agents in workspace; emits one `audit_chain_verified` or `audit_chain_broken` event **per agent** with structured payload.
 - **CLI** `pcy audit verify [--agent <id>] [--workspace <id>]`:
   - Defaults to current context's workspace. Prints per-agent `OK (n events)` or `BROKEN at event <id>` with non-zero exit on any break.
-- **HTTP** `POST /api/audit/chain/verify` (workspace-admin gated): runs verifier, returns JSON `{ agents: [{ agent_id, status: "verified"|"broken", … }] }`.
+- **HTTP** `POST /api/audit/chain/verify` (workspace-admin gated): runs verifier across every agent in the caller's workspace, returns JSON `{ agents: [{ agent_id, status: "verified"|"broken", … }], all_verified: bool }`. Companion `POST /api/audit/chain/verify/agents/{id}` (workspace-admin gated, workspace-scoped 404 on cross-tenant) verifies a single agent's chain. Both delegate to `background::audit_chain::verify_workspace` / `verify_and_emit` so HTTP, CLI, and the startup gate share one verifier path.
 - **Background invocation**: at startup (post-migration, post-DB-bootstrap, before listener bind) the server runs one verify pass per workspace. Failure to verify aborts startup with exit code 5 unless `OPEN_PINCERY_AUDIT_CHAIN_FLOOR=relaxed` + `OPEN_PINCERY_ALLOW_UNSAFE=true` (matches AC-84 relaxed-floor pattern).
 
 #### Event Types (additions)
@@ -2782,5 +2787,5 @@ None. Per-agent vs per-workspace chain choice documented above (per-agent). Cano
 | T-AC78-2: tamper detected                 | `tests/audit_chain_test.rs::manual_update_breaks_chain` does `UPDATE events SET content='evil'`, verifier returns Broken with the right event_id |
 | T-AC78-3: concurrent inserts intact       | `tests/audit_chain_test.rs::concurrent_inserts_preserve_chain` spawns 8 tasks each inserting 200 events for the same agent, then verifies        |
 | T-AC78-4: trigger genesis                 | unit test: first event for an agent has prev_hash = '' and entry_hash matches reference computation                                              |
-| T-AC78-5: pcy CLI exits non-zero on break | `tests/cli_audit_test.rs` shells out and asserts exit code                                                                                       |
+| T-AC78-5: pcy CLI exits non-zero on break | `tests/cli_audit_verify_test.rs` shells `CARGO_BIN_EXE_pcy` and asserts exit 0 on clean chain / exit 2 on tampered chain                         |
 | T-AC78-6: startup verify gates server     | integration: tamper a row on a DB, restart server, assert exit code 5                                                                            |

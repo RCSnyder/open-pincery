@@ -1,5 +1,20 @@
 # Open Pincery — Experiment Log
 
+## RECONCILE v9 — AC-78 post-BUILD/REVIEW 7-axis drift sweep — 2026-05-02T05:00Z
+
+- **Trigger**: standard reconcile pass after AC-78 BUILD + REVIEW (NOW PASS) on `v6-01_implementation` HEAD `6d52b2d`. Range covered: G3 admission (`1743aa7`, `985731d`) through G3a..G3e + review-fix (`36cabd6..b412025`).
+- **Verdict**: REPAIRED. No spec-violating drift; structural + cosmetic drift in two scaffolding documents fixed.
+- **Axis 1 — Directory structure**: `scaffolding/design.md` AC-78 directory tree updated. `src/cli/audit.rs` corrected to `src/cli/commands/audit.rs` (the file lives under the existing `cli/commands/` clap dispatch tree). Added shipped artifacts that were absent from the design tree: `tests/audit_api_test.rs`, `tests/cli_audit_verify_test.rs`, `docs/runbooks/audit_chain_recovery.md`. The `src/api/audit.rs` comment also updated to reflect both routes (workspace + per-agent) and the actual HTTP verb (POST, not GET).
+- **Axis 2 — Interfaces**: `scaffolding/design.md` AC-78 HTTP interface line expanded to include the per-agent variant `POST /api/audit/chain/verify/agents/{id}` that BUILD G3c shipped, plus the `all_verified: bool` field on the workspace response and the `verify_workspace` / `verify_and_emit` shared verifier path. `ChainStatus` enum, trigger function shape, and event-type payloads in design.md continue to match the code.
+- **Axis 3 — Acceptance criteria**: `scaffolding/scope.md` AC-78 (line 713) still describes what was built. AC-78 traceability intact: scope.md AC-78 → readiness.md `T-AC78-1..11` / `L-AC78-1..8` → tests `audit_chain_test.rs` (12 fns) + `audit_api_test.rs` (4 fns) + `cli_audit_verify_test.rs` (2 fns) + unit tests in `src/background/audit_chain.rs`. No scope reduction, no placeholders.
+- **Axis 4 — External integrations**: `scaffolding/design.md` integration table for AC-78 (pgcrypto, trigger row lock, backfill) matches the shipped migration `migrations/20260501000001_add_event_hash_chain.sql`. No new system or crate deps introduced. CLEAN.
+- **Axis 5 — Stack & deploy**: No `Cargo.toml` change in the AC-78 range; lockfile unchanged. Two new env vars (`OPEN_PINCERY_AUDIT_CHAIN_FLOOR`, reusing existing `OPEN_PINCERY_ALLOW_UNSAFE`) documented in `.env.example` (G3d fix `6bb5658`). CLEAN.
+- **Axis 6 — Log accuracy**: `scaffolding/log.md` G3a..G3e + review-fix entries match `git log --oneline` (`bf9c6b5`, `c7b2f1a`, `2ed942b`, `b961955`, `2c2e416`, `e6e7722`, `f96c2e3`, `6bb5658`, `ac47c26`, `b412025`, `6d52b2d`). CLEAN.
+- **Axis 7 — Readiness / traceability**: `scaffolding/readiness.md` AC-78 addendum updated. `L-AC78-5` test path corrected to `tests/cli_audit_verify_test.rs` and the source path corrected to `src/cli/commands/audit.rs`. `L-AC78-6` test path corrected to `tests/audit_api_test.rs` (the AC-78 tests live in a dedicated file rather than the generic `tests/api_test.rs`) with the actual function names (`audit_chain_verify_workspace_returns_all_verified`, `..reports_broken_after_tamper`, `..agent_404s_for_other_workspace`, `..rejects_non_admin`). Coverage table updated to match. `T-AC78-1..11` truths still hold against the shipped code.
+- **Documents updated**: `scaffolding/design.md` (AC-78 directory tree + HTTP interface + test strategy row), `scaffolding/readiness.md` (AC-78 L-5/L-6 + coverage table), `scaffolding/log.md` (this entry).
+- **No spec-violating drift requiring user attention**.
+- **Next**: AC-78 close pipeline continues — VERIFY agent → DELIVERY.md update → DEPLOY.
+
 ## REVIEW-FIX G3-review — AC-78 address REVIEW Required findings — 2026-05-02T04:25Z
 
 - **Gate**: PASS (post-build, attempt 1)

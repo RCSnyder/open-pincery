@@ -746,24 +746,25 @@ ON events FOR EACH ROW EXECUTE FUNCTION events_chain_compute_hash()`)
   proof** CI's existing event-type lint job + the audit-chain
   test asserts the row lands in `events` with the expected
   `event_type`.
-- **L-AC78-5 (T-AC78-6)** AC-78 -> `src/cli/audit.rs` adds
+- **L-AC78-5 (T-AC78-6)** AC-78 -> `src/cli/commands/audit.rs` adds
   subcommand `pcy audit verify [--agent <id>] [--workspace <id>]`
   wired through the existing `clap` command tree -> **planned
   test**
-  `tests/cli_audit_test.rs::pcy_audit_verify_exits_nonzero_on_break`
+  `tests/cli_audit_verify_test.rs::pcy_audit_verify_exits_nonzero_on_break`
   shells out, asserts exit code != 0 and stderr contains
   `BROKEN at event <id>`; companion test
   `..::pcy_audit_verify_exits_zero_on_clean_chain` -> **runtime
   proof** CLI e2e test runs in CI; existing
   `tests/cli_e2e_test.rs` harness pattern is reused.
 - **L-AC78-6 (T-AC78-7)** AC-78 -> `src/api/audit.rs` adds
-  `POST /api/audit/chain/verify` registered in the OpenAPI doc
-  alongside existing audit endpoints; gated by the workspace-admin
-  middleware (existing pattern from `src/api/credentials.rs` or
-  similar admin routes) -> **planned test**
-  `tests/api_test.rs::audit_chain_verify_returns_per_agent_status`
-  - `..::audit_chain_verify_rejects_non_admin` +
-    `..::audit_chain_verify_is_workspace_scoped` -> **runtime
+  `POST /api/audit/chain/verify` and `POST /api/audit/chain/verify/agents/{id}`
+  registered in the OpenAPI doc alongside existing audit endpoints;
+  gated by the workspace-admin middleware (existing pattern from
+  `src/api/credentials.rs` or similar admin routes) -> **planned test**
+  `tests/audit_api_test.rs::audit_chain_verify_workspace_returns_all_verified`
+  - `..::audit_chain_verify_workspace_reports_broken_after_tamper`
+  - `..::audit_chain_verify_agent_404s_for_other_workspace`
+  - `..::audit_chain_verify_rejects_non_admin` -> **runtime
     proof** existing API integration harness runs against the test
     Postgres.
 - **L-AC78-7 (T-AC78-8)** AC-78 -> `src/main.rs` startup
@@ -798,8 +799,8 @@ ON events FOR EACH ROW EXECUTE FUNCTION events_chain_compute_hash()`)
 | AC-78 | T-AC78-2, T-AC78-4           | `tests/audit_chain_test.rs::happy_path_chain_verifies` (10k events) + `..::manual_update_breaks_chain` (`UPDATE` on `content`, expect `Broken { first_divergent_event_id }`)                                       | CI DB-test job; tampered-row id == reported broken-event id                                        |
 | AC-78 | T-AC78-3                     | `tests/audit_chain_test.rs::concurrent_inserts_preserve_chain` (8 tasks × 200 events for one agent; verify clean afterwards)                                                                                       | CI DB-test job; if the row lock fails the test surfaces a `Broken` verdict                         |
 | AC-78 | T-AC78-5, T-AC78-10          | `tests/audit_chain_test.rs::verifier_emits_audit_chain_verified_event` + `..::verifier_emits_audit_chain_broken_event_with_correct_id` + event-type lint pass                                                      | CI DB-test job + existing event-type lint job                                                      |
-| AC-78 | T-AC78-6                     | `tests/cli_audit_test.rs::pcy_audit_verify_exits_nonzero_on_break` + `..::pcy_audit_verify_exits_zero_on_clean_chain`                                                                                              | CI CLI-e2e job                                                                                     |
-| AC-78 | T-AC78-7                     | `tests/api_test.rs::audit_chain_verify_returns_per_agent_status` + `..::audit_chain_verify_rejects_non_admin` + `..::audit_chain_verify_is_workspace_scoped`                                                       | CI API-integration job                                                                             |
+| AC-78 | T-AC78-6                     | `tests/cli_audit_verify_test.rs::pcy_audit_verify_exits_nonzero_on_break` + `..::pcy_audit_verify_exits_zero_on_clean_chain`                                                                                       | CI CLI-e2e job                                                                                     |
+| AC-78 | T-AC78-7                     | `tests/audit_api_test.rs::audit_chain_verify_workspace_returns_all_verified` + `..::audit_chain_verify_workspace_reports_broken_after_tamper` + `..::audit_chain_verify_agent_404s_for_other_workspace` + `..::audit_chain_verify_rejects_non_admin` | CI API-integration job                                                                             |
 | AC-78 | T-AC78-8                     | `tests/audit_chain_test.rs::startup_gate_aborts_on_tampered_chain` (exit 5) + `..::startup_gate_proceeds_under_relaxed_floor_with_allow_unsafe`                                                                    | CI startup-process test (same harness as AC-84)                                                    |
 | AC-78 | T-AC78-11                    | `tests/audit_chain_test.rs::verifier_does_not_mutate_events`                                                                                                                                                       | CI DB-test job                                                                                     |
 
