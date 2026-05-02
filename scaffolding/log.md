@@ -1,5 +1,17 @@
 # Open Pincery — Experiment Log
 
+## BUILD G3e — AC-78 audit-chain recovery runbook + CHANGELOG — 2026-05-02T03:55Z
+
+- **Gate**: PASS (post-build, attempt 1)
+- **Commit**: ac47c26
+- **Evidence**: CI run 25242016522 — 5/5 jobs green: rustfmt, clippy, cargo deny, cargo test, sandbox real-bwrap smoke. Pure docs commit; no Rust touched.
+- **Changes**:
+  - docs/runbooks/audit_chain_recovery.md (NEW, ~160 lines) — operator runbook for the exit-code-5 startup refusal: diagnostics via `pcy audit verify` and `pcy audit verify --agent <id>`, three labeled recovery paths (A: restore from backup using `docs/runbooks/db-restore.md`; B: forensic preservation via `pg_dump --table=events` then quarantine restart on a fresh DB; C: time-boxed override armed by `OPEN_PINCERY_AUDIT_CHAIN_FLOOR=relaxed` + `OPEN_PINCERY_ALLOW_UNSAFE=true`, both required), and post-recovery verification.
+  - CHANGELOG.md — Unreleased/Security entries documenting AC-78 G3a (migration + chain trigger w/ pg_advisory_xact_lock + length-prefixed canonical pre-image), G3b (verifier emitting audit_chain_verified/audit_chain_broken events, no mutation invariant), G3c (CLI exit code 2, HTTP /api/audit/chain/verify endpoints workspace-admin gated), G3d (startup gate exit code 5 + audit_chain_floor_relaxed override semantics).
+- **AC coverage**: completes the documentation/release-notes side of AC-78 G3 build order.
+- **Retries**: 1
+- **Next**: AC-78 close pipeline — REVIEW agent → RECONCILE agent → VERIFY agent → DELIVERY.md update → DEPLOY.
+
 ## BUILD G3d — AC-78 audit-chain startup gate — 2026-05-02T03:25Z
 
 - **Gate**: PASS (post-build, attempt 2)
