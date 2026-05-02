@@ -272,10 +272,10 @@ mismatch_action = KillProcess (Enforce) / Log (Audit), match_action
 - **T-AC77-6** A new event type `sandbox_syscall_denied` is
   registered in `src/models/event.rs` (or wherever event types
   live; reconcile during BUILD) with payload `{syscall_nr: i64,
-  syscall_name: Option<String>, tool_name: Option<String>,
-  agent_id: Option<Uuid>, wake_id: Option<Uuid>}`. Emission requires
+syscall_name: Option<String>, tool_name: Option<String>,
+agent_id: Option<Uuid>, wake_id: Option<Uuid>}`. Emission requires
   observing the SIGSYS — the parent sees `WIFSIGNALED && WTERMSIG ==
-  SIGSYS` from `wait_with_output` and writes the event before
+SIGSYS` from `wait_with_output` and writes the event before
   returning the `ExecResult`. The parent also reads
   `/proc/<pid>/status`'s `SigQ` or, more reliably, parses the
   audit netlink `AUDIT_SECCOMP` record (see
@@ -293,7 +293,7 @@ mismatch_action = KillProcess (Enforce) / Log (Audit), match_action
   via `landlock_restrict_self` which is on the allowlist;
   (b) Privesc-1..3 (setuid exec, `CAP_SYS_ADMIN`, user-ns
   elevation) tighten — `unshare(CLONE_NEWUSER)` and `clone(...,
-  CLONE_NEWUSER, ...)` now SIGSYS at the seccomp layer BEFORE
+CLONE_NEWUSER, ...)` now SIGSYS at the seccomp layer BEFORE
   reaching bwrap's `--disable-userns` EPERM (defense-in-depth, both
   signatures accepted); `setuid` of a real-root binary is already
   EPERM via cap-drop, unaffected; (c) Resource-1..3 (fork-bomb,
@@ -352,8 +352,8 @@ mismatch_action = KillProcess (Enforce) / Log (Audit), match_action
   `tests/event_log_test.rs` (or a new `seccomp_event_test.rs`)
   asserts the event type round-trips through the DB and lint
   catalog -> **runtime proof** CI's existing event-type lint job
-  + a sandbox-smoke run that triggers a SIGSYS and asserts the
-  corresponding event row appears in the test DB.
+  - a sandbox-smoke run that triggers a SIGSYS and asserts the
+    corresponding event row appears in the test DB.
 - **L-AC77-4** `AC-77` -> `src/runtime/sandbox/bwrap.rs`
   `RealSandbox::run` post-wait branch: detect SIGSYS exit, capture
   `syscall_nr` from audit netlink (or `None` fallback), call
@@ -378,14 +378,14 @@ mismatch_action = KillProcess (Enforce) / Log (Audit), match_action
 
 ## Acceptance Criteria Coverage (AC-77 slice)
 
-| AC    | Truth(s)            | Planned test                                                                                                                                                                                                                            | Planned runtime proof                                                                          |
-| ----- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| AC-77 | T-AC77-1, T-5, T-10 | `tests/seccomp_allowlist_test.rs::allowlist_program_uses_default_deny` (build the BpfProgram, decompile/inspect via seccompiler API or `bpfvm`-style golden, assert mismatch_action == KillProcess in Enforce, == Log in Audit)         | CI sandbox-smoke job logs program metadata at install                                          |
-| AC-77 | T-AC77-2, T-3       | `tests/seccomp_allowlist_test.rs::allowlist_covers_happy_path_workloads` (run each AC-76 happy-path command via `RealSandbox::run` under `SandboxMode::Enforce`; assert exit 0)                                                         | CI sandbox-smoke job: existing AC-76 happy-path baseline (currently green) remains green       |
-| AC-77 | T-AC77-3, T-4       | `tests/seccomp_allowlist_test.rs::allowlist_blocks_io_uring_setup` + `..._blocks_bpf` + `..._blocks_perf_event_open` + `..._blocks_user_ns_clone` (each payload SIGSYS-exits 159 with `bad system call` in stderr)                      | CI sandbox-smoke job: 4 new SIGSYS payloads green                                              |
-| AC-77 | T-AC77-6, T-4       | `tests/seccomp_allowlist_test.rs::sigsys_emits_sandbox_syscall_denied_event` (trigger denied syscall; assert `events` table row appears with `event_type = sandbox_syscall_denied` and `payload.syscall_nr` is the expected number)     | CI sandbox-smoke job: event row visible in test DB after run                                   |
-| AC-77 | T-AC77-7            | (existing, no edits) `tests/sandbox_escape_test.rs::*` 12-payload suite re-runs under the new allowlist                                                                                                                                 | CI run on the AC-77 PR shows all 12 G1a/b/c/d payloads remain blocked (no signature regression) |
-| AC-77 | T-AC77-8, T-9       | `tests/seccomp_allowlist_test.rs::audit_mode_logs_instead_of_killing` (negative-only assertion: run a disallowed syscall under `SandboxMode::Audit` and assert exit_code != SIGSYS_EXIT_CODE; the kernel-level Audit Log mismatch action is unit-tested by `seccomp.rs::build_program_audit_uses_log_on_mismatch` + `enforce_and_audit_programs_differ`. Event-row emission on SIGSYS is covered separately by `tests/sigsys_event_test.rs::sigsys_exit_emits_sandbox_syscall_denied_event` on the Enforce path) | CI sandbox-smoke job: audit-mode payload exits without SIGSYS                                  |
+| AC    | Truth(s)            | Planned test                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | Planned runtime proof                                                                           |
+| ----- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| AC-77 | T-AC77-1, T-5, T-10 | `tests/seccomp_allowlist_test.rs::allowlist_program_uses_default_deny` (build the BpfProgram, decompile/inspect via seccompiler API or `bpfvm`-style golden, assert mismatch_action == KillProcess in Enforce, == Log in Audit)                                                                                                                                                                                                                                                                                  | CI sandbox-smoke job logs program metadata at install                                           |
+| AC-77 | T-AC77-2, T-3       | `tests/seccomp_allowlist_test.rs::allowlist_covers_happy_path_workloads` (run each AC-76 happy-path command via `RealSandbox::run` under `SandboxMode::Enforce`; assert exit 0)                                                                                                                                                                                                                                                                                                                                  | CI sandbox-smoke job: existing AC-76 happy-path baseline (currently green) remains green        |
+| AC-77 | T-AC77-3, T-4       | `tests/seccomp_allowlist_test.rs::allowlist_blocks_io_uring_setup` + `..._blocks_bpf` + `..._blocks_perf_event_open` + `..._blocks_user_ns_clone` (each payload SIGSYS-exits 159 with `bad system call` in stderr)                                                                                                                                                                                                                                                                                               | CI sandbox-smoke job: 4 new SIGSYS payloads green                                               |
+| AC-77 | T-AC77-6, T-4       | `tests/seccomp_allowlist_test.rs::sigsys_emits_sandbox_syscall_denied_event` (trigger denied syscall; assert `events` table row appears with `event_type = sandbox_syscall_denied` and `payload.syscall_nr` is the expected number)                                                                                                                                                                                                                                                                              | CI sandbox-smoke job: event row visible in test DB after run                                    |
+| AC-77 | T-AC77-7            | (existing, no edits) `tests/sandbox_escape_test.rs::*` 12-payload suite re-runs under the new allowlist                                                                                                                                                                                                                                                                                                                                                                                                          | CI run on the AC-77 PR shows all 12 G1a/b/c/d payloads remain blocked (no signature regression) |
+| AC-77 | T-AC77-8, T-9       | `tests/seccomp_allowlist_test.rs::audit_mode_logs_instead_of_killing` (negative-only assertion: run a disallowed syscall under `SandboxMode::Audit` and assert exit_code != SIGSYS_EXIT_CODE; the kernel-level Audit Log mismatch action is unit-tested by `seccomp.rs::build_program_audit_uses_log_on_mismatch` + `enforce_and_audit_programs_differ`. Event-row emission on SIGSYS is covered separately by `tests/sigsys_event_test.rs::sigsys_exit_emits_sandbox_syscall_denied_event` on the Enforce path) | CI sandbox-smoke job: audit-mode payload exits without SIGSYS                                   |
 
 ## Scope Reduction Risks
 
@@ -705,13 +705,13 @@ meaning of `tests/audit_chain_test.rs`.
   EXTENSION pgcrypto; recursive-CTE backfill; SET NOT NULL on
   both columns; CREATE FUNCTION `events_chain_compute_hash()`;
   CREATE TRIGGER `events_chain_compute_hash_trigger BEFORE INSERT
-  ON events FOR EACH ROW EXECUTE FUNCTION events_chain_compute_hash()`)
+ON events FOR EACH ROW EXECUTE FUNCTION events_chain_compute_hash()`)
   -> **planned test**
   `tests/audit_chain_test.rs::genesis_event_uses_empty_prev_hash`
-  + `..::trigger_assigns_prev_hash_from_previous_event` -> **runtime
-  proof** the migration runs in CI as part of the existing sqlx
-  migrate step; the test inserts via `append_event` and reads
-  back the new columns via `SELECT prev_hash, entry_hash FROM events`.
+  - `..::trigger_assigns_prev_hash_from_previous_event` -> **runtime
+    proof** the migration runs in CI as part of the existing sqlx
+    migrate step; the test inserts via `append_event` and reads
+    back the new columns via `SELECT prev_hash, entry_hash FROM events`.
 - **L-AC78-2 (T-AC78-2, T-AC78-4)** AC-78 ->
   `src/background/audit_chain.rs` `verify_audit_chain(pool, agent_id) -> ChainStatus`
   walks the chain, recomputes the canonical pre-image in Rust
@@ -762,10 +762,10 @@ meaning of `tests/audit_chain_test.rs`.
   middleware (existing pattern from `src/api/credentials.rs` or
   similar admin routes) -> **planned test**
   `tests/api_test.rs::audit_chain_verify_returns_per_agent_status`
-  + `..::audit_chain_verify_rejects_non_admin` +
-  `..::audit_chain_verify_is_workspace_scoped` -> **runtime
-  proof** existing API integration harness runs against the test
-  Postgres.
+  - `..::audit_chain_verify_rejects_non_admin` +
+    `..::audit_chain_verify_is_workspace_scoped` -> **runtime
+    proof** existing API integration harness runs against the test
+    Postgres.
 - **L-AC78-7 (T-AC78-8)** AC-78 -> `src/main.rs` startup
   sequence inserts a call to a new
   `enforce_audit_chain_floor_at_startup(&pool)` after migrations
@@ -791,17 +791,17 @@ meaning of `tests/audit_chain_test.rs`.
 
 ## Acceptance Criteria Coverage (AC-78 slice)
 
-| AC    | Truth(s)                            | Planned test                                                                                                                                                                                                                          | Planned runtime proof                                                                                                |
-| ----- | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| AC-78 | T-AC78-1, T-AC78-2, T-AC78-9        | `tests/audit_chain_test.rs::genesis_event_uses_empty_prev_hash` + `..::trigger_assigns_prev_hash_from_previous_event` + migration backfill smoke (`tests/migrations_test.rs` or similar) on a seeded v8-shape dump                      | CI sqlx-migrate step runs migration; test asserts column shape and trigger output on real Postgres                   |
-| AC-78 | T-AC78-2                            | unit test `audit_chain::canonical_payload_matches_postgres_jsonb` (insert via trigger, recompute pre-image in Rust, byte-compare against `to_jsonb` output retrieved via a debug query)                                                | DB-backed test in CI                                                                                                  |
-| AC-78 | T-AC78-2, T-AC78-4                  | `tests/audit_chain_test.rs::happy_path_chain_verifies` (10k events) + `..::manual_update_breaks_chain` (`UPDATE` on `content`, expect `Broken { first_divergent_event_id }`)                                                              | CI DB-test job; tampered-row id == reported broken-event id                                                          |
-| AC-78 | T-AC78-3                            | `tests/audit_chain_test.rs::concurrent_inserts_preserve_chain` (8 tasks × 200 events for one agent; verify clean afterwards)                                                                                                            | CI DB-test job; if the row lock fails the test surfaces a `Broken` verdict                                           |
-| AC-78 | T-AC78-5, T-AC78-10                 | `tests/audit_chain_test.rs::verifier_emits_audit_chain_verified_event` + `..::verifier_emits_audit_chain_broken_event_with_correct_id` + event-type lint pass                                                                            | CI DB-test job + existing event-type lint job                                                                        |
-| AC-78 | T-AC78-6                            | `tests/cli_audit_test.rs::pcy_audit_verify_exits_nonzero_on_break` + `..::pcy_audit_verify_exits_zero_on_clean_chain`                                                                                                                    | CI CLI-e2e job                                                                                                        |
-| AC-78 | T-AC78-7                            | `tests/api_test.rs::audit_chain_verify_returns_per_agent_status` + `..::audit_chain_verify_rejects_non_admin` + `..::audit_chain_verify_is_workspace_scoped`                                                                              | CI API-integration job                                                                                                |
-| AC-78 | T-AC78-8                            | `tests/audit_chain_test.rs::startup_gate_aborts_on_tampered_chain` (exit 5) + `..::startup_gate_proceeds_under_relaxed_floor_with_allow_unsafe`                                                                                          | CI startup-process test (same harness as AC-84)                                                                      |
-| AC-78 | T-AC78-11                           | `tests/audit_chain_test.rs::verifier_does_not_mutate_events`                                                                                                                                                                            | CI DB-test job                                                                                                        |
+| AC    | Truth(s)                     | Planned test                                                                                                                                                                                                       | Planned runtime proof                                                                              |
+| ----- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| AC-78 | T-AC78-1, T-AC78-2, T-AC78-9 | `tests/audit_chain_test.rs::genesis_event_uses_empty_prev_hash` + `..::trigger_assigns_prev_hash_from_previous_event` + migration backfill smoke (`tests/migrations_test.rs` or similar) on a seeded v8-shape dump | CI sqlx-migrate step runs migration; test asserts column shape and trigger output on real Postgres |
+| AC-78 | T-AC78-2                     | unit test `audit_chain::canonical_payload_matches_postgres_jsonb` (insert via trigger, recompute pre-image in Rust, byte-compare against `to_jsonb` output retrieved via a debug query)                            | DB-backed test in CI                                                                               |
+| AC-78 | T-AC78-2, T-AC78-4           | `tests/audit_chain_test.rs::happy_path_chain_verifies` (10k events) + `..::manual_update_breaks_chain` (`UPDATE` on `content`, expect `Broken { first_divergent_event_id }`)                                       | CI DB-test job; tampered-row id == reported broken-event id                                        |
+| AC-78 | T-AC78-3                     | `tests/audit_chain_test.rs::concurrent_inserts_preserve_chain` (8 tasks × 200 events for one agent; verify clean afterwards)                                                                                       | CI DB-test job; if the row lock fails the test surfaces a `Broken` verdict                         |
+| AC-78 | T-AC78-5, T-AC78-10          | `tests/audit_chain_test.rs::verifier_emits_audit_chain_verified_event` + `..::verifier_emits_audit_chain_broken_event_with_correct_id` + event-type lint pass                                                      | CI DB-test job + existing event-type lint job                                                      |
+| AC-78 | T-AC78-6                     | `tests/cli_audit_test.rs::pcy_audit_verify_exits_nonzero_on_break` + `..::pcy_audit_verify_exits_zero_on_clean_chain`                                                                                              | CI CLI-e2e job                                                                                     |
+| AC-78 | T-AC78-7                     | `tests/api_test.rs::audit_chain_verify_returns_per_agent_status` + `..::audit_chain_verify_rejects_non_admin` + `..::audit_chain_verify_is_workspace_scoped`                                                       | CI API-integration job                                                                             |
+| AC-78 | T-AC78-8                     | `tests/audit_chain_test.rs::startup_gate_aborts_on_tampered_chain` (exit 5) + `..::startup_gate_proceeds_under_relaxed_floor_with_allow_unsafe`                                                                    | CI startup-process test (same harness as AC-84)                                                    |
+| AC-78 | T-AC78-11                    | `tests/audit_chain_test.rs::verifier_does_not_mutate_events`                                                                                                                                                       | CI DB-test job                                                                                     |
 
 ## Scope Reduction Risks
 
@@ -863,7 +863,7 @@ meaning of `tests/audit_chain_test.rs`.
   needed.
 - **R-AC78-4 — Relaxed-floor escape hatch becomes the default.**
   The `OPEN_PINCERY_AUDIT_CHAIN_FLOOR=relaxed +
-  OPEN_PINCERY_ALLOW_UNSAFE=true` pair (T-AC78-8) exists for
+OPEN_PINCERY_ALLOW_UNSAFE=true` pair (T-AC78-8) exists for
   operators recovering a tampered DB. The cheap path is to ship
   with relaxed semantics on by default in dev/test fixtures so
   developers don't trip over the startup gate. That would mean
@@ -960,8 +960,8 @@ any AC-78 truth. AC-78 is admitted to BUILD.
   changes. Verified by `cargo sqlx migrate run` against a fresh
   DB and against a v8-shape snapshot; unit test
   `tests/audit_chain_test.rs::genesis_event_uses_empty_prev_hash`
-  + `..::trigger_assigns_prev_hash_from_previous_event` pass at
-  the end of this slice.
+  - `..::trigger_assigns_prev_hash_from_previous_event` pass at
+    the end of this slice.
 - **G3b — Verifier + new event types.** Add
   `src/background/audit_chain.rs` with `ChainStatus`,
   `verify_audit_chain(pool, agent_id) -> ChainStatus`, and a

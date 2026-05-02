@@ -30,14 +30,14 @@ The fix is a small **`pincery-init` exec wrapper** that runs _inside_ the bwrap 
 
 ### 1.1 Defense layers (claimed in code comments)
 
-| #   | Layer                                             | Mechanism                                                            | Status                                     |
-| --- | ------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------ |
-| 1   | Mount/PID/IPC/UTS/cgroup namespace isolation      | `bwrap --unshare-{user,pid,ipc,uts,cgroup-try,net}`                  | ✅ implemented                             |
-| 2   | Resource quota                                    | cgroup v2 `pincery-<uuid>` (memory/pids/cpu) attached post-spawn     | ✅ implemented                             |
-| 3   | Syscall filtering                                 | seccomp-bpf **default-deny allowlist** (~58 syscalls + `clone` arg-filter) injected via `--seccomp <fd>` | ✅ RESOLVED by AC-77 (was denylist anti-pattern; see §3.1)
-| 4   | Path-based MAC                                    | Landlock V1 PathBeneath rules installed in parent `pre_exec`         | ❌ broken — see §2                         |
-| 5   | UID/GID/capability drop                           | not implemented                                                      | ❌ missing                                 |
-| 6   | L7 egress allowlist (slirp4netns + envoy/HAProxy) | not implemented                                                      | ❌ missing                                 |
+| #   | Layer                                             | Mechanism                                                                                                | Status                                                     |
+| --- | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| 1   | Mount/PID/IPC/UTS/cgroup namespace isolation      | `bwrap --unshare-{user,pid,ipc,uts,cgroup-try,net}`                                                      | ✅ implemented                                             |
+| 2   | Resource quota                                    | cgroup v2 `pincery-<uuid>` (memory/pids/cpu) attached post-spawn                                         | ✅ implemented                                             |
+| 3   | Syscall filtering                                 | seccomp-bpf **default-deny allowlist** (~58 syscalls + `clone` arg-filter) injected via `--seccomp <fd>` | ✅ RESOLVED by AC-77 (was denylist anti-pattern; see §3.1) |
+| 4   | Path-based MAC                                    | Landlock V1 PathBeneath rules installed in parent `pre_exec`                                             | ❌ broken — see §2                                         |
+| 5   | UID/GID/capability drop                           | not implemented                                                                                          | ❌ missing                                                 |
+| 6   | L7 egress allowlist (slirp4netns + envoy/HAProxy) | not implemented                                                                                          | ❌ missing                                                 |
 
 ### 1.2 Default profile (`src/runtime/sandbox/mod.rs`)
 

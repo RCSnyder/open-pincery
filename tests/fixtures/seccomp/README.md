@@ -24,15 +24,15 @@ allowlists.
 
 ## Capture provenance
 
-| field        | value                              |
-| ------------ | ---------------------------------- |
-| host         | Docker `ubuntu:24.04`              |
-| kernel       | `6.6.87.2-microsoft-standard-WSL2` |
-| glibc        | `Ubuntu GLIBC 2.39-0ubuntu8.7`     |
-| target arch  | `x86_64`                           |
-| capture date | 2026-04-30                         |
+| field        | value                               |
+| ------------ | ----------------------------------- |
+| host         | Docker `ubuntu:24.04`               |
+| kernel       | `6.6.87.2-microsoft-standard-WSL2`  |
+| glibc        | `Ubuntu GLIBC 2.39-0ubuntu8.7`      |
+| target arch  | `x86_64`                            |
+| capture date | 2026-04-30                          |
 | script       | `scripts/capture_seccomp_corpus.sh` |
-| commands     | 12 happy-path inputs (see script)  |
+| commands     | 12 happy-path inputs (see script)   |
 
 ## Update procedure
 
