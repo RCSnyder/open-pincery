@@ -82,6 +82,14 @@ BEGIN
         NEW.created_at := NOW();
     END IF;
 
+    -- Per-agent advisory lock serializes chain inserts so concurrent
+    -- transactions cannot both compute against the same prev (which
+    -- would happen at genesis or whenever MVCC hides an in-flight
+    -- INSERT from a peer). The lock is released at transaction end.
+    -- Class 44224 (0xACC0) namespaces this to the events chain;
+    -- hashtext maps the agent UUID into int4.
+    PERFORM pg_advisory_xact_lock(44224, hashtext(NEW.agent_id::text));
+
     -- Lock the most recent event for this agent so two concurrent
     -- inserts cannot both compute against the same prev. Returns NULL
     -- (genesis) if no prior event exists for this agent.

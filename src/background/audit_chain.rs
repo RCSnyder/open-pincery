@@ -254,12 +254,12 @@ pub async fn verify_and_emit(pool: &PgPool, agent_id: Uuid) -> Result<ChainStatu
                 agent_id,
                 EVENT_AUDIT_CHAIN_VERIFIED,
                 VERIFIER_EVENT_SOURCE,
-                None,
-                None,
-                None,
-                Some(&payload.to_string()),
-                None,
-                None,
+                None,                       // wake_id
+                None,                       // tool_name
+                None,                       // tool_input
+                None,                       // tool_output
+                Some(&payload.to_string()), // content
+                None,                       // termination_reason
             )
             .await?;
         }
@@ -281,12 +281,12 @@ pub async fn verify_and_emit(pool: &PgPool, agent_id: Uuid) -> Result<ChainStatu
                 agent_id,
                 EVENT_AUDIT_CHAIN_BROKEN,
                 VERIFIER_EVENT_SOURCE,
-                None,
-                None,
-                None,
-                Some(&payload.to_string()),
-                None,
-                None,
+                None,                       // wake_id
+                None,                       // tool_name
+                None,                       // tool_input
+                None,                       // tool_output
+                Some(&payload.to_string()), // content
+                None,                       // termination_reason
             )
             .await?;
         }
