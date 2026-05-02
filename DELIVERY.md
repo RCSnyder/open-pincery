@@ -135,6 +135,30 @@ v8 was originally scoped as a 9-AC unified-surface rework (OpenAPI generator, no
 - AC-50: Signed installer script (`curl ... | sh`) with cosign verification and `pcy --version` self-check.
 - AC-52a: OpenAPI schema-layer naming lint (`tests/api_naming_test.rs`) — plural collections, `{id}` params, summary length.
 
+## v9 Changes (in progress) — Phase G Security Hardening
+
+This wave adds the seven P0 acceptance criteria identified by the v9 TLA+ + security audit (AC-76..AC-82). v9.0 ships when AC-76 + AC-77 + AC-78 + AC-79 + AC-80 + AC-81 + AC-82 are all closed. The list below tracks the slices already on `main`/PR #4.
+
+- **AC-76**: 12-payload sandbox-escape suite (filesystem 4 + privesc 3 + resource 3 + net 3) running live on every CI run via the privileged `sandbox real-bwrap smoke` job. Memory-cap probe ships an explicit Enforced/NotEnforced/Skipped tri-state with kernel evidence; `enforce_memory_cap_at_startup` refuses boot (exit 4) when the running kernel does not enforce `memory.max`, unless `OPEN_PINCERY_ALLOW_UNSAFE=true` arms the relaxed path. AC-76 closed at 9db7525 + 75a7760.
+- **AC-77**: Default-deny seccomp **allowlist** replacing the pre-v9 denylist. Captured-corpus + escape-primitive negative control + size floor/ceiling + `SYS_clone` namespace-lockout arg filter + `sandbox_syscall_denied` event on SIGSYS (exit 159) + integration tests. Closed at a546c8d after iterative kernel-audit-driven syscall capture (final allowlist = 75 syscalls).
+- **AC-78** (this commit): **Per-agent SHA-256 event-log hash chain** with tamper detection.
+  - Migration `20260501000001_add_event_hash_chain.sql` adds `prev_hash` / `entry_hash` columns and a `BEFORE INSERT` PL/pgSQL trigger that, under `pg_advisory_xact_lock` plus `SELECT ... FOR UPDATE`, computes `entry_hash = sha256(prev || canonical_payload || created_at)`. Pre-image is **length-prefixed** (`u32 BE len + UTF-8 bytes` per text field, then `int4be(8) || int8be(micros)`) so adjacent fields cannot be ambiguously concatenated. Trigger also strict-monotonic-bumps `created_at` when a microsecond tie would let a subsequent walker disagree with the trigger about which sibling was prior. One-transaction migration: ADD → backfill → SET NOT NULL → CREATE TRIGGER.
+  - Verifier (`src/background/audit_chain.rs`): `verify_audit_chain(pool, agent_id) -> ChainStatus::{Verified, Broken{first_divergent_event_id, events_walked}}` walks every event for an agent in `(created_at, id)` order, recomputes the canonical pre-image in Rust byte-for-byte, and returns the first divergence. `verify_workspace` runs the walker for every agent under a workspace; `verify_and_emit` writes one `audit_chain_verified` or `audit_chain_broken` event per agent (source `runtime`, payload includes `first_divergent_event_id` on break). Verifier never mutates the existing rows.
+  - CLI: `pcy audit verify [--agent <uuid>] [--workspace <id>]` returns exit code **2** (`EXIT_CODE_CHAIN_BROKEN`) when any agent's chain is broken, exit 0 when all clean. Pretty stderr summary + raw JSON on stdout.
+  - HTTP: `POST /api/audit/chain/verify` and `POST /api/audit/chain/verify/agents/{id}` — both **workspace-admin gated** via `credential::is_workspace_admin`; admin gate runs before agent lookup so unauthorized callers get 403 (not 404 leak). Per-agent route uses `scoped_agent` for cross-workspace isolation.
+  - Startup gate: `enforce_audit_chain_floor_at_startup` runs after migrations and before listener bind; iterates every workspace, walks every agent, and on broken chain calls `std::process::exit(5)` (`EXIT_CODE_AUDIT_CHAIN_BROKEN`). Override armed only by **both** `OPEN_PINCERY_AUDIT_CHAIN_FLOOR=relaxed` **and** `OPEN_PINCERY_ALLOW_UNSAFE=true`; under override, boot proceeds and one `audit_chain_floor_relaxed` event is emitted per broken agent so the audit log retains evidence.
+  - Operator runbook: [`docs/runbooks/audit_chain_recovery.md`](docs/runbooks/audit_chain_recovery.md) — three labeled recovery paths (A: restore from backup, B: forensic preservation via `pg_dump --table=events` + quarantine restart, C: time-boxed override).
+  - Tests: 13 in `tests/audit_chain_test.rs` (genesis/per-agent isolation/NOT-NULL/concurrent inserts/manual-update detection/verifier emits/verifier no-mutate/startup gate Err(5)+override Ok), 4 in `tests/audit_api_test.rs` (200 happy / 200 broken-after-tamper / 404 cross-workspace / **403 non-admin on both routes**), 2 in `tests/cli_audit_verify_test.rs` (`pcy audit verify` exit 0 clean / exit 2 tampered).
+  - All 6 BUILD slice CI runs (G3a..G3e + REVIEW-fix) green: 25239486359, 25241087887, 25241550477, 25241912717, 25242016522, 25242261543.
+
+### v9 Operator Impact (so far)
+
+- **New env var (optional)**: `OPEN_PINCERY_AUDIT_CHAIN_FLOOR` accepts `strict` (default) or `relaxed`. Pair with `OPEN_PINCERY_ALLOW_UNSAFE=true` to allow boot when an existing chain is detected broken (e.g. during forensic recovery). Documented in `.env.example`.
+- **New exit codes**: 4 = sandbox memory-cap floor unenforced (AC-76 G1c.x.2); 5 = audit chain broken at startup (AC-78 G3d). Operators should treat both as boot refusals — see the runbook for triage.
+- **New CLI verb**: `pcy audit verify` for ad-hoc chain audits (admin-only).
+- **New event types**: `audit_chain_verified`, `audit_chain_broken`, `audit_chain_floor_relaxed`, `sandbox_syscall_denied`, `sandbox_memory_cap_*`. All emitted with source `runtime` and queryable via the existing event API.
+- **No reasoner-side change**: AC-78 trigger fills `prev_hash`/`entry_hash` server-side; existing `event::append_event` callers are unchanged. AC-77 seccomp allowlist may surface SIGSYS for syscalls not in the default-deny set — capture via `tests/fixtures/seccomp/capture_seccomp_corpus.sh` and append to `additions.txt` with kernel evidence.
+
 ## Known Limitations
 
 - **Host-level sandbox only**: v6 ships env-clear + tempdir + 30s timeout + sudo-token rejection via `ProcessExecutor`. This is defense-in-depth, not isolation — a process running as the `pcy` user can still read any file that user can read. True container-level isolation (Zerobox) is on the roadmap.
