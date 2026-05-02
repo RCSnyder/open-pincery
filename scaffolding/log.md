@@ -2096,3 +2096,18 @@
 - **Spec-violating drift**: none. AC-\* IDs and acceptance meanings unchanged; allowlist size 75 remains within the documented `40..=120` bounds; no integrations added/removed; ESCAPE_PRIMITIVES intact (incl. fanotify_init/fanotify_mark added during prior G2 work, already covered by 100e24c reconcile).
 - **Confidence**: REPAIRED.
 - **Next**: VERIFY agent re-runs full AC-77 evidence pass against commit chain 047d148 → 0fca3e7 → 4d4fff9.
+
+## BUILD G3a — AC-78 event-log hash chain — 2026-05-01T19:48Z
+
+- **Gate**: PASS (post-build, attempt 1)
+- **Commit**: bf9c6b5 (G3a code at 36cabd6, CRLF norm at bf9c6b5)
+- **Evidence**: CI run 25239486359 — 5/5 jobs green: rustfmt, clippy, cargo deny, cargo test (sqlx live Postgres 16), sandbox real-bwrap smoke
+- **Changes**:
+  - migrations/20260501000001_add_event_hash_chain.sql (176 lines) — per-agent SHA-256 chain via BEFORE INSERT trigger (pgcrypto); length-prefixed canonical pre-image (u32 BE len + UTF-8 bytes per field, int4be(8)+int8be micros for created_at); FOR UPDATE on prior agent event; recursive backfill; SET NOT NULL after backfill
+  - src/background/audit_chain.rs (167 lines) — Rust canonical_payload byte-identical to SQL; compute_entry_hash with lowercase hex sha256; 5 unit tests covering length prefix, determinism, BE micros tail, genesis hash reference
+  - src/background/mod.rs — exposes audit_chain
+  - tests/audit_chain_test.rs (255 lines) — 4 #[tokio::test]: genesis_event_uses_empty_prev_hash (T-AC78-1, Rust-recomputed hash matches trigger), trigger_assigns_prev_hash_from_previous_event (T-AC78-2), chain_is_per_agent, hash_columns_are_not_null (T-AC78-9)
+  - src/models/event.rs UNCHANGED — T-AC78-10 invariant: trigger fills prev_hash/entry_hash automatically on INSERT
+- **AC coverage**: T-AC78-1, T-AC78-2, T-AC78-9, partial T-AC78-10
+- **Retries**: 1
+- **Next**: G3b — verify_audit_chain(pool, agent_id) walker → ChainStatus::{Verified, Broken { first_divergent_event_id }}; workspace verifier loop; emit audit_chain_verified/audit_chain_broken events; tests T-AC78-3/4/5/10/11
