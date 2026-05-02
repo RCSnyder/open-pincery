@@ -1,5 +1,20 @@
 # Open Pincery — Experiment Log
 
+## BUILD G3d — AC-78 audit-chain startup gate — 2026-05-02T03:25Z
+
+- **Gate**: PASS (post-build, attempt 2)
+- **Commit chain**: f96c2e3 (initial G3d) → 6bb5658 (fix: add OPEN_PINCERY_AUDIT_CHAIN_FLOOR to .env.example for AC-29)
+- **Evidence**: CI run 25241912717 — 5/5 jobs green: rustfmt, clippy, cargo deny, cargo test (incl. 3 new evaluate_startup_gate unit tests + 2 DB-backed integration tests `startup_gate_aborts_on_tampered_chain`, `startup_gate_proceeds_under_relaxed_floor_with_allow_unsafe`), sandbox real-bwrap smoke. Local `cargo build --tests` + `cargo clippy --all-targets -- -D warnings` clean on rust:1.95.
+- **Changes**:
+  - src/background/audit_chain.rs — adds `EVENT_AUDIT_CHAIN_FLOOR_RELAXED`, `EXIT_CODE_AUDIT_CHAIN_BROKEN=5` (distinct from AC-84 sandbox-floor exit 4 and CLI exit 2), `StartupGateDecision { Verified | AcknowledgedUnsafe | Refuse }`, pure `evaluate_startup_gate(per_workspace, relaxed, allow_unsafe)` decision seam, `enforce_audit_chain_floor_at_startup(pool, relaxed, allow_unsafe)` which iterates every workspace, walks each agent chain via `verify_workspace`, dispatches via the seam, and on `AcknowledgedUnsafe` emits one `EVENT_AUDIT_CHAIN_FLOOR_RELAXED` event per broken agent so the audit log retains evidence even when boot proceeds.
+  - src/main.rs — reads `OPEN_PINCERY_AUDIT_CHAIN_FLOOR` (relaxed/strict, default strict) + `OPEN_PINCERY_ALLOW_UNSAFE` (true/false) after migrations + before listener bind; calls the gate; `std::process::exit(code)` on Err. OS-agnostic (unlike kernel/memory floors which are Linux-only).
+  - tests/audit_chain_test.rs — 3 unit tests on the pure seam (no-break → Verified, break-without-overrides (3 combinations) → Refuse, break-with-both-overrides → AcknowledgedUnsafe) + 2 DB integration tests using `fresh_agent` helper, sqlx UPDATE to bypass BEFORE INSERT trigger and stale `prev_hash`/`entry_hash`, then assert (false,false) → `Err(5)` and (true,true) → `Ok(())` plus exactly one `audit_chain_floor_relaxed` event row.
+  - .env.example — documents `OPEN_PINCERY_AUDIT_CHAIN_FLOOR=strict|relaxed` block alongside existing AC-84 sandbox floor.
+- **Verify-fix-1 (6bb5658)**: AC-29 env-example test caught the new env var; one-line .env.example doc addition; no production code change.
+- **AC coverage**: T-AC78-8 (startup gate refuses on tampered chain unless overridden)
+- **Retries**: 2
+- **Next**: G3e — `docs/runbooks/audit_chain_recovery.md` (operator runbook for exit 5), CHANGELOG.md Unreleased/Security entry covering AC-78 G3a..G3e, event-type registry update if applicable. Then AC-78 close: REVIEW → RECONCILE → VERIFY → DELIVERY.md → DEPLOY.
+
 ## BUILD G3c — AC-78 pcy audit verify CLI + POST /api/audit/chain/verify — 2026-05-02T02:35Z
 
 - **Gate**: PASS (post-build, attempt 2)
