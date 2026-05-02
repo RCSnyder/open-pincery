@@ -146,6 +146,81 @@ async fn audit_chain_verify_agent_404s_for_other_workspace() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+/// T-AC78-7: a non-admin workspace member cannot reach the audit-chain
+/// verify endpoints. Both routes go through `require_admin` →
+/// `credential::is_workspace_admin`, so any role outside
+/// {owner, workspace_owner, admin, workspace_admin} must be rejected
+/// with 403.
+#[tokio::test]
+async fn audit_chain_verify_rejects_non_admin() {
+    use open_pincery::auth::{generate_token, hash_token};
+    use open_pincery::models::{user, workspace};
+
+    let pool = common::test_pool().await;
+    let state = AppState::new(pool.clone(), test_config());
+    let app = api::router(state);
+
+    // Bootstrap creates the local-admin user + their workspace; we keep
+    // a token but do not use it — we want a *different* member calling
+    // the endpoint.
+    let _admin_token = bootstrap_and_login(&app).await;
+    let admin = user::find_local_admin(&pool).await.unwrap().unwrap();
+    let ws = workspace::find_workspace_for_user(&pool, admin.id)
+        .await
+        .unwrap()
+        .expect("bootstrap must have created a workspace");
+
+    // Insert a second user (the local_admin helper would collide on
+    // UNIQUE(auth_provider, auth_subject) so we go direct).
+    let member_id: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO users (email, display_name, auth_provider, auth_subject)
+         VALUES ($1, $2, 'local_admin', 'member-not-admin')
+         RETURNING id",
+    )
+    .bind("member@test.local")
+    .bind("Plain Member")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    workspace::add_workspace_membership(&pool, ws.id, member_id.0, "member")
+        .await
+        .unwrap();
+
+    let raw_token = generate_token();
+    user::create_session(&pool, member_id.0, &hash_token(&raw_token), "local_admin")
+        .await
+        .unwrap();
+
+    // Workspace-wide route -> 403.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/audit/chain/verify")
+        .header(header::AUTHORIZATION, format!("Bearer {raw_token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "non-admin must be 403 on workspace verify"
+    );
+
+    // Per-agent route -> 403 (admin gate runs before agent lookup).
+    let any_agent = uuid::Uuid::new_v4();
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/audit/chain/verify/agents/{any_agent}"))
+        .header(header::AUTHORIZATION, format!("Bearer {raw_token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "non-admin must be 403 on per-agent verify, not leak 404"
+    );
+}
+
 // --- helpers ---------------------------------------------------------------
 
 async fn bootstrap_and_login(app: &axum::Router) -> String {
