@@ -1,5 +1,13 @@
 # Open Pincery — Experiment Log
 
+## ANALYZE G4 — AC-79 Prompt-Injection Defense Floor admission — 2026-05-02T05:05Z
+
+- **Gate**: PASS (post-analyze, attempt 1)
+- **Evidence**: scaffolding/readiness.md addendum appended at line 2544 (~600 lines) with Verdict `READY`. T-AC79-1..13 pin delimiter format (16-byte hex per-wake nonce), `is_untrusted` predicate (exhaustive over `events.event_type`), v3 `wake_system_prompt` migration `20260501000002_add_prompt_injection_floor.sql` as strict superset of v2, schema validation via new dep `jsonschema = "0.28"` with `N=3` retry cap (`Config::schema_invalid_retry_cap`) → `FailureAuditPending`, per-wake 16-byte hex canary scanned across `content` + every `tc.function.{name,arguments,id}`, four new event types all `source = "runtime"` (`model_response_schema_invalid`, `prompt_injection_suspected`, `prompt_injection_canary_emitted`, `tool_call_rate_limit_exceeded`), per-wake 32-call rate limit (`Config::tool_call_rate_limit_per_wake`, distinct from existing `iteration_cap=50`; schema-invalid retries do NOT increment), `event::append_event` invariant preserved (T-AC78-10), nonce + canary minted at top of `run_wake_loop` and held only on stack — never persisted.
+- **Build Order**: G4a (template v3 migration + delimiter wrapping in `assemble_prompt`) → G4b (mint nonce/canary in `run_wake_loop` + thread through prompt) → G4c (canary scan + `prompt_injection_suspected` + wake termination) → G4d (jsonschema validation + retry + `model_response_schema_invalid` + `FailureAuditPending`) → G4e (per-wake 32-call rate limit + `tests/prompt_injection_test.rs` adversarial test + CHANGELOG).
+- **Clarifications resolved**: 6 bounded items — `N=3` retry cap, four event-type names pinned, `jsonschema = "0.28"` as sole new dep, v3 prompt template lifecycle (deactivate v2, insert v3, single transaction matching AC-42 pattern), nonce/canary mint location (top of run_wake_loop), v9-future-surface coverage (predicate is exhaustive even though only 2/4 untrusted classes have live data sources today).
+- **Next**: BUILD G4a — template v3 migration + delimiter wrapping in `assemble_prompt` with fixed-nonce/canary unit tests; defer wake-loop wiring to G4b.
+
 ## RECONCILE v9 — AC-78 post-BUILD/REVIEW 7-axis drift sweep — 2026-05-02T05:00Z
 
 - **Trigger**: standard reconcile pass after AC-78 BUILD + REVIEW (NOW PASS) on `v6-01_implementation` HEAD `6d52b2d`. Range covered: G3 admission (`1743aa7`, `985731d`) through G3a..G3e + review-fix (`36cabd6..b412025`).
