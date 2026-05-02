@@ -1,5 +1,19 @@
 # Open Pincery — Experiment Log
 
+## REVIEW-FIX G3-review — AC-78 address REVIEW Required findings — 2026-05-02T04:25Z
+
+- **Gate**: PASS (post-build, attempt 1)
+- **Commit**: b412025
+- **Evidence**: CI run 25242261543 — 5/5 jobs green: rustfmt, clippy, cargo deny, cargo test (added `audit_chain_verify_rejects_non_admin` + `pcy_audit_verify_exits_zero_on_clean_chain` + `pcy_audit_verify_exits_nonzero_on_break`), sandbox real-bwrap smoke. Local rust:1.95 build + clippy --all-targets -- -D warnings clean.
+- **REVIEW (NEEDS-FIXES) findings addressed**:
+  1. CHANGELOG drift: claimed verifier `source = "audit_chain_verifier"`, code emits `source = "runtime"`. CHANGELOG.md updated to match `VERIFIER_EVENT_SOURCE = "runtime"` and clarify event distinction is via `event_type` (`audit_chain_verified` / `audit_chain_broken`).
+  2. T-AC78-7 admin-gating test missing: `tests/audit_api_test.rs` only exercised admin callers via bootstrap. Added `audit_chain_verify_rejects_non_admin` — inserts a non-admin workspace member directly (UNIQUE(auth_provider,auth_subject) precludes second `create_local_admin` so we INSERT with `auth_subject='member-not-admin'`), mints a session via `auth::generate_token` + `hash_token` + `user::create_session`, asserts both `/api/audit/chain/verify` and `/api/audit/chain/verify/agents/{id}` return `StatusCode::FORBIDDEN` (admin gate runs before agent lookup, so no 404 leak).
+  3. T-AC78-6 CLI exit-code test missing: readiness named `pcy_audit_verify_exits_zero_on_clean_chain` + `..._exits_nonzero_on_break` but neither shipped. NEW file `tests/cli_audit_verify_test.rs` boots the in-process API + drives the `CARGO_BIN_EXE_pcy` binary: clean chain → exit 0; tamper via direct UPDATE bypassing BEFORE INSERT trigger → exit 2 (matches `EXIT_CODE_CHAIN_BROKEN`).
+- **Changes**: CHANGELOG.md (1-line source value fix), tests/audit_api_test.rs (+~85 lines new test), tests/cli_audit_verify_test.rs (NEW, ~210 lines).
+- **AC coverage**: closes runtime-evidence gap on T-AC78-6 and T-AC78-7 readiness truths.
+- **Retries**: 1
+- **Next**: re-dispatch REVIEW → RECONCILE → VERIFY → DELIVERY.md → DEPLOY.
+
 ## BUILD G3e — AC-78 audit-chain recovery runbook + CHANGELOG — 2026-05-02T03:55Z
 
 - **Gate**: PASS (post-build, attempt 1)
