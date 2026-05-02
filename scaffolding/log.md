@@ -2111,3 +2111,24 @@
 - **AC coverage**: T-AC78-1, T-AC78-2, T-AC78-9, partial T-AC78-10
 - **Retries**: 1
 - **Next**: G3b — verify_audit_chain(pool, agent_id) walker → ChainStatus::{Verified, Broken { first_divergent_event_id }}; workspace verifier loop; emit audit_chain_verified/audit_chain_broken events; tests T-AC78-3/4/5/10/11
+
+## BUILD G3b — AC-78 verifier walker + workspace pass + audit-chain events — 2026-05-02T02:30Z
+
+- **Gate**: PASS (post-build, attempt 3)
+- **Commit chain**: c7b2f1a (initial G3b code) → 2ed942b (verify-fix-1: advisory lock + payload arg-order) → b961955 (verify-fix-2: monotonic created_at)
+- **Evidence**: CI run 25241087887 — 5/5 jobs green: rustfmt, clippy, cargo deny, cargo test (11/11 audit_chain_test cases pass), sandbox real-bwrap smoke
+- **Changes (cumulative G3b)**:
+  - src/background/audit_chain.rs (~340 lines, +173 over G3a) — `pub enum ChainStatus { Verified { events_in_chain, last_entry_hash }, Broken { first_divergent_event_id, expected_hash, actual_hash, events_walked } }`; `verify_audit_chain(pool, agent_id)` walks events ORDER BY created_at ASC, id ASC, checks both prev_hash drift and entry_hash recompute mismatch; `verify_and_emit(pool, agent_id)` appends one `audit_chain_verified` or `audit_chain_broken` event; `verify_workspace(pool, workspace_id) -> Vec<AgentChainResult>`; constants `EVENT_AUDIT_CHAIN_VERIFIED`, `EVENT_AUDIT_CHAIN_BROKEN`, `VERIFIER_EVENT_SOURCE = "runtime"`
+  - tests/audit_chain_test.rs (~603 lines, +348 over G3a) — 7 new #[tokio::test]: happy_path_chain_verifies (T-AC78-3), manual_update_breaks_chain (T-AC78-4), concurrent_inserts_preserve_chain (T-AC78-3 stress, 8 tasks × 50 inserts), verifier_emits_audit_chain_verified_event (T-AC78-5), verifier_emits_audit_chain_broken_event_with_correct_id (T-AC78-5), verifier_does_not_mutate_events (T-AC78-11), verify_workspace_returns_one_result_per_agent
+  - migrations/20260501000001_add_event_hash_chain.sql (+19 lines): pg_advisory_xact_lock(44224, hashtext(agent_id::text)) at top of trigger to serialize per-agent inserts; strict-monotonic created_at bump (+1us if NEW.created_at <= prior.created_at) so trigger-DESC and walker-ASC orderings agree under microsecond ties
+  - src/models/event.rs UNCHANGED (T-AC78-10 invariant preserved)
+- **Verify-fix-1 (2ed942b)**:
+  - Bug A: `FOR UPDATE` only locks rows that exist; concurrent inserts at genesis or under MVCC isolation each see no/stale prev → divergent chains. Fix: per-agent advisory xact lock.
+  - Bug B: `verify_and_emit` passed JSON payload as 8th positional arg to `event::append_event` (tool_output) instead of 9th (content). Verified test passed previously only because it didn't read content; broken test asserted on content and unwrapped None.
+  - Result: CI 25240902412 — 1 failure remained (concurrent_inserts_preserve_chain).
+- **Verify-fix-2 (b961955)**:
+  - Bug C: timestamptz microsecond ties under fast inserts. Trigger picks prior by (created_at DESC, id DESC); walker visits by (created_at ASC, id ASC). With same created_at, trigger picks higher-id sibling as prior while walker visits lower-id one first — internally consistent hashes, but verifier reports broken. Fix: bump NEW.created_at to prior_created + 1us when tied, guaranteeing strict per-agent monotonicity.
+  - Result: CI 25241087887 5/5 green.
+- **AC coverage**: T-AC78-3, T-AC78-4, T-AC78-5, T-AC78-10 (full), T-AC78-11
+- **Retries**: 3
+- **Next**: G3c — pcy audit verify CLI (src/cli/audit.rs) + POST /api/audit/chain/verify (src/api/audit.rs, workspace-admin gated). Then G3d (startup verify hook, exit 5 on broken, OPEN_PINCERY_AUDIT_CHAIN_FLOOR escape hatch), G3e (docs + event-type lint + .env.example), then AC-78 close via REVIEW → RECONCILE → VERIFY.
