@@ -45,6 +45,31 @@ async fn main() {
 
     info!("Migrations complete");
 
+    // AC-78 G3d: refuse to boot the listener if any agent's audit
+    // chain is broken. Override is `OPEN_PINCERY_AUDIT_CHAIN_FLOOR=relaxed`
+    // + `OPEN_PINCERY_ALLOW_UNSAFE=true` (same shape as the
+    // sandbox-floor pattern). Reads env directly here rather than
+    // threading two new fields through `Config` — these are
+    // emergency-only toggles.
+    {
+        let relaxed = std::env::var("OPEN_PINCERY_AUDIT_CHAIN_FLOOR")
+            .map(|v| v.trim().eq_ignore_ascii_case("relaxed"))
+            .unwrap_or(false);
+        let allow_unsafe = std::env::var("OPEN_PINCERY_ALLOW_UNSAFE")
+            .map(|v| v.trim().eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if let Err(code) =
+            open_pincery::background::audit_chain::enforce_audit_chain_floor_at_startup(
+                &pool,
+                relaxed,
+                allow_unsafe,
+            )
+            .await
+        {
+            std::process::exit(code);
+        }
+    }
+
     // AC-23: pricing used to compute `cost_usd` for every recorded LLM call.
     // Defaults chosen for a reasonable Claude-Sonnet-class model; operators
     // override per-model via env.

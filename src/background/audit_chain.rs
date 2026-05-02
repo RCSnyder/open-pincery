@@ -326,6 +326,193 @@ pub async fn verify_workspace(
     Ok(out)
 }
 
+/// Event type emitted when the operator opts into running with a
+/// known-broken audit chain at startup. Pairs with
+/// `OPEN_PINCERY_AUDIT_CHAIN_FLOOR=relaxed` + `OPEN_PINCERY_ALLOW_UNSAFE=true`.
+pub const EVENT_AUDIT_CHAIN_FLOOR_RELAXED: &str = "audit_chain_floor_relaxed";
+
+/// Process exit code used by the startup gate when it refuses to
+/// boot because at least one workspace's audit chain is broken.
+///
+/// Distinct from:
+/// - 4 (AC-84 sandbox kernel-floor refusal — `enforce_kernel_floor_at_startup`)
+/// - 159 (in-band SIGSYS translation in tool execution)
+/// - 2 (CLI `pcy audit verify` `EXIT_CODE_CHAIN_BROKEN`)
+pub const EXIT_CODE_AUDIT_CHAIN_BROKEN: i32 = 5;
+
+/// Outcome of [`enforce_audit_chain_floor_at_startup`] decoupled from
+/// process exit so unit tests can assert on the decision separately
+/// from `std::process::exit`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupGateDecision {
+    /// Every workspace verified clean.
+    Verified {
+        workspaces_walked: u64,
+        agents_walked: u64,
+    },
+    /// At least one workspace had a broken chain, but the operator
+    /// opted in via `OPEN_PINCERY_AUDIT_CHAIN_FLOOR=relaxed` +
+    /// `OPEN_PINCERY_ALLOW_UNSAFE=true`. Boot proceeds and the
+    /// runtime emits `audit_chain_floor_relaxed`.
+    AcknowledgedUnsafe { broken_agent_ids: Vec<Uuid> },
+    /// At least one workspace had a broken chain and the override is
+    /// not armed. Boot must refuse with [`EXIT_CODE_AUDIT_CHAIN_BROKEN`].
+    Refuse { broken_agent_ids: Vec<Uuid> },
+}
+
+/// Pure decision function: takes the verifier output across all
+/// workspaces plus the override flags and returns what the gate
+/// should do. Test seam.
+pub fn evaluate_startup_gate(
+    per_workspace: &[(Uuid, Vec<AgentChainResult>)],
+    relaxed: bool,
+    allow_unsafe: bool,
+) -> StartupGateDecision {
+    let mut broken: Vec<Uuid> = Vec::new();
+    let mut workspaces_walked: u64 = 0;
+    let mut agents_walked: u64 = 0;
+    for (_ws, agents) in per_workspace {
+        workspaces_walked += 1;
+        for r in agents {
+            agents_walked += 1;
+            if matches!(r.status, ChainStatus::Broken { .. }) {
+                broken.push(r.agent_id);
+            }
+        }
+    }
+    if broken.is_empty() {
+        return StartupGateDecision::Verified {
+            workspaces_walked,
+            agents_walked,
+        };
+    }
+    if relaxed && allow_unsafe {
+        StartupGateDecision::AcknowledgedUnsafe {
+            broken_agent_ids: broken,
+        }
+    } else {
+        StartupGateDecision::Refuse {
+            broken_agent_ids: broken,
+        }
+    }
+}
+
+/// Verify every workspace's audit chain at boot. Refuses to start the
+/// listener if any chain is broken unless both
+/// `OPEN_PINCERY_AUDIT_CHAIN_FLOOR=relaxed` and
+/// `OPEN_PINCERY_ALLOW_UNSAFE=true` are set.
+///
+/// Returns `Err(EXIT_CODE_AUDIT_CHAIN_BROKEN)` when the gate refuses,
+/// otherwise `Ok(())`. Caller (typically `main.rs`) calls
+/// `std::process::exit(code)` on `Err`.
+///
+/// Per-workspace `verify_and_emit` is reused, so the act of running
+/// the gate also extends each agent's chain with one
+/// `audit_chain_verified` or `audit_chain_broken` event — the same
+/// guarantee the CLI and HTTP surfaces give.
+pub async fn enforce_audit_chain_floor_at_startup(
+    pool: &PgPool,
+    relaxed: bool,
+    allow_unsafe: bool,
+) -> Result<(), i32> {
+    let workspaces: Vec<(Uuid,)> = match sqlx::query_as("SELECT id FROM workspaces ORDER BY id ASC")
+        .fetch_all(pool)
+        .await
+    {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::error!(
+                event = "audit_chain_startup_query_failed",
+                error = %e,
+                "Failed to enumerate workspaces for audit-chain startup gate"
+            );
+            return Err(EXIT_CODE_AUDIT_CHAIN_BROKEN);
+        }
+    };
+
+    let mut per_workspace: Vec<(Uuid, Vec<AgentChainResult>)> =
+        Vec::with_capacity(workspaces.len());
+    for (ws,) in workspaces {
+        match verify_workspace(pool, ws).await {
+            Ok(results) => per_workspace.push((ws, results)),
+            Err(e) => {
+                tracing::error!(
+                    event = "audit_chain_startup_verify_failed",
+                    workspace_id = %ws,
+                    error = %e,
+                    "Audit-chain verifier raised an error mid-walk; refusing to boot"
+                );
+                return Err(EXIT_CODE_AUDIT_CHAIN_BROKEN);
+            }
+        }
+    }
+
+    match evaluate_startup_gate(&per_workspace, relaxed, allow_unsafe) {
+        StartupGateDecision::Verified {
+            workspaces_walked,
+            agents_walked,
+        } => {
+            tracing::info!(
+                event = "audit_chain_startup_verified",
+                workspaces_walked,
+                agents_walked,
+                "Audit-chain startup gate passed for every workspace"
+            );
+            Ok(())
+        }
+        StartupGateDecision::AcknowledgedUnsafe { broken_agent_ids } => {
+            // Emit one observable per broken agent under the relaxed
+            // floor so the production audit log retains evidence even
+            // when boot proceeds.
+            for agent_id in &broken_agent_ids {
+                let payload = json!({
+                    "agent_id": agent_id.to_string(),
+                    "reason": "OPEN_PINCERY_AUDIT_CHAIN_FLOOR=relaxed + OPEN_PINCERY_ALLOW_UNSAFE=true",
+                });
+                if let Err(e) = event::append_event(
+                    pool,
+                    *agent_id,
+                    EVENT_AUDIT_CHAIN_FLOOR_RELAXED,
+                    VERIFIER_EVENT_SOURCE,
+                    None,                       // wake_id
+                    None,                       // tool_name
+                    None,                       // tool_input
+                    None,                       // tool_output
+                    Some(&payload.to_string()), // content
+                    None,                       // termination_reason
+                )
+                .await
+                {
+                    tracing::warn!(
+                        event = "audit_chain_floor_relaxed_event_emit_failed",
+                        agent_id = %agent_id,
+                        error = %e,
+                        "Failed to emit audit_chain_floor_relaxed event; continuing boot anyway"
+                    );
+                }
+            }
+            tracing::warn!(
+                event = "audit_chain_floor_relaxed",
+                broken_agent_count = broken_agent_ids.len(),
+                "Audit chain broken on at least one agent; continuing because \
+                 OPEN_PINCERY_AUDIT_CHAIN_FLOOR=relaxed and OPEN_PINCERY_ALLOW_UNSAFE=true"
+            );
+            Ok(())
+        }
+        StartupGateDecision::Refuse { broken_agent_ids } => {
+            tracing::error!(
+                event = "audit_chain_broken",
+                broken_agent_count = broken_agent_ids.len(),
+                broken_agent_ids = ?broken_agent_ids,
+                "Audit chain broken on at least one agent; refusing to boot. \
+                 Set OPEN_PINCERY_AUDIT_CHAIN_FLOOR=relaxed and \
+                 OPEN_PINCERY_ALLOW_UNSAFE=true to override after offline review."
+            );
+            Err(EXIT_CODE_AUDIT_CHAIN_BROKEN)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,5 +578,76 @@ mod tests {
         hasher.update(hex::decode(prev).unwrap());
         let want = hex::encode(hasher.finalize());
         assert_eq!(h, want);
+    }
+
+    fn verified_result(byte: u8) -> AgentChainResult {
+        AgentChainResult {
+            agent_id: fixed_uuid(byte),
+            status: ChainStatus::Verified {
+                events_in_chain: 1,
+                last_entry_hash: "deadbeef".into(),
+            },
+        }
+    }
+
+    fn broken_result(byte: u8) -> AgentChainResult {
+        AgentChainResult {
+            agent_id: fixed_uuid(byte),
+            status: ChainStatus::Broken {
+                first_divergent_event_id: fixed_uuid(byte),
+                expected_hash: "aaaa".into(),
+                actual_hash: "bbbb".into(),
+                events_walked: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn evaluate_startup_gate_verifies_when_no_breaks() {
+        let ws = fixed_uuid(0x10);
+        let per = vec![(ws, vec![verified_result(0x11), verified_result(0x12)])];
+        match evaluate_startup_gate(&per, false, false) {
+            StartupGateDecision::Verified {
+                workspaces_walked,
+                agents_walked,
+            } => {
+                assert_eq!(workspaces_walked, 1);
+                assert_eq!(agents_walked, 2);
+            }
+            other => panic!("expected Verified, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evaluate_startup_gate_refuses_on_break_without_override() {
+        let ws = fixed_uuid(0x10);
+        let per = vec![(ws, vec![verified_result(0x11), broken_result(0x99)])];
+        match evaluate_startup_gate(&per, false, false) {
+            StartupGateDecision::Refuse { broken_agent_ids } => {
+                assert_eq!(broken_agent_ids, vec![fixed_uuid(0x99)]);
+            }
+            other => panic!("expected Refuse, got {other:?}"),
+        }
+        // Half-armed override (one of two flags) still refuses.
+        assert!(matches!(
+            evaluate_startup_gate(&per, true, false),
+            StartupGateDecision::Refuse { .. }
+        ));
+        assert!(matches!(
+            evaluate_startup_gate(&per, false, true),
+            StartupGateDecision::Refuse { .. }
+        ));
+    }
+
+    #[test]
+    fn evaluate_startup_gate_acknowledges_with_both_overrides() {
+        let ws = fixed_uuid(0x10);
+        let per = vec![(ws, vec![broken_result(0xAB), broken_result(0xCD)])];
+        match evaluate_startup_gate(&per, true, true) {
+            StartupGateDecision::AcknowledgedUnsafe { broken_agent_ids } => {
+                assert_eq!(broken_agent_ids, vec![fixed_uuid(0xAB), fixed_uuid(0xCD)]);
+            }
+            other => panic!("expected AcknowledgedUnsafe, got {other:?}"),
+        }
     }
 }

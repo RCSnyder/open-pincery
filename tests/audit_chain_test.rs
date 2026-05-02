@@ -617,3 +617,115 @@ async fn verify_workspace_returns_one_result_per_agent() {
         assert!(matches!(r.status, ChainStatus::Verified { .. }));
     }
 }
+
+/// T-AC78 G3d: startup gate refuses (Err(5)) on a tampered chain
+/// when the relaxed override is not armed.
+#[tokio::test]
+async fn startup_gate_aborts_on_tampered_chain() {
+    let pool = common::test_pool().await;
+    let (agent_id, _ws) = fresh_agent(&pool, "ac78gateabort").await;
+
+    // Two events to give the chain something to walk.
+    for i in 0..2 {
+        event::append_event(
+            &pool,
+            agent_id,
+            "message_received",
+            "human",
+            None,
+            None,
+            None,
+            None,
+            Some(&format!("msg-{i}")),
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    // UPDATE bypasses the BEFORE INSERT trigger so prev_hash/entry_hash
+    // go stale on the second row.
+    sqlx::query(
+        "UPDATE events SET content = 'evil' \
+         WHERE id = (SELECT id FROM events WHERE agent_id = $1 \
+                     ORDER BY created_at ASC, id ASC OFFSET 1 LIMIT 1)",
+    )
+    .bind(agent_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let result = audit_chain::enforce_audit_chain_floor_at_startup(
+        &pool, false, // relaxed
+        false, // allow_unsafe
+    )
+    .await;
+    assert_eq!(
+        result,
+        Err(audit_chain::EXIT_CODE_AUDIT_CHAIN_BROKEN),
+        "broken chain without override must refuse with exit 5"
+    );
+}
+
+/// T-AC78 G3d: startup gate proceeds (Ok(())) on a tampered chain
+/// when both override env-equivalent flags are set, and emits one
+/// `audit_chain_floor_relaxed` event per broken agent so the audit
+/// log retains evidence.
+#[tokio::test]
+async fn startup_gate_proceeds_under_relaxed_floor_with_allow_unsafe() {
+    let pool = common::test_pool().await;
+    let (agent_id, _ws) = fresh_agent(&pool, "ac78gateunsafe").await;
+
+    for i in 0..2 {
+        event::append_event(
+            &pool,
+            agent_id,
+            "message_received",
+            "human",
+            None,
+            None,
+            None,
+            None,
+            Some(&format!("msg-{i}")),
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    sqlx::query(
+        "UPDATE events SET content = 'evil' \
+         WHERE id = (SELECT id FROM events WHERE agent_id = $1 \
+                     ORDER BY created_at ASC, id ASC OFFSET 1 LIMIT 1)",
+    )
+    .bind(agent_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let result = audit_chain::enforce_audit_chain_floor_at_startup(
+        &pool, true, // relaxed
+        true, // allow_unsafe
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "with both overrides armed the gate must Ok and let boot proceed; got {result:?}"
+    );
+
+    // Exactly one audit_chain_floor_relaxed event must exist for the
+    // tampered agent so production has a paper trail.
+    let count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM events \
+         WHERE agent_id = $1 AND event_type = $2",
+    )
+    .bind(agent_id)
+    .bind(audit_chain::EVENT_AUDIT_CHAIN_FLOOR_RELAXED)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        count.0, 1,
+        "exactly one floor-relaxed event must be emitted"
+    );
+}
