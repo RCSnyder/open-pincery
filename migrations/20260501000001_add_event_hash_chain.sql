@@ -74,8 +74,9 @@ $$ LANGUAGE plpgsql IMMUTABLE;
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION events_chain_compute_hash() RETURNS TRIGGER AS $$
 DECLARE
-    prior_hash text;
-    payload    bytea;
+    prior_hash    text;
+    prior_created timestamptz;
+    payload       bytea;
 BEGIN
     -- Default created_at if not set (matches column default semantics).
     IF NEW.created_at IS NULL THEN
@@ -93,12 +94,23 @@ BEGIN
     -- Lock the most recent event for this agent so two concurrent
     -- inserts cannot both compute against the same prev. Returns NULL
     -- (genesis) if no prior event exists for this agent.
-    SELECT entry_hash INTO prior_hash
+    SELECT entry_hash, created_at INTO prior_hash, prior_created
     FROM events
     WHERE agent_id = NEW.agent_id
     ORDER BY created_at DESC, id DESC
     LIMIT 1
     FOR UPDATE;
+
+    -- Enforce strictly monotonic created_at per-agent. Postgres
+    -- timestamptz precision is microseconds, so high-rate inserts
+    -- routinely tie. Ties make the chain ambiguous: the trigger
+    -- selects "prior" by (created_at DESC, id DESC), but a forward
+    -- walker visits by (created_at ASC, id ASC) — with a tie they
+    -- pick opposite siblings as the link. Bumping by 1us here makes
+    -- both orderings agree by created_at alone.
+    IF prior_created IS NOT NULL AND NEW.created_at <= prior_created THEN
+        NEW.created_at := prior_created + interval '1 microsecond';
+    END IF;
 
     NEW.prev_hash := coalesce(prior_hash, '');
 
