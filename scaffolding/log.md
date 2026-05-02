@@ -1,5 +1,21 @@
 # Open Pincery — Experiment Log
 
+## BUILD G3c — AC-78 pcy audit verify CLI + POST /api/audit/chain/verify — 2026-05-02T02:35Z
+
+- **Gate**: PASS (post-build, attempt 2)
+- **Commit chain**: 2c2e416 (initial G3c) → e6e7722 (fix: bootstrap returns 201 not 200)
+- **Evidence**: CI run 25241550477 — 5/5 jobs green: rustfmt, clippy, cargo deny, cargo test (3/3 audit_api_test cases pass: agent_404s_for_other_workspace, workspace_reports_broken_after_tamper, workspace_returns_all_verified), sandbox real-bwrap smoke
+- **Changes**:
+  - src/api/audit.rs (NEW, ~178 lines) — `Router<AppState>` mounting POST /api/audit/chain/verify and POST /api/audit/chain/verify/agents/{id}; both gate on `credential::is_workspace_admin` (403 on miss); per-agent route reuses existing /agents/{id} scoping (404 on cross-workspace); `AgentChainStatusResponse` enum with `#[serde(tag="status", rename_all="snake_case")]` Verified|Broken variants; `AuditChainVerifyResponse { agents, all_verified }`; both delegate to `background::audit_chain::verify_workspace` / `verify_and_emit` so HTTP, CLI, and the upcoming startup gate share one verifier path.
+  - src/api/{mod.rs,openapi.rs} — register audit module, utoipa schemas + tag.
+  - src/api_client.rs — `verify_chain_workspace`, `verify_chain_agent` thin client helpers.
+  - src/cli/{mod.rs,commands/mod.rs,commands/audit.rs} (audit.rs NEW) — `pcy audit verify [--agent <uuid>] [--workspace <id>]` subcommand. `EXIT_CODE_CHAIN_BROKEN = 2` (distinct from future startup-gate exit 5 and AC-84's exit 4); pretty-prints one line per agent to stderr + raw JSON to stdout; returns ExitCode::from(2) when `all_verified=false`.
+  - tests/audit_api_test.rs (NEW, ~190 lines) — 3 #[tokio::test]: happy-path verify (all_verified=true after bootstrap+agent+message), post-tamper detection (UPDATE bypasses BEFORE INSERT trigger so prev_hash/entry_hash go stale → first_divergent_event_id matches mutated row), cross-workspace 404 on per-agent route.
+- **Verify-fix-1 (e6e7722)**: bootstrap test helper asserted `StatusCode::OK`; actual response is 201 CREATED (matches tests/bootstrap_test.rs and tests/api_test.rs). One-line status fix; no production code change.
+- **AC coverage**: L-AC78-5 (CLI surface), L-AC78-6 (HTTP surface), T-AC78-7 (workspace-admin gating + tenancy)
+- **Retries**: 2
+- **Next**: G3d — src/main.rs `enforce_audit_chain_floor_at_startup` after migrations + DB bootstrap, before listener bind. New env vars OPEN_PINCERY_AUDIT_CHAIN_FLOOR (relaxed/strict, default strict) + OPEN_PINCERY_ALLOW_UNSAFE. On any Broken: log structured `audit_chain_broken`, emit event, exit 5 UNLESS both env vars set (then emit `audit_chain_floor_relaxed` warning event and proceed). Tests `startup_gate_aborts_on_tampered_chain`, `startup_gate_proceeds_under_relaxed_floor_with_allow_unsafe`. Then G3e (docs + event-type lint + .env.example), AC-78 close.
+
 ## VERIFY-FIX-2 v9 — AC-77 BLOCKED — 2026-05-01T08:30Z
 
 - **Gate**: FAIL (attempt 2/3). Continuing risks shipping a fundamentally over-broad allowlist that defeats AC-77's security purpose. STOPping per BEE-OS STOP conditions.
