@@ -1,5 +1,29 @@
 # Open Pincery — Experiment Log
 
+## BUILD G4a — AC-79 template v3 + delimiter wrapping — 2026-05-02T06:30Z
+
+- **Gate**: PASS (post-build slice, attempt 1)
+- **Slice**: First vertical slice of AC-79. Files changed: 4 (`migrations/20260501000002_add_prompt_injection_floor.sql` (new), `src/runtime/prompt.rs`, `src/runtime/wake_loop.rs`, `tests/prompt_test.rs`). LOC: ~210 added net.
+- **Evidence**:
+  - `cargo build --tests` clean on rust:1.95 in 6m08s.
+  - `cargo clippy --all-targets -- -D warnings` clean.
+  - 4 unit tests pass: `runtime::prompt::tests::is_untrusted_predicate_covers_all_known_event_types`, `runtime::prompt::tests::wrap_untrusted_if_wraps_when_flagged`, `runtime::prompt::tests::wrap_untrusted_if_passthrough_when_trusted`, `runtime::wake_loop::tests::mint_wake_prompt_context_produces_distinct_32_hex_pairs`.
+  - `cargo fmt --all` applied.
+- **Truths landed**: T-AC79-1 (per-wake 16-byte hex nonce + canary minted on stack only), T-AC79-2 (exhaustive `is_untrusted` predicate over `events.event_type`), T-AC79-12 (delimiter wrapping in `assemble_prompt`).
+- **What changed**:
+  - **Migration**: `wake_system_prompt` v3 deactivates v2 and inserts a strict superset of v2's required substrings (`pcy credential add`, `REFUSE`, `POST /api/workspaces/:id/credentials`, `PLACEHOLDER:`, `list_credentials`) plus a `## CRITICAL: Untrusted Content Boundaries` block instructing the model that `<<untrusted:NONCE>>...<<end:NONCE>>`-wrapped bytes are data not instructions, and explicit canary-non-echo discipline.
+  - **`prompt.rs`**: Added `WakePromptContext { wake_nonce, canary_hex }`, `is_untrusted(event_type) -> bool` (closed-set; classifies `message_received`, `tool_result`, future `memory_read`, `wake_summary_loaded` as UNTRUSTED), and `wrap_untrusted_if`. `assemble_prompt` now takes `&WakePromptContext`, appends `<<canary:HEX>>` to the system prompt AFTER truncation guard so a tight `max_prompt_chars` cannot drop the canary, and wraps `message_received` content + `tool_result` content with `<<untrusted:NONCE>>...<<end:NONCE>>`. `tool_call` and `assistant_message` (agent-emitted) are left UNWRAPPED.
+  - **`wake_loop.rs`**: Added `mint_wake_prompt_context()` using `rand::Rng` (matches existing `auth.rs::generate_token` pattern). Mints both 16-byte hex strings at the very top of `run_wake_loop` (before `wake_start` event append), held only on stack, never persisted. Threads `&prompt_ctx` to `assemble_prompt`.
+  - **`prompt_test.rs`**: Updated AC-3 test to pass a fixed `WakePromptContext`. Added two AC-79 assertions: canary present in `system_prompt`, untrusted user content wrapped with the per-wake nonce delimiters.
+- **Not touched** (preserves AC-78 invariants): `src/models/event.rs::append_event` unchanged (T-AC78-10 / T-AC79-11).
+- **Concerns / deferred**:
+  - G4b will scan `response.content` and every `tool_calls[].function.{name,arguments,id}` for the canary value and emit `prompt_injection_suspected`/`prompt_injection_canary_emitted`.
+  - G4c will add jsonschema validation with N=3 retry → `model_response_schema_invalid` and `FailureAuditPending` on cap exhaustion.
+  - G4d will add the per-wake 32-call rate limit + `tool_call_rate_limit_exceeded`.
+  - G4e adds the adversarial integration test in `tests/prompt_injection_test.rs` and CHANGELOG entry.
+- **Retries**: 1
+- **Next**: BUILD G4b — canary scan in `wake_loop.rs` after the LLM response, emitting `prompt_injection_suspected` with `source = "runtime"` when the canary value appears in `response.content` or any tool-call field, and terminating the wake.
+
 ## ANALYZE G4 — AC-79 Prompt-Injection Defense Floor admission — 2026-05-02T05:05Z
 
 - **Gate**: PASS (post-analyze, attempt 1)

@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use super::capability::PermissionMode;
 use super::llm::{ChatMessage, LlmClient};
-use super::prompt;
+use super::prompt::{self, WakePromptContext};
 use super::sandbox::ToolExecutor;
 use super::tools::{self, ToolResult};
 use super::vault::Vault;
@@ -52,6 +52,12 @@ pub async fn run_wake_loop(
     metrics::counter!(m::WAKE_STARTED).increment(1);
     let _wake_metrics = WakeMetricsGuard::new();
 
+    // AC-79 (T-AC79-1): mint per-wake prompt-injection defense context.
+    // Both nonce and canary are 16-byte hex strings drawn from the OS CSPRNG,
+    // held only on the stack for the duration of this wake, and never
+    // persisted to any event/audit/projection row.
+    let prompt_ctx = mint_wake_prompt_context();
+
     // Record wake_start event
     event::append_event(
         pool,
@@ -88,6 +94,7 @@ pub async fn run_wake_loop(
             config.event_window_limit,
             config.wake_summary_limit,
             config.max_prompt_chars,
+            &prompt_ctx,
         )
         .await?;
 
@@ -288,4 +295,40 @@ pub async fn run_wake_loop(
     info!(agent_id = %agent_id, wake_id = %wake_id, reason = %termination_reason, "Wake loop ended");
     metrics::counter!(m::WAKE_COMPLETED, "reason" => termination_reason.clone()).increment(1);
     Ok(termination_reason)
+}
+
+/// AC-79 (T-AC79-1): mint a fresh `WakePromptContext` for one wake.
+///
+/// Each wake gets a unique 16-byte (32 hex chars) nonce and canary drawn
+/// from the OS CSPRNG. They live on the stack for exactly one wake and
+/// are never persisted, logged, or returned across the function boundary.
+fn mint_wake_prompt_context() -> WakePromptContext {
+    use rand::Rng;
+    let mut rng = rand::rng();
+    let nonce_bytes: [u8; 16] = rng.random();
+    let canary_bytes: [u8; 16] = rng.random();
+    WakePromptContext {
+        wake_nonce: hex::encode(nonce_bytes),
+        canary_hex: hex::encode(canary_bytes),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mint_wake_prompt_context_produces_distinct_32_hex_pairs() {
+        let a = mint_wake_prompt_context();
+        let b = mint_wake_prompt_context();
+        assert_eq!(a.wake_nonce.len(), 32);
+        assert_eq!(a.canary_hex.len(), 32);
+        assert!(a.wake_nonce.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(a.canary_hex.chars().all(|c| c.is_ascii_hexdigit()));
+        // Per-wake regeneration: collision probability is 2^-128 per field.
+        assert_ne!(a.wake_nonce, b.wake_nonce);
+        assert_ne!(a.canary_hex, b.canary_hex);
+        // Nonce and canary are independent draws within the same wake.
+        assert_ne!(a.wake_nonce, a.canary_hex);
+    }
 }
