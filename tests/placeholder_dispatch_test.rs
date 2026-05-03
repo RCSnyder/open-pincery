@@ -68,6 +68,15 @@ async fn dispatch_shell_with_env(
             arguments: args,
         },
     };
+    let ticket = open_pincery::runtime::capability_nonce::mint(
+        pool,
+        wake_id,
+        workspace_id,
+        &tc.function.name,
+        &tc.function.arguments,
+    )
+    .await
+    .expect("mint capability nonce");
     tools::dispatch_tool(
         &tc,
         PermissionMode::Yolo, // shell requires ExecuteLocal
@@ -77,6 +86,7 @@ async fn dispatch_shell_with_env(
         wake_id,
         &executor,
         vault,
+        &ticket,
     )
     .await
 }

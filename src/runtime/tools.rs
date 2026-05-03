@@ -226,6 +226,7 @@ pub async fn dispatch_tool(
     wake_id: Uuid,
     executor: &Arc<dyn ToolExecutor>,
     vault: &Arc<Vault>,
+    nonce: &super::capability_nonce::CapabilityNonceTicket,
 ) -> ToolResult {
     let name = &tool_call.function.name;
     let args = &tool_call.function.arguments;
@@ -254,6 +255,54 @@ pub async fn dispatch_tool(
             warn!(error = %e, "Failed to append tool_capability_denied event");
         }
         return ToolResult::Error("tool disallowed by permission mode".into());
+    }
+
+    // AC-80 (T-AC80-2 / G5c): capability nonce consume — runs AFTER
+    // the AC-35 capability gate (a denied tool MUST NOT consume a
+    // nonce; T-AC80-11) and BEFORE any per-tool side effect. Single
+    // atomic UPDATE serializes concurrent consumes against the
+    // UNIQUE (workspace_id, nonce) index. On rejection we emit
+    // `capability_nonce_rejected` (TRUSTED) with a structured reason
+    // payload and short-circuit dispatch.
+    if let Err(reason) = super::capability_nonce::consume(
+        pool,
+        &nonce.nonce,
+        wake_id,
+        workspace_id,
+        name,
+        &nonce.capability_shape,
+    )
+    .await
+    {
+        warn!(
+            tool = %name,
+            wake_id = %wake_id,
+            reason = reason.as_str(),
+            "AC-80: capability nonce rejected"
+        );
+        let payload = json!({
+            "wake_id": wake_id,
+            "tool_name": name,
+            "reason": reason.as_str(),
+        })
+        .to_string();
+        if let Err(e) = event::append_event(
+            pool,
+            agent_id,
+            "capability_nonce_rejected",
+            "runtime",
+            Some(wake_id),
+            Some(name),
+            None,
+            None,
+            Some(&payload),
+            None,
+        )
+        .await
+        {
+            warn!(error = %e, "Failed to append capability_nonce_rejected event");
+        }
+        return ToolResult::Error("capability nonce rejected".into());
     }
 
     match name.as_str() {

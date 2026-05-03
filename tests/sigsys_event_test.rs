@@ -82,6 +82,15 @@ async fn sigsys_exit_emits_sandbox_syscall_denied_event() {
             arguments: serde_json::json!({ "command": "unshare -U /bin/true" }).to_string(),
         },
     };
+    let ticket = open_pincery::runtime::capability_nonce::mint(
+        &pool,
+        wake_id,
+        ws.id,
+        &tc.function.name,
+        &tc.function.arguments,
+    )
+    .await
+    .expect("mint capability nonce");
     let result = tools::dispatch_tool(
         &tc,
         PermissionMode::Yolo, // shell needs ExecuteLocal at minimum
@@ -91,6 +100,7 @@ async fn sigsys_exit_emits_sandbox_syscall_denied_event() {
         wake_id,
         &executor,
         &vault,
+        &ticket,
     )
     .await;
 
@@ -217,6 +227,15 @@ async fn non_sigsys_exit_does_not_emit_sandbox_syscall_denied() {
             arguments: serde_json::json!({ "command": "false" }).to_string(),
         },
     };
+    let ticket = open_pincery::runtime::capability_nonce::mint(
+        &pool,
+        wake_id,
+        ws.id,
+        &tc.function.name,
+        &tc.function.arguments,
+    )
+    .await
+    .expect("mint capability nonce");
     let _ = tools::dispatch_tool(
         &tc,
         PermissionMode::Yolo,
@@ -226,6 +245,7 @@ async fn non_sigsys_exit_does_not_emit_sandbox_syscall_denied() {
         wake_id,
         &executor,
         &vault,
+        &ticket,
     )
     .await;
 

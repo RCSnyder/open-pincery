@@ -390,6 +390,22 @@ pub async fn run_wake_loop(
                 // as read this tick so an operator mid-wake lockdown takes
                 // effect on the next call).
                 let mode = PermissionMode::from_db_str(&current.permission_mode);
+
+                // AC-80 (T-AC80-1 / G5b): mint capability nonce at the
+                // AuthorizeExecution boundary — AFTER schema validation
+                // (AC-79) and the rate-limit gate, BEFORE dispatch. Each
+                // tool call gets its own one-shot ticket bound to
+                // (wake_id, workspace_id, tool_name, capability_shape)
+                // with a 60s TTL; dispatch_tool consumes it atomically.
+                let ticket = super::capability_nonce::mint(
+                    pool,
+                    wake_id,
+                    current.workspace_id,
+                    &tc.function.name,
+                    &tc.function.arguments,
+                )
+                .await?;
+
                 let result = tools::dispatch_tool(
                     tc,
                     mode,
@@ -399,6 +415,7 @@ pub async fn run_wake_loop(
                     wake_id,
                     executor,
                     vault,
+                    &ticket,
                 )
                 .await;
 

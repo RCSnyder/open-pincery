@@ -105,15 +105,26 @@ async fn ac41_list_credentials_returns_names_only_and_scoped_to_workspace() {
     };
     let executor: Arc<dyn ToolExecutor> = Arc::new(ProcessExecutor);
     let vault_arc = Arc::new(vault);
+    let wake_id_for_call = Uuid::new_v4();
+    let ticket = open_pincery::runtime::capability_nonce::mint(
+        &pool,
+        wake_id_for_call,
+        ws_a.id,
+        &tc.function.name,
+        &tc.function.arguments,
+    )
+    .await
+    .expect("mint capability nonce");
     let result = tools::dispatch_tool(
         &tc,
         PermissionMode::Locked, // ReadLocal must work even in Locked
         &pool,
         Uuid::new_v4(), // agent_id — not actually used by this tool
         ws_a.id,
-        Uuid::new_v4(), // wake_id — not actually used by this tool
+        wake_id_for_call,
         &executor,
         &vault_arc,
+        &ticket,
     )
     .await;
 

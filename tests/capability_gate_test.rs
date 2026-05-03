@@ -211,6 +211,15 @@ async fn locked_agent_shell_call_is_denied_and_audited() {
 
     let executor: Arc<dyn ToolExecutor> = Arc::new(ProcessExecutor);
     let vault = Arc::new(Vault::from_base64(common::TEST_VAULT_KEY_B64).unwrap());
+    let ticket = open_pincery::runtime::capability_nonce::mint(
+        &pool,
+        wake_id,
+        agent_row.workspace_id,
+        &tc.function.name,
+        &tc.function.arguments,
+    )
+    .await
+    .expect("mint capability nonce");
     let result = tools::dispatch_tool(
         &tc,
         PermissionMode::Locked,
@@ -220,6 +229,7 @@ async fn locked_agent_shell_call_is_denied_and_audited() {
         wake_id,
         &executor,
         &vault,
+        &ticket,
     )
     .await;
 

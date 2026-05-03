@@ -568,15 +568,26 @@ async fn live_denied_open_appends_landlock_denied_event_when_audit_source_availa
         },
     };
 
+    let wake_id_for_call = Uuid::new_v4();
+    let ticket = open_pincery::runtime::capability_nonce::mint(
+        &pool,
+        wake_id_for_call,
+        ws.id,
+        &tool_call.function.name,
+        &tool_call.function.arguments,
+    )
+    .await
+    .expect("mint capability nonce");
     let result = tools::dispatch_tool(
         &tool_call,
         PermissionMode::Yolo,
         &pool,
         a.id,
         ws.id,
-        Uuid::new_v4(),
+        wake_id_for_call,
         &executor,
         &vault,
+        &ticket,
     )
     .await;
 
