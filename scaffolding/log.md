@@ -1,5 +1,23 @@
 # Open Pincery — Experiment Log
 
+## RECONCILE — AC-79 — 2026-05-03T05:40Z
+
+- **Verdict**: REPAIRED — structural drift fixed in `scaffolding/readiness.md`.
+- **Axes checked**: 7/7 (directory structure, interfaces, acceptance criteria, external integrations, stack & deploy, log accuracy, readiness/traceability).
+- **Structural drift fixed**:
+  - **T-AC79-8 + L-AC79-4 (canary echo termination_reason)** Readiness pinned `termination_reason = "FailureAuditPending"` for the canary-echo path. BUILD landed a dedicated `"prompt_injection_suspected"` reason in `src/runtime/wake_loop.rs` (line 204) and the integration test `forged_canary_echo_in_response_content_terminates_wake_with_prompt_injection_suspected` pins it. Updated readiness wording to `"prompt_injection_suspected"` with an inline `(* RECONCILED ... *)` note in T-AC79-8 explaining why code wins (a dedicated termination reason is more useful operationally than the generic FailureAuditPending bucket; user-authorized).
+  - **L-AC79-2 + coverage table T-AC79-3 row (test name)** Readiness named the planned test `system_prompt_v3_is_active_and_contains_required_substrings`. The landed test is `wake_system_prompt_v3_is_active_and_contains_required_substrings` (added in REVIEW-FIX-1, uses helper `seed_wake_prompt_v3` that replays the AC-79 migration via `include_str!`). Updated planned-test name to match the landed name and noted the helper.
+- **Cosmetic drift**: none.
+- **Spec-violating drift**: none. AC-79 acceptance criteria in `scaffolding/scope.md` (line 715) do not pin the canary termination_reason, so the doc-vs-code change does not alter what AC-79 requires of the system. Payload shapes (`{where_found, model_attempted_tool_calls}` and `{tool_name, schema_errors[], attempt, retry_cap}`) already documented correctly in T-AC79-8 / T-AC79-9.
+- **Other axes**:
+  - Directory structure & observability sections of `scaffolding/design.md` still match the codebase (no AC-79-specific design.md content; AC-79 design lives in readiness).
+  - `scope.md` AC-79 item intact and traceable; all four sub-claims (delimiters / schema / canary / rate-limit) still covered.
+  - External integrations: `jsonschema = "0.28"` present in `Cargo.toml`; `OsRng` switch landed (REVIEW-FIX-1).
+  - Stack & deploy unchanged.
+  - `log.md` REVIEW (`b6044fd`) and REVIEW-FIX-1 (`91ecfb8`) entries match `git log --oneline -10`.
+- **Documents updated**: `scaffolding/readiness.md` (T-AC79-8, L-AC79-2, L-AC79-4, AC-79 coverage row T-AC79-3), `scaffolding/log.md` (this entry).
+- **Next**: VERIFY.
+
 ## REVIEW — AC-79 — 2026-05-03T05:25Z
 
 - **Gate**: post-review PASS (attempt 2 — re-review of `91ecfb8`).
