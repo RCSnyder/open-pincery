@@ -162,6 +162,11 @@ fn ac_29_env_example_has_no_orphan_entries() {
         "STALE_WAKE_HOURS",
         "WAKE_SUMMARY_LIMIT",
         "EVENT_WINDOW_LIMIT",
+        // AC-79 (v9 Phase G G4d/G4e): both read via `env_or(...)` in
+        // config.rs (not literal `env::var()` call sites), so the static
+        // scanner misses them.
+        "OPEN_PINCERY_SCHEMA_INVALID_RETRY_CAP",
+        "OPEN_PINCERY_TOOL_CALL_RATE_LIMIT_PER_WAKE",
         "RUST_LOG",
     ];
     let known: HashSet<String> = source_keys

@@ -1,5 +1,14 @@
 # Open Pincery — Experiment Log
 
+## VERIFY-FIX-1 — AC-79 — 2026-05-03T05:50Z
+
+- **Gate**: post-verify fix-cycle attempt 1 — regression repaired.
+- **Trigger**: VERIFY agent verdict FAIL on `fc1883f`. Every AC-79 sub-claim and every truth (T-AC79-1..12) was verified independently (6/6 integration tests, 104/104 lib runtime tests, clippy `-D warnings` clean, `cargo deny` green) BUT one regression: `tests/env_example_test.rs::ac_29_env_example_has_no_orphan_entries` flagged the two new AC-79 env keys (`OPEN_PINCERY_SCHEMA_INVALID_RETRY_CAP`, `OPEN_PINCERY_TOOL_CALL_RATE_LIMIT_PER_WAKE`) as orphan because they are read via the `env_or(...)` runtime helper, not a literal `env::var(...)` call site that the static scanner recognizes.
+- **Fix**: appended both keys to the `dynamic_but_known` allowlist in `tests/env_example_test.rs` with an inline comment explaining the `env_or` indirection (same pattern as `MAX_PROMPT_CHARS`, `ITERATION_CAP`, `STALE_WAKE_HOURS`). No production code changed.
+- **Evidence**: `cargo test --test env_example_test` → 4/4 PASS (was 3/4 before).
+- **Retries**: 1.
+- **Next**: re-dispatch VERIFY for the full sweep, then DELIVERY.md.
+
 ## RECONCILE — AC-79 — 2026-05-03T05:40Z
 
 - **Verdict**: REPAIRED — structural drift fixed in `scaffolding/readiness.md`.
