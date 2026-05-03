@@ -3200,3 +3200,476 @@ scope.md. AC-79 is admitted to BUILD.
   it, and `cargo deny` is the gate that rejects it if a
   transitive advisory lands. No other deps are added.
 
+---
+
+# AC-80 Readiness — Capability Nonce / Freshness — 2026-05-03
+
+> Admission gate for **Phase G Slice G5 / AC-80** (closes canonical
+> TODO G7 + G11). AC-79 closed at `a998b31`; AC-80 is the next P0
+> v9 release blocker. Today AC-35 enforces a static `(mode,
+> capability)` table check inside `dispatch_tool` — a compromised
+> wake (or an attacker who replays a captured wake transcript) can
+> re-authorize yesterday's grant indefinitely. AC-80 binds every
+> dispatch to a freshly-minted, single-use, expiring nonce so that
+> `IssueToolCall` cannot fire without a valid `AuthorizeExecution`
+> from this same wake within the last 60 seconds. The slice does
+> NOT modify the AC-35 gate, the AC-78 hash trigger, the AC-79
+> prompt-injection floor, or the canonical TLA+ spec; it adds one
+> migration, one runtime module (`src/runtime/capability_nonce.rs`),
+> two call-site edits in `wake_loop.rs` + `tools.rs`, one new event
+> type, and one integration test file.
+
+## Verdict
+
+**READY** for Slice G5 / AC-80. Every AC-80 sub-claim (valid-once,
+replay-rejects, cross-wake-rejects, expired-rejects, workspace-scoped,
+chain-clean) maps to a planned test, a planned runtime proof, and a
+Rust source seam already present in v9 (`src/runtime/wake_loop.rs::run_wake_loop`,
+`src/runtime/tools.rs::dispatch_tool`, `src/models/event.rs::append_event`).
+The TLA+ canonical actions `AuthorizeExecution` (line 845) and
+`IssueToolCall` (line 994) exist in
+[docs/input/OpenPinceryCanonical.tla](../docs/input/OpenPinceryCanonical.tla)
+and the canonical TODO list explicitly names G7 ("Capability
+freshness / nonce per IssueToolCall") and G11 ("Real time /
+monotonic nonce state for expiry + replay") — so canonical-action
+binding for AC-81 is unblocked. The clarifications below
+(C-AC80-1..C-AC80-5) all carry a documented default; none of them
+changes the pass/fail meaning of the four integration tests in
+`tests/capability_nonce_test.rs`. design.md has no AC-80 addendum
+yet (mirrors AC-79's state at its own ANALYZE), and the AC is
+self-contained enough that BUILD's first commit can append a v9
+G5 DESIGN section in lockstep with the migration.
+
+## Truths
+
+- **T-AC80-1 (nonce shape and binding fields).** Each nonce row is
+  16 bytes drawn from `OsRng`, persisted as `bytea`, and bound at
+  mint time to the tuple `{wake_id, tool_name, capability_shape,
+  expires_at}`. The row also carries `workspace_id` for AC-65
+  scoping and an `id uuid` primary key. `capability_shape` is the
+  lowercase 64-char hex SHA-256 of the canonical-JSON serialization
+  of the LLM-proposed tool arguments (sorted keys, no whitespace,
+  UTF-8) — the same bytes that will be passed to the executor.
+  Binding the *shape* (not just the *name*) means a nonce minted
+  for `shell { command: "ls /tmp" }` does NOT authorize
+  `shell { command: "rm -rf /" }` even within the same wake/tool.
+- **T-AC80-2 (mint site = `AuthorizeExecution`).** Mint occurs in
+  `src/runtime/wake_loop.rs::run_wake_loop` immediately after
+  `llm.chat` returns a tool-call proposal and BEFORE
+  `tools::validate_tool_call_arguments` (the AC-79 schema guard).
+  This places the mint at the canonical `AuthorizeExecution`
+  boundary: the runtime is authorizing the abstract intent the
+  model just proposed, before any subsequent check decides whether
+  to issue. One mint per `tc` element in
+  `choice.message.tool_calls`. The mint is a single
+  `INSERT INTO capability_nonces (...) RETURNING nonce` and
+  returns the 16-byte value to the wake loop, which threads it
+  into the subsequent `dispatch_tool` call.
+- **T-AC80-3 (consume site = `IssueToolCall`, atomic, single-use).**
+  Consume occurs inside `src/runtime/tools.rs::dispatch_tool`
+  AFTER the existing AC-35 capability-mode gate and BEFORE any
+  executor invocation, vault resolution, or side effect. The
+  consume statement is atomic against replay:
+  ```sql
+  UPDATE capability_nonces
+     SET consumed_at = now()
+   WHERE nonce = $1
+     AND wake_id = $2
+     AND tool_name = $3
+     AND capability_shape = $4
+     AND workspace_id = $5
+     AND consumed_at IS NULL
+     AND expires_at > now()
+   RETURNING id
+  ```
+  A zero-row result is the rejection signal — there is no separate
+  `SELECT … then UPDATE`, so two concurrent consumes of the same
+  row cannot both succeed. The successful row's `consumed_at` is
+  set in the same statement, so a re-presentation of the same
+  nonce later in the wake (or by another wake) finds
+  `consumed_at IS NOT NULL` and rejects.
+- **T-AC80-4 (rejection emits `capability_nonce_rejected`).** Any
+  zero-row consume — replay, cross-wake, expired, mismatched shape,
+  unknown nonce, wrong workspace — short-circuits `dispatch_tool`,
+  emits an append-only `capability_nonce_rejected` event with
+  `source = "runtime"` and a JSON payload
+  `{wake_id, tool_name, reason: "replay"|"cross_wake"|"expired"|"shape_mismatch"|"unknown"}`,
+  returns `ToolResult::Error("capability nonce rejected")`, and
+  does NOT spawn a process, resolve credentials, or mutate any
+  state outside the event log. The rejection reason is derived by
+  a follow-up read-only `SELECT` against `capability_nonces`
+  scoped by `nonce + workspace_id` (cheap, single-row lookup); if
+  that read finds zero rows the reason is `"unknown"`.
+- **T-AC80-5 (TTL = 60 seconds, hardcoded constant).** `expires_at
+  = now() + INTERVAL '60 seconds'` is set at mint time. The 60s
+  bound is a `pub const CAPABILITY_NONCE_TTL_SECS: i64 = 60` in
+  `src/runtime/capability_nonce.rs`, NOT exposed via env var or
+  config in v9.0. Operators wanting a different bound take it up
+  in v9.1; the hardcoded constant prevents accidental
+  long-window-replay misconfiguration on first ship.
+- **T-AC80-6 (workspace-scoped — every row has `workspace_id NOT
+  NULL`).** The `capability_nonces` table column set declared in
+  scope.md line 790 is shipped verbatim:
+  `(id uuid pk, wake_id uuid not null, tool_name text not null,
+  capability_shape text not null, nonce bytea not null,
+  expires_at timestamptz not null, consumed_at timestamptz,
+  workspace_id uuid not null)`. The CONSUME predicate (T-AC80-3)
+  pins `workspace_id = $5` so a nonce minted under workspace A
+  cannot be consumed by a wake running under workspace B even if
+  the 16 random bytes were somehow guessed or leaked. Indexes:
+  `CREATE INDEX capability_nonces_lookup ON capability_nonces
+  (workspace_id, nonce)` (the consume hot path) and
+  `CREATE INDEX capability_nonces_expiry ON capability_nonces
+  (expires_at)` (for the lazy / future-sweep GC path).
+- **T-AC80-7 (`event::append_event` signature is unchanged).**
+  AC-80 emits `capability_nonce_rejected` and (optionally — see
+  C-AC80-3) `capability_nonce_minted` via existing
+  `append_event` / `append_event_tx` calls in
+  `src/models/event.rs`. No new column, no new parameter, no new
+  binding shape. The AC-78 hash-chain trigger on `events`
+  transparently chains both new event types. T-AC78-10 +
+  T-AC79-11 (`event::append_event` is not modified) preserved.
+- **T-AC80-8 (canonical-action binding documented for AC-81).**
+  AC-80 binds canonical actions `AuthorizeExecution` (mint) and
+  `IssueToolCall` (consume) per
+  [docs/input/OpenPinceryCanonical.tla](../docs/input/OpenPinceryCanonical.tla)
+  lines 845 and 994 respectively, plus the freshness invariant
+  named in lines 55, 1796, 2211 (G7 / G11). When AC-81 lands the
+  `scaffolding/spec_coverage.md` table, AC-80 contributes one row:
+  `AC-80 | AuthorizeExecution + IssueToolCall | (G7/G11 freshness
+  invariant — to be promoted to a named `Inv_*` in the spec under
+  AC-81)`. BUILD commits touching `src/runtime/capability_nonce.rs`,
+  `src/runtime/tools.rs::dispatch_tool`, or
+  `src/runtime/wake_loop.rs::run_wake_loop` MUST carry
+  `canonical_action=AuthorizeExecution` and/or
+  `canonical_action=IssueToolCall` trailers (forward-compatible
+  with AC-81's commit-msg hook, which is not yet installed).
+- **T-AC80-9 (parallel pre-dispatch check — AC-35 gate
+  untouched).** AC-80's nonce check runs as a NEW pre-dispatch
+  check sitting alongside the existing AC-35 capability-mode gate,
+  not a modification to it. Specifically: in `dispatch_tool` the
+  order is (1) AC-35 `required_for` + `mode_allows` (unchanged
+  body), (2) NEW AC-80 `consume_nonce` call, (3) existing
+  per-tool argument deserialization + executor dispatch. The two
+  gates are independent and AND-composed: a denied AC-35 call
+  never reaches the consume site (no nonce row pollution); a
+  rejected AC-80 nonce never reaches the executor. T-AC35-* in
+  `tests/capability_gate_test.rs` continue to hold byte-for-byte.
+- **T-AC80-10 (no schema-invalid / rate-limit / canary
+  regression).** AC-80 mints one nonce per LLM-proposed tool call
+  even when AC-79's schema guard subsequently rejects it; the
+  mint runs BEFORE schema validation per T-AC80-2. Such orphan
+  nonces simply expire at `expires_at` (60s) without ever being
+  consumed. AC-79's tests (`tests/prompt_injection_test.rs`)
+  continue to assert their existing event sequences without
+  modification — their event-log assertions filter by
+  `event_type = 'model_response_schema_invalid'` etc. and do not
+  enumerate the full tail. AC-80 ALSO does not touch
+  `tool_calls_this_wake` (T-AC79-10): the per-wake 32-call rate
+  limit increments only on actual `dispatch_tool` invocation,
+  unchanged. A rate-limit termination short-circuits BEFORE the
+  AC-80 mint of the 33rd call (mint sits between the rate-limit
+  check and the dispatch — see Build Order G5b for the precise
+  insertion point).
+- **T-AC80-11 (no panics; closed-by-default).** Every error path
+  in `capability_nonce::mint` and `capability_nonce::consume`
+  returns `Result<_, AppError>` and emits `capability_nonce_rejected`
+  on the consume side; a DB error during mint propagates as
+  `AppError::Db` and the wake loop falls through to the existing
+  `?` handler (terminates the wake without dispatching). No
+  `unwrap`/`expect` on a value derived from runtime data. A
+  `RETURNING` row absent on consume MUST be treated as rejection,
+  never as success.
+- **T-AC80-12 (lazy GC only in v9.0; sweep deferred).** Expired
+  nonces are NOT actively swept in v9.0. They accumulate in
+  `capability_nonces` and are never read again because the
+  consume predicate filters `expires_at > now()`. A periodic
+  background sweep (e.g. delete WHERE `expires_at < now() -
+  INTERVAL '24 hours'`) is explicitly deferred to v9.1 and listed
+  in DELIVERY.md "Known Limitations" under Storage Growth. At
+  100 wakes/day × 5 tool calls/wake × 365 days, the 60-day
+  retention envelope is well under 100k rows — operationally
+  invisible.
+
+## Key Links (AC -> Design -> Test -> Proof)
+
+- **L-AC80-1 (T-AC80-1, T-AC80-6)** schema row + indexes
+  → `migrations/20260501000003_create_capability_nonces.sql`
+  (next monotonic v9 migration after AC-79's `..02`) → **planned
+  test** `tests/capability_nonce_test.rs::table_shape_matches_scope`
+  (queries `information_schema.columns` and asserts the eight
+  columns + NOT NULL constraints + the two indexes are present
+  on a fresh test database) → **runtime proof** sqlx migration
+  runs on CI Postgres before every test.
+- **L-AC80-2 (T-AC80-2, T-AC80-9)** mint at `AuthorizeExecution`
+  → new `src/runtime/capability_nonce.rs` exporting
+  `mint(pool, wake_id, workspace_id, tool_name, args_json) ->
+  Result<[u8; 16], AppError>` (computes `capability_shape` =
+  `sha256(canonical_json(args_json))` lowercase-hex) +
+  call-site insertion in `src/runtime/wake_loop.rs::run_wake_loop`
+  immediately before `tools::validate_tool_call_arguments` →
+  **planned test** `tests/capability_nonce_test.rs::valid_nonce_authorizes_once_then_rejects_on_replay`
+  (mock LLM returns one valid tool call; assert exactly one row
+  in `capability_nonces` after mint with `consumed_at IS NULL`,
+  then after dispatch with `consumed_at IS NOT NULL`; assert a
+  second `dispatch_tool` call presenting the same nonce is
+  rejected) → **runtime proof** wake-loop integration test
+  against a recorded LLM mock; DB row inspection confirms the
+  pre/post state.
+- **L-AC80-3 (T-AC80-3, T-AC80-9, T-AC80-11)** atomic single-use
+  consume → new `capability_nonce::consume(pool, nonce,
+  wake_id, workspace_id, tool_name, args_json) -> Result<(),
+  CapabilityNonceError>` with the exact UPDATE … RETURNING SQL in
+  T-AC80-3 + integration into `src/runtime/tools.rs::dispatch_tool`
+  AFTER the AC-35 gate and BEFORE arg deserialization →
+  **planned test** `..::concurrent_consume_attempts_serialize`
+  (spawn two `tokio::spawn` consumes against the same row; assert
+  exactly one returns `Ok(())` and the other returns `Err(Replay)`;
+  uses `sqlx::PgPool` with `min_connections >= 2`) +
+  `..::ac35_denied_call_does_not_consume_nonce` (a `Locked`-mode
+  `shell` call: AC-35 denies first; assert no row consumed; assert
+  zero `capability_nonce_rejected` events; assert one
+  `tool_capability_denied` event from the AC-35 path unchanged)
+  → **runtime proof** integration tests against test Postgres.
+- **L-AC80-4 (T-AC80-4)** rejection event →
+  `src/runtime/tools.rs::dispatch_tool` calls `event::append_event(
+  ..., "capability_nonce_rejected", "runtime", ...)` on a
+  zero-row consume; payload is JSON
+  `{wake_id, tool_name, reason}` where `reason` is derived by a
+  follow-up classifier function `classify_rejection(pool, nonce,
+  workspace_id) -> Reason` → **planned test**
+  `..::replay_emits_capability_nonce_rejected_with_reason_replay` +
+  `..::cross_wake_replay_emits_reason_cross_wake` +
+  `..::expired_nonce_emits_reason_expired` +
+  `..::shape_mismatch_emits_reason_shape_mismatch` (mint a nonce
+  with one args shape, then attempt consume with a different
+  shape; assert reason field) → **runtime proof** integration
+  tests; `events.content` JSON inspection.
+- **L-AC80-5 (T-AC80-5)** TTL = 60s →
+  `src/runtime/capability_nonce.rs::CAPABILITY_NONCE_TTL_SECS:
+  i64 = 60`; mint sets `expires_at = now() + INTERVAL
+  CAPABILITY_NONCE_TTL_SECS SECONDS` → **planned test**
+  `..::expired_nonce_rejects` (uses an explicit time-overrideable
+  test seam — either `tokio::time::pause` + advance 61s, OR a
+  test-only `mint_with_expiry_override` helper gated by
+  `#[cfg(test)]`; pick whichever `tests/auth_session_ttl_test.rs`
+  uses for AC-58 to stay consistent) → **runtime proof** the
+  test asserts a real DB row with `expires_at < now()` and
+  `consumed_at IS NULL` is rejected with `reason = "expired"`.
+- **L-AC80-6 (T-AC80-7, T-AC80-8)** event-type registration +
+  AC-78 hash chain → register `capability_nonce_rejected` in
+  `src/models/events.rs` (CI event-type lint enforces this) +
+  one row per migrated event type in any spec-coverage table →
+  **planned test** `..::capability_nonce_rejected_chains_through_audit_hash`
+  (insert one event of each new type; walk the AC-78 chain;
+  assert `Verified`) + existing event-type lint job → **runtime
+  proof** CI green.
+- **L-AC80-7 (T-AC80-9)** parallel-not-replacing AC-35 → no
+  test change needed; `tests/capability_gate_test.rs` continues
+  to pass byte-for-byte against the unmodified
+  `src/runtime/capability.rs` → **runtime proof** existing CI.
+
+## Acceptance Criteria Coverage (AC-80 slice)
+
+| AC ID | Sub-criterion / Truth(s) | Build Slice | Planned Test | Planned Runtime Proof |
+| ----- | ------------------------ | ----------- | ------------ | --------------------- |
+| AC-80 | (1) Valid nonce authorizes once (T-AC80-1, T-AC80-2, T-AC80-3) | G5b + G5c | `tests/capability_nonce_test.rs::valid_nonce_authorizes_once_then_rejects_on_replay` | wake-loop integration test; DB row pre/post inspection |
+| AC-80 | (2) Replay rejects (T-AC80-3, T-AC80-4) | G5c + G5d | `..::valid_nonce_authorizes_once_then_rejects_on_replay` (covers replay tail) + `..::replay_emits_capability_nonce_rejected_with_reason_replay` | integration test; `events.content` JSON inspection |
+| AC-80 | (3) Cross-wake replay rejects (T-AC80-3, T-AC80-4, T-AC80-6) | G5d | `..::cross_wake_replay_emits_reason_cross_wake` (mint under wake-A; attempt consume under wake-B; same workspace) | integration test |
+| AC-80 | (4) Expired nonce rejects (T-AC80-4, T-AC80-5) | G5d | `..::expired_nonce_rejects` | integration test against test Postgres with time advance |
+| AC-80 | Workspace scoping (T-AC80-6) | G5a + G5d | `..::cross_workspace_consume_rejects` (mint under workspace-A; same nonce bytes attempted in workspace-B; assert rejection with `reason = "unknown"`) | integration test |
+| AC-80 | Atomic single-use (T-AC80-3, T-AC80-11) | G5c + G5d | `..::concurrent_consume_attempts_serialize` | integration test with concurrent tokio tasks |
+| AC-80 | Rejection-event payload + AC-78 chain (T-AC80-7, T-AC80-8) | G5c + G5d | `..::capability_nonce_rejected_chains_through_audit_hash` + event-type lint | CI green |
+| AC-80 | AC-35 untouched (T-AC80-9) | G5a-e regression | full `tests/capability_gate_test.rs` re-run | CI green |
+| AC-80 | AC-79 / AC-78 / AC-77 / AC-76 untouched (T-AC80-10) | regression | full `tests/prompt_injection_test.rs` + `tests/audit_chain_test.rs` re-run | CI green |
+| AC-80 | Shape binding rejects argument tampering (T-AC80-1, T-AC80-4) | G5d | `..::shape_mismatch_emits_reason_shape_mismatch` | integration test |
+
+## Scope Reduction Risks
+
+- **R-AC80-1 (highest) — "Use a timestamp instead of a true random
+  nonce."** Easier to implement: store `(wake_id, tool_name,
+  authorize_seq)` as the freshness token and skip the bytea
+  column. Catastrophic: a captured wake transcript replays
+  trivially because the token is structural, not unpredictable.
+  Mitigation: T-AC80-1 mandates 16 bytes from `OsRng` written to
+  a `bytea` column.
+- **R-AC80-2 — "Skip atomic single-use; do a `SELECT … FOR UPDATE`
+  then `UPDATE`."** Tempting to write because it reads more
+  clearly, but introduces a race window on connection-pool
+  contention and undermines T-AC80-3. Mitigation: the consume
+  query is a single `UPDATE … WHERE consumed_at IS NULL …
+  RETURNING id`; `..::concurrent_consume_attempts_serialize`
+  pins the behavior.
+- **R-AC80-3 — "Skip `workspace_id` and rely on the random
+  nonce's unguessability."** Plausible-sounding (16 bytes is a
+  lot of entropy) but loses two things: the AC-65 lint that
+  blocks bare cross-workspace queries, and a defense-in-depth
+  rejection if workspace bytes ever leak via timing or backup
+  channel. Mitigation: T-AC80-6 + the index on
+  `(workspace_id, nonce)`.
+- **R-AC80-4 — "Skip `capability_shape` — bind only `(wake_id,
+  tool_name)`."** Trivially shorter migration, but means a wake
+  authorizing `shell {command: "ls"}` is reusable for `shell
+  {command: "rm -rf /"}`. The whole point of AC-80 is freshness
+  + intent binding; without shape it is freshness only.
+  Mitigation: T-AC80-1 + the
+  `..::shape_mismatch_emits_reason_shape_mismatch` test.
+- **R-AC80-5 — "Skip the cross-wake test; it's covered by the
+  workspace test."** Not true: workspace scope is one column,
+  wake scope is another, and a wake could plausibly leak its
+  nonce to another wake within the same workspace (e.g. via a
+  shared in-process cache mistake during BUILD). Mitigation: the
+  cross-wake test is listed explicitly in scope.md verbatim
+  ("nonce from wake-A rejected in wake-B"), is on the coverage
+  table, and is one of the four hard sub-criteria.
+- **R-AC80-6 — "Wire AC-80 into the existing AC-35 gate as a
+  combined check."** Tempting (one place to look) but breaks
+  T-AC35-* invariants, complicates the byte-for-byte AC-35
+  capability-gate test, and entangles two independent security
+  properties. Mitigation: T-AC80-9 mandates a parallel
+  pre-dispatch check; AC-35 source code stays untouched.
+- **R-AC80-7 — "Mint after AC-79 schema validation passes (don't
+  pollute on invalid args)."** Reasonable engineering instinct,
+  but it inverts the canonical action ordering: the spec's
+  `AuthorizeExecution` precedes any further checks. Orphan-nonce
+  growth is bounded (T-AC80-12 — 60s expiry, lazy GC). The
+  C-AC80-1 default keeps mint BEFORE schema validation; if
+  REVIEW objects, BUILD may move it AFTER schema validation
+  with a one-line note in `wake_loop.rs` — both placements pass
+  every test in this readiness because no test asserts a row
+  exists for a schema-invalid call.
+- **R-AC80-8 — "Skip the `capability_nonce_minted` event entirely"
+  vs. "emit one per mint."** Only the rejection event is named in
+  scope.md (line 802). C-AC80-3 below pins the default to
+  rejection-only. A minted-event would prove "a nonce was
+  minted" but leak the binding shape into the event log; the
+  rejection event already proves the consume side. Mitigation:
+  default is rejection-event-only; readiness binds.
+
+## Clarifications Needed
+
+All five clarifications below carry a documented default that
+allows BUILD to proceed without user input. They are listed because
+REVIEW may choose to revisit any of them.
+
+- **C-AC80-1 — `AuthorizeExecution` placement: BEFORE schema
+  validation vs. AFTER.** **Default: BEFORE**, per the user's
+  ANALYZE prompt and per the canonical-action ordering in the
+  TLA+ spec. Mint happens immediately after `llm.chat` returns
+  and immediately before `tools::validate_tool_call_arguments`
+  in `wake_loop.rs::run_wake_loop`. AFTER-validation placement
+  is acceptable to REVIEW if the tradeoff is documented in code;
+  no test in this readiness depends on the choice.
+- **C-AC80-2 — `capability_shape` canonicalization.** **Default:
+  lowercase 64-char hex SHA-256 of canonical JSON of the
+  args_json (sorted keys, no whitespace, UTF-8 NFC).** A second
+  `serde_json::to_string` followed by `sha2::Sha256` gives this.
+  No external canonical-JSON crate is added; a small inline
+  serializer in `capability_nonce.rs` (~20 lines, recursive,
+  sorts object keys) is sufficient and is unit-tested with five
+  fixed vectors. This is the most security-relevant
+  clarification: any disagreement between mint-side and
+  consume-side canonicalization breaks freshness silently.
+  Mitigation: a single shared `canonicalize_args(args: &str) ->
+  String` function used on both sides.
+- **C-AC80-3 — Emit `capability_nonce_minted` event on every
+  mint?** **Default: NO.** Only `capability_nonce_rejected` is
+  named in scope.md line 802. A minted event would (a) double the
+  event-log volume on every wake's tool calls, (b) leak the
+  `capability_shape` value (which is a sha256 of args, low-risk
+  but still derived from potentially sensitive inputs) into a
+  permanent log row. The mint is provable from the existing
+  `tool_call` event + the `capability_nonces` table; no
+  dedicated event is needed.
+- **C-AC80-4 — TTL constant location.** **Default: hardcoded 60s
+  at `src/runtime/capability_nonce.rs::CAPABILITY_NONCE_TTL_SECS`,
+  no env knob in v9.0.** Operators wanting a different TTL take
+  it up in v9.1 + a `Config::capability_nonce_ttl_secs` field
+  (rejected at startup if < 5s or > 600s). For v9.0, hardcoded
+  prevents accidental long-window-replay misconfiguration.
+- **C-AC80-5 — Garbage collection of expired nonces.** **Default:
+  lazy delete-on-mismatch + periodic background sweep deferred to
+  v9.1.** The consume predicate filters `expires_at > now()` so
+  expired rows are unreachable. Storage growth is bounded
+  (T-AC80-12); a `cron`-style sweep job is a nice-to-have, not a
+  release blocker. v9.0 DELIVERY.md "Known Limitations" cites
+  this explicitly under Storage Growth.
+
+## Build Order
+
+The slice splits into five sub-steps, sequenced so each one is
+independently committable + green-CI before the next.
+
+1. **G5a — Migration + module skeleton + unit tests.** Land
+   `migrations/20260501000003_create_capability_nonces.sql`
+   (table + two indexes); create
+   `src/runtime/capability_nonce.rs` with `mint`, `consume`,
+   `classify_rejection`, `canonicalize_args`, the
+   `CAPABILITY_NONCE_TTL_SECS` constant, the
+   `CapabilityNonceError` enum; register
+   `capability_nonce_rejected` in `src/models/events.rs`.
+   Unit-test `canonicalize_args` against five fixed vectors
+   (sorted keys, nested objects, UTF-8 NFC, numeric coercion,
+   empty object). `tests/capability_nonce_test.rs::table_shape_matches_scope`
+   green. Commit msg trailer:
+   `canonical_action=AuthorizeExecution`. (~½ day)
+2. **G5b — Mint at `AuthorizeExecution`.** Wire `mint` into
+   `src/runtime/wake_loop.rs::run_wake_loop` immediately before
+   the AC-79 schema-guard call. Thread the returned 16-byte
+   nonce + the computed `capability_shape` into the call to
+   `tools::dispatch_tool` (extend its signature with a new
+   `nonce: &[u8; 16]` parameter, or wrap into a struct —
+   `#[allow(clippy::too_many_arguments)]` is already on the
+   function). No consume yet; nonces accumulate `consumed_at IS
+   NULL` and expire. Existing wake-loop tests must still pass
+   (regression). Commit msg trailer:
+   `canonical_action=AuthorizeExecution`. (~½-1 day)
+3. **G5c — Consume on `IssueToolCall`.** Wire `consume` into
+   `src/runtime/tools.rs::dispatch_tool` after the AC-35
+   `mode_allows` block and before the per-tool match arms. On
+   zero-row consume: emit `capability_nonce_rejected`, return
+   `ToolResult::Error`. On success: proceed unchanged. The
+   first three integration tests
+   (`valid_nonce_authorizes_once_then_rejects_on_replay`,
+   `concurrent_consume_attempts_serialize`,
+   `replay_emits_capability_nonce_rejected_with_reason_replay`)
+   land here. Commit msg trailer:
+   `canonical_action=IssueToolCall`. (~1 day)
+4. **G5d — Adversarial integration tests.** Land the remaining
+   tests in `tests/capability_nonce_test.rs`:
+   `cross_wake_replay_emits_reason_cross_wake`,
+   `expired_nonce_rejects`,
+   `cross_workspace_consume_rejects`,
+   `shape_mismatch_emits_reason_shape_mismatch`,
+   `ac35_denied_call_does_not_consume_nonce`,
+   `capability_nonce_rejected_chains_through_audit_hash`. Run
+   the full pre-existing suite (`cargo test`) green. (~½-1 day)
+5. **G5e — Docs + CHANGELOG + DELIVERY prep.** Append a v9 G5
+   DESIGN section to `scaffolding/design.md` (table shape,
+   mint/consume sequence diagram, canonical-action mapping).
+   Add a CHANGELOG entry under `[Unreleased] v9 Phase G`. Add a
+   "Known Limitations: capability nonce sweep deferred to v9.1"
+   bullet to DELIVERY.md. Run reconcile + review before
+   verify. (~½ day)
+
+Total: **~2.5-3 days of focused engineering**, matching scope.md's
+estimate of 2-3 days for Slice G5.
+
+## Complexity Exceptions
+
+- **CE-AC80-1 — `dispatch_tool` argument count.** The function
+  is already annotated `#[allow(clippy::too_many_arguments)]`
+  and takes 8 parameters. AC-80 adds one more (`nonce: &[u8;
+  16]`) bringing the total to 9. Either keep the `allow` and
+  extend, or refactor into a `DispatchContext` struct in the
+  same commit; readiness recommends the struct refactor only if
+  REVIEW flags it. Not a 300-LOC ceiling concern.
+- **CE-AC80-2 — `tests/capability_nonce_test.rs` size.** New
+  file, ~9-10 test functions, estimated 350-450 lines. Stays
+  under the AC-79 precedent (450-550). No exception requested;
+  flag if it exceeds 500.
+- **No external dependencies added.** AC-80 uses `sha2`
+  (already in Cargo.toml for AC-78), `rand` (already in for
+  session tokens), `sqlx` (existing), `uuid` (existing), and
+  `serde_json` (existing). The Complexity Brake's "adding a
+  dependency not in design.md" trigger does NOT fire.
