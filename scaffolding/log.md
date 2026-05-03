@@ -1,5 +1,13 @@
 # Open Pincery — Experiment Log
 
+## REVIEW — AC-80 — 2026-05-03T(round-2)
+
+- **Gate**: post-review PASS (round 2; round 1 returned FAIL with 4 Required findings).
+- **Evidence**: review agent verdict PASS — doc-comment placement, concurrent-consume race test, AC-78 chain walk, and schema-shape introspection all confirmed; tracing::warn addition non-semantic. 12/12 capability_nonce_test pass locally. HEAD = 3bc16a7.
+- **Changes**: src/runtime/capability_nonce.rs (doc-comment cites R-AC80-7; classify_rejection logs tracing::warn on DB error). tests/capability_nonce_test.rs (+3 tests: concurrent_consume_attempts_serialize, capability_nonce_rejected_chains_through_audit_hash, table_shape_matches_scope).
+- **Retries**: 2 review rounds (1 fix cycle).
+- **Next**: RECONCILE on AC-80 scaffolding drift.
+
 ## VERIFY — AC-79 — 2026-05-03T06:05Z
 
 - **Gate**: post-verify PASS (attempt 2 — re-verify of `6862d58`).
