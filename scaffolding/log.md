@@ -1,5 +1,25 @@
 # Open Pincery — Experiment Log
 
+## BUILD G4b+G4c — AC-79 canary emission + echo scan + injection termination — 2026-05-02T07:30Z
+
+- **Gate**: PASS (post-build slice, attempt 1)
+- **Slice**: G4b (mint nonce/canary into wake loop, emit one `prompt_injection_canary_emitted` per wake) + G4c (scan LLM response for canary echo, emit `prompt_injection_suspected`, terminate wake before any tool runs). Files changed: 1 (`src/runtime/wake_loop.rs`). LOC: ~170 added.
+- **Evidence**:
+  - `cargo build --tests` clean.
+  - `cargo clippy --all-targets -- -D warnings` clean.
+  - 6 new unit tests pass (`scan_for_canary_returns_none_on_clean_response`, `..detects_echo_in_content`, `..detects_echo_in_tool_call_arguments`, `..detects_echo_in_tool_call_name`, `..detects_echo_in_tool_call_id`); existing `mint_wake_prompt_context_produces_distinct_32_hex_pairs` still green. Total 98 runtime unit tests pass.
+- **Truths landed**: T-AC79-3 (one `prompt_injection_canary_emitted` event per wake; `source = "runtime"`; canary value never persisted), T-AC79-4 (`scan_for_canary` covers `choices[].message.content` + every tool call's `function.name`/`function.arguments`/`id`), T-AC79-5 (canary echo terminates the wake BEFORE any `assistant_message` or `tool_call` event is appended — attacker's instruction never reaches the sandbox), T-AC79-6 (`prompt_injection_suspected` records `where_found` audit tag — never the canary value or surrounding bytes).
+- **What changed**:
+  - **`run_wake_loop` setup**: After `wake_start` event append, immediately appends `prompt_injection_canary_emitted` (source `"runtime"`, only `wake_id` set; no canary value persisted).
+  - **`run_wake_loop` per-iteration**: After `llm.chat` returns Ok, runs `scan_for_canary(&response, &prompt_ctx.canary_hex)` BEFORE any `assistant_message`/`tool_call` event append. On hit: appends `prompt_injection_suspected` with `content` set to the `where_found` audit tag (e.g. `"choice[0].tool_calls[0].function.arguments"`), sets `termination_reason = "prompt_injection_suspected"`, and `break`s the loop.
+  - **`scan_for_canary` helper**: returns first match across content + every tool call field. Returns `Some(CanaryEcho { where_found })` indicating the location class only — never the surrounding bytes (recording surrounding bytes would risk re-introducing canary or attacker content into the audit log).
+- **Not touched**: `event::append_event` unchanged (T-AC78-10 / T-AC79-11). LLM call ordering preserved — `insert_llm_call` still records cost when scan misses, so injection doesn't free a budget bypass either (the injection-terminated wake also doesn't double-count tools, since tools never run on injection).
+- **Concerns / deferred**:
+  - G4d will add jsonschema validation of the response against an LLM-tool-call schema with N=3 retry → `model_response_schema_invalid` and `FailureAuditPending` on cap exhaustion.
+  - G4e will add the per-wake 32-call rate limit + `tool_call_rate_limit_exceeded`, the adversarial integration test in `tests/prompt_injection_test.rs`, and CHANGELOG entry.
+- **Retries**: 1
+- **Next**: BUILD G4d — jsonschema validator + retry + `model_response_schema_invalid`/`FailureAuditPending`.
+
 ## BUILD G4a — AC-79 template v3 + delimiter wrapping — 2026-05-02T06:30Z
 
 - **Gate**: PASS (post-build slice, attempt 1)
