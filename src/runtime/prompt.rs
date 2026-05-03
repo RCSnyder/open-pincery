@@ -214,6 +214,7 @@ mod tests {
             "prompt_injection_suspected",
             "prompt_injection_canary_emitted",
             "tool_call_rate_limit_exceeded",
+            "capability_nonce_rejected",
             "rate_limit_exceeded",
             "sandbox_blocked",
             "sandbox_unavailable",
