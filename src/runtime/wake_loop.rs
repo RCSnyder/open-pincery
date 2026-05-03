@@ -96,6 +96,15 @@ pub async fn run_wake_loop(
     #[allow(unused_assignments)]
     let mut termination_reason = String::new();
 
+    // AC-79 (T-AC79-4..6 / G4d): per-wake counter of consecutive
+    // schema-invalid LLM responses. Schema-invalid responses do NOT
+    // count against `iteration_cap` (no tool dispatched, no
+    // `agent.wake_iteration_count` increment) so a misbehaving model
+    // cannot starve a well-behaved retry. After
+    // `config.schema_invalid_retry_cap` consecutive invalids, the wake
+    // terminates with `FailureAuditPending`.
+    let mut schema_invalid_attempts: u32 = 0;
+
     loop {
         // Check iteration cap
         let current = agent::get_agent(pool, agent_id)
@@ -204,6 +213,63 @@ pub async fn run_wake_loop(
                 break;
             }
         };
+
+        // AC-79 (T-AC79-4..6 / G4d): JSON Schema validation of every
+        // claimed tool call BEFORE any `tool_call` event is appended
+        // and BEFORE `dispatch_tool` is invoked. The model cannot
+        // smuggle malformed arguments past the schema floor.
+        if let Some(tcs) = &choice.message.tool_calls {
+            let mut invalid_reason: Option<String> = None;
+            for tc in tcs {
+                if let Err(why) =
+                    tools::validate_tool_call_arguments(&tc.function.name, &tc.function.arguments)
+                {
+                    invalid_reason = Some(why);
+                    break;
+                }
+            }
+            if let Some(why) = invalid_reason {
+                schema_invalid_attempts += 1;
+                warn!(
+                    agent_id = %agent_id,
+                    wake_id = %wake_id,
+                    attempt = schema_invalid_attempts,
+                    cap = config.schema_invalid_retry_cap,
+                    reason = %why,
+                    "AC-79: model response failed JSON-Schema validation"
+                );
+                // The `content` column records the structural reason
+                // (tool name + schema-error message), not the offending
+                // arguments themselves — those bytes may be
+                // attacker-controlled and recording them risks polluting
+                // the audit log with the same payload that triggered the
+                // failure on the next operator who reads it.
+                event::append_event(
+                    pool,
+                    agent_id,
+                    "model_response_schema_invalid",
+                    "runtime",
+                    Some(wake_id),
+                    None,
+                    None,
+                    None,
+                    Some(&why),
+                    None,
+                )
+                .await?;
+                if schema_invalid_attempts >= config.schema_invalid_retry_cap {
+                    termination_reason = "FailureAuditPending".to_string();
+                    break;
+                }
+                // Schema-invalid retries do NOT increment
+                // `iteration_cap` (no tool dispatched). Loop back to
+                // re-run the LLM with the same prompt.
+                continue;
+            }
+            // All tool calls validated — reset the counter so a single
+            // recovered response unsticks the wake.
+            schema_invalid_attempts = 0;
+        }
 
         // Handle text response
         if let Some(text) = &choice.message.content {

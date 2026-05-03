@@ -54,6 +54,10 @@ utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid", "yaml"] }
 serde_yaml = "0.9"
 jsonpath-rust = "0.7"
 tabled = "0.15"
+# AC-79 (v9 Phase G): JSON Schema validation of LLM tool-call arguments
+# before dispatch. Compiled validators are cached per tool from the
+# canonical `tool_definitions()` `parameters` schemas.
+jsonschema = "0.28"
 
 # AC-53 / Slice A2b.1: Linux-only sandbox crates.
 #

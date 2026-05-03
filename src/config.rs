@@ -124,6 +124,17 @@ pub struct Config {
     pub llm_maintenance_model: String,
     pub max_prompt_chars: usize,
     pub iteration_cap: i32,
+    /// AC-79 (v9 Phase G G4d): per-wake cap on consecutive
+    /// schema-invalid LLM tool-call responses. After this many
+    /// schema-invalid responses in one wake, the wake terminates with
+    /// `termination_reason = "FailureAuditPending"` and the agent's
+    /// status flips so an operator must triage. Default 3, env override
+    /// `OPEN_PINCERY_SCHEMA_INVALID_RETRY_CAP`. A value of 0 is rejected
+    /// at startup — operators may tighten the cap but not silently
+    /// disable schema validation. Schema-invalid retries do NOT count
+    /// against `iteration_cap` (so a misbehaving model cannot starve a
+    /// well-behaved retry).
+    pub schema_invalid_retry_cap: u32,
     pub stale_wake_hours: i64,
     pub wake_summary_limit: i64,
     pub event_window_limit: i64,
@@ -162,6 +173,18 @@ impl Config {
             iteration_cap: env_or("ITERATION_CAP", "50")
                 .parse()
                 .map_err(|e| format!("Invalid ITERATION_CAP: {e}"))?,
+            schema_invalid_retry_cap: {
+                let raw = env_or("OPEN_PINCERY_SCHEMA_INVALID_RETRY_CAP", "3");
+                let v: u32 = raw.parse().map_err(|e| {
+                    format!("Invalid OPEN_PINCERY_SCHEMA_INVALID_RETRY_CAP={raw}: {e}")
+                })?;
+                if v == 0 {
+                    return Err(
+                        "OPEN_PINCERY_SCHEMA_INVALID_RETRY_CAP=0 is rejected: operators may tighten the schema-invalid retry cap but not silently disable AC-79 validation; minimum 1".into(),
+                    );
+                }
+                v
+            },
             stale_wake_hours: env_or("STALE_WAKE_HOURS", "2")
                 .parse()
                 .map_err(|e| format!("Invalid STALE_WAKE_HOURS: {e}"))?,

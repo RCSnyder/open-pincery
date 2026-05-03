@@ -1,5 +1,29 @@
 # Open Pincery — Experiment Log
 
+## BUILD G4d — AC-79 jsonschema validation + retry cap + FailureAuditPending — 2026-05-03T03:20Z
+
+- **Gate**: PASS (post-build slice, attempt 1)
+- **Slice**: Validate every LLM tool-call's `function.arguments` against the tool's `parameters` schema BEFORE `dispatch_tool`. Per-wake retry counter, capped by new `Config::schema_invalid_retry_cap` (default 3, env `OPEN_PINCERY_SCHEMA_INVALID_RETRY_CAP`, 0 rejected). Schema-invalid retries do NOT count against `iteration_cap`. On cap exhaustion → `termination_reason = "FailureAuditPending"`. Files changed: `Cargo.toml`, `src/config.rs`, `src/runtime/tools.rs`, `src/runtime/wake_loop.rs`, `.env.example`, 17 test fixtures. LOC: ~190 added net.
+- **Evidence**:
+  - `cargo build --tests` clean on rust:1.95 (8m39s, jsonschema 0.28.3 compiled).
+  - `cargo clippy --all-targets -- -D warnings` clean.
+  - `cargo deny check licenses bans sources` PASS (jsonschema = MIT, no new license categories).
+  - 6 new unit tests in `runtime::tools::validator_tests` pass (`shell_call_with_command_passes`, `shell_call_missing_command_fails`, `shell_call_with_non_json_fails`, `unknown_tool_name_fails`, `sleep_with_no_args_passes`, `plan_requires_content`). 104 runtime unit tests pass total. 9 `cli::config` tests still pass — config field addition didn't regress any.
+- **Truths landed**: T-AC79-4 (validate `tc.function.arguments` against tool's `parameters` JSON Schema BEFORE `tools::dispatch_tool`; on fail emit `model_response_schema_invalid` and do NOT dispatch), T-AC79-5 (validators compiled once via `OnceLock<HashMap<String, jsonschema::Validator>>` from `tool_definitions()` — single source of truth; existing `serde_json::from_str::<ShellArgs>` stays as defense-in-depth strictly downstream), T-AC79-6 (per-wake `schema_invalid_attempts` counter capped by `config.schema_invalid_retry_cap`; schema-invalid retries do NOT increment `iteration_cap`/`wake_iteration_count`; cap exhaustion → `termination_reason = "FailureAuditPending"`; a single recovered response resets the counter so transient drift unsticks).
+- **What changed**:
+  - **`src/runtime/tools.rs`**: New `pub fn validate_tool_call_arguments(tool_name, arguments) -> Result<(), String>`. Lazy `OnceLock` cache keyed on `tool_definitions()` names, compiles each tool's `parameters` via `jsonschema::validator_for`. Returns reason-only error string (tool name + first schema error path), never echoes the offending arguments — those bytes are attacker-controlled.
+  - **`src/runtime/wake_loop.rs`**: Added per-wake `schema_invalid_attempts: u32` outside iteration loop. After LLM call + canary scan, BEFORE `assistant_message`/`tool_call` events: validates every claimed tool call. On invalid: emits `model_response_schema_invalid` (source `"runtime"`, content = structural reason only), increments counter, `continue`s outer loop without dispatching ANY tool. On `>= cap` → `termination_reason = "FailureAuditPending"`, break. Successful validation resets counter to 0.
+  - **`src/config.rs`**: New `pub schema_invalid_retry_cap: u32` field. `from_env` parses `OPEN_PINCERY_SCHEMA_INVALID_RETRY_CAP` (default `"3"`); rejects 0 with explicit message ("operators may tighten the schema-invalid retry cap but not silently disable AC-79 validation").
+  - **`Cargo.toml`**: `jsonschema = "0.28"` (MIT, license check clean).
+  - **`.env.example`**: documented new env var.
+  - **17 test fixtures**: `schema_invalid_retry_cap: 3,` added after `iteration_cap: 50,` (sed batch + manual `wake_loop_test.rs`).
+- **Not touched**: `event::append_event` signature unchanged (T-AC78-10 / T-AC79-11). All 4 AC-79 event types (`prompt_injection_canary_emitted`, `prompt_injection_suspected`, `model_response_schema_invalid`, future `tool_call_rate_limit_exceeded`) use `source = "runtime"`. `dispatch_tool` and `tool_definitions` unchanged — validator is purely additive upstream.
+- **Concerns / deferred**:
+  - Audit-DB advisory check still tripping over `RUSTSEC-2026-0067` CVSS-4.0 parse error in cargo-deny 0.16.4 — pre-existing, unrelated to this slice. License/bans/sources gates clean.
+  - G4e: per-wake 32-call rate limit (`Config::tool_call_rate_limit_per_wake` distinct from `iteration_cap=50`), `tool_call_rate_limit_exceeded` event, adversarial integration test in `tests/prompt_injection_test.rs`, CHANGELOG entry.
+- **Retries**: 1
+- **Next**: BUILD G4e — rate limit + adversarial integration test + CHANGELOG.
+
 ## BUILD G4b+G4c — AC-79 canary emission + echo scan + injection termination — 2026-05-02T07:30Z
 
 - **Gate**: PASS (post-build slice, attempt 1)

@@ -1,11 +1,3 @@
-use serde::Deserialize;
-use serde_json::json;
-use sqlx::PgPool;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tracing::{info, warn};
-use uuid::Uuid;
-
 use super::capability::{self, PermissionMode};
 use super::llm::{FunctionDef, ToolCallRequest, ToolDefinition};
 use super::sandbox::{ExecResult, SandboxProfile, ShellCommand, ToolExecutor};
@@ -19,6 +11,13 @@ use crate::observability::metrics as m;
 use crate::observability::seccomp_audit;
 #[cfg(target_os = "linux")]
 use crate::runtime::sandbox::preflight::{KernelProbe, RealKernelProbe};
+use serde::Deserialize;
+use serde_json::json;
+use sqlx::PgPool;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tracing::{info, warn};
+use uuid::Uuid;
 
 /// AC-43 (v7): prefix tagging env-var values that must be resolved from
 /// the workspace credential vault before the child process is spawned.
@@ -30,6 +29,99 @@ pub enum ToolResult {
     Output(String),
     Sleep,
     Error(String),
+}
+
+/// AC-79 (v9 Phase G G4d): JSON-Schema validation of LLM tool-call
+/// arguments before [`dispatch_tool`] is allowed to run. Returns:
+/// - `Ok(())` if `tool_name` is registered AND the arguments string
+///   parses as JSON AND the parsed value satisfies the tool's
+///   `parameters` schema from [`tool_definitions`].
+/// - `Err(why)` with a human-readable reason otherwise. The wake loop
+///   uses this string as the `model_response_schema_invalid` event's
+///   `content` payload (NOT the arguments themselves — those bytes
+///   may be attacker-controlled and live too long in `events`).
+///
+/// Validators are compiled once per process from `tool_definitions()`
+/// and cached. `tool_definitions()` is the single source of truth for
+/// tool argument schemas — the existing `serde_json::from_str::<ShellArgs>`
+/// inside `dispatch_tool` stays as defense-in-depth (Rust-shape binding)
+/// and runs strictly downstream of this validator.
+pub fn validate_tool_call_arguments(tool_name: &str, arguments: &str) -> Result<(), String> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<HashMap<String, jsonschema::Validator>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| {
+        let mut m = HashMap::new();
+        for def in tool_definitions() {
+            // `jsonschema::validator_for` infers the draft from `$schema`
+            // or falls back to draft 2020-12. Tool schemas are
+            // hand-authored object shapes; if compilation ever fails
+            // we fail-closed by simply not inserting the entry, which
+            // forces the validator to report the tool as unknown.
+            if let Ok(v) = jsonschema::validator_for(&def.function.parameters) {
+                m.insert(def.function.name.clone(), v);
+            }
+        }
+        m
+    });
+
+    let validator = cache
+        .get(tool_name)
+        .ok_or_else(|| format!("unknown tool name: {tool_name}"))?;
+    let parsed: serde_json::Value = serde_json::from_str(arguments)
+        .map_err(|e| format!("tool arguments are not valid JSON: {e}"))?;
+    if !validator.is_valid(&parsed) {
+        // Collect the first schema error for an actionable message.
+        // Boundaries are tight: we record the structural reason, not
+        // the offending value bytes (which may be attacker-controlled).
+        let first = validator.iter_errors(&parsed).next();
+        let reason = first
+            .map(|e| format!("{} at {}", e, e.instance_path))
+            .unwrap_or_else(|| "schema mismatch (no detail)".to_string());
+        return Err(format!("schema mismatch for tool {tool_name}: {reason}"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod validator_tests {
+    use super::*;
+
+    #[test]
+    fn shell_call_with_command_passes() {
+        assert!(validate_tool_call_arguments("shell", r#"{"command":"ls"}"#).is_ok());
+    }
+
+    #[test]
+    fn shell_call_missing_command_fails() {
+        let err = validate_tool_call_arguments("shell", "{}").unwrap_err();
+        assert!(
+            err.contains("schema mismatch for tool shell"),
+            "expected schema mismatch error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn shell_call_with_non_json_fails() {
+        let err = validate_tool_call_arguments("shell", "not-json").unwrap_err();
+        assert!(err.contains("not valid JSON"));
+    }
+
+    #[test]
+    fn unknown_tool_name_fails() {
+        let err = validate_tool_call_arguments("rm_rf", r#"{"path":"/"}"#).unwrap_err();
+        assert!(err.contains("unknown tool name: rm_rf"));
+    }
+
+    #[test]
+    fn sleep_with_no_args_passes() {
+        assert!(validate_tool_call_arguments("sleep", "{}").is_ok());
+    }
+
+    #[test]
+    fn plan_requires_content() {
+        assert!(validate_tool_call_arguments("plan", r#"{"content":"x"}"#).is_ok());
+        assert!(validate_tool_call_arguments("plan", "{}").is_err());
+    }
 }
 
 pub fn tool_definitions() -> Vec<ToolDefinition> {

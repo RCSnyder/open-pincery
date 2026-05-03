@@ -20,6 +20,7 @@ async fn test_shutdown_cancels_stale_recovery() {
             llm_maintenance_model: "test".into(),
             max_prompt_chars: 100000,
             iteration_cap: 50,
+            schema_invalid_retry_cap: 3,
             stale_wake_hours: 2,
             wake_summary_limit: 20,
             event_window_limit: 200,
