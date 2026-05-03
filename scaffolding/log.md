@@ -1,5 +1,14 @@
 # Open Pincery — Experiment Log
 
+## VERIFY — AC-80 — 2026-05-03 (close)
+
+- **Gate**: post-verify PASS (attempt 1 — verify of `718a499`).
+- **Evidence**: full `cargo test` = **321 passed / 0 failed / 0 ignored**. `cargo test --test capability_nonce_test` = 12/12 PASS. Threaded sites all green (`landlock_audit` 15/15, `capability_gate` 9/9, `list_credentials_tool` 2/2, `placeholder_dispatch` 4/4, `sigsys_event` 0/0 gated). `cargo build --release` clean. T-AC80-1..12 + L-AC80-1..7 all verified with file:line + test name. Closed-set predicate, per-test reset list, DELIVERY/CHANGELOG entries all confirmed.
+- **Notes**: 1 pre-existing medium advisory `RUSTSEC-2023-0071` (rsa via sqlx-mysql) — unrelated to AC-80, tracked as v9.x dep-hygiene item. Doc cosmetic: readiness narrative T-AC80-2 still describes the BEFORE-validate default; shipped placement uses the C-AC80-1-permitted alternative AFTER + cites R-AC80-7. Non-blocking.
+- **Changes**: none (read-only verify).
+- **Retries**: 1.
+- **Next**: AC-80 close-marker commit; then ANALYZE for AC-81 (spec_coverage.md + commit-msg hook).
+
 ## RECONCILE — AC-80 — 2026-05-03T(post-review)
 
 - **Trigger**: User-requested 7-axis reconcile after AC-80 REVIEW round 2 PASS at `3bc16a7` recorded in commit `6d5a092` (HEAD). Prior phases (ANALYZE `f31e0da`; BUILD G5a `5d86330`, G5b+G5c `43fb456`, G5d `3bc4593`, G5e `4416118`, clippy fix `1442390`; REVIEW round 1 FAIL; REVIEW-FIX-1 `3bc16a7`) had not been individually logged — log.md jumped from AC-79 VERIFY straight to AC-80 REVIEW round-2.
