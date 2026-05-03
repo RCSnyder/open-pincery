@@ -1,5 +1,21 @@
 # Open Pincery — Experiment Log
 
+## VERIFY — AC-79 — 2026-05-03T06:05Z
+
+- **Gate**: post-verify PASS (attempt 2 — re-verify of `6862d58`).
+- **Verdict**: PASS. AC-79 (v9 Phase G — Prompt-Injection Defense Floor) fully verified.
+- **Evidence**:
+  - `cargo test --test env_example_test` → 4/4 PASS (regression closed).
+  - `cargo test --tests --no-fail-fast` → 100% green across all ~70 integration suites + 176 lib unit tests + 0 failures anywhere.
+  - `cargo test --test prompt_injection_test` → 6/6 PASS.
+  - `cargo test --lib runtime::` → 104/104 PASS.
+  - cargo build --tests + clippy --all-targets -D warnings + cargo deny check (licenses bans sources) clean.
+- **Truths verified**: T-AC79-1..T-AC79-12 all PASS with concrete file:line evidence.
+- **AC pass/fail**: AC-79 (a/b/c/d) all PASS.
+- **Diff scope vs `fc1883f`**: allowlist-only — `tests/env_example_test.rs` (+5) and `scaffolding/log.md` (+9). No production code touched.
+- **Retries**: 2 (FAIL @ `fc1883f` env_example_test orphan → verify-fix-1 → PASS @ `6862d58`).
+- **Next**: DELIVERY.md update + final commit. AC-79 closed.
+
 ## VERIFY-FIX-1 — AC-79 — 2026-05-03T05:50Z
 
 - **Gate**: post-verify fix-cycle attempt 1 — regression repaired.
