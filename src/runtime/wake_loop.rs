@@ -171,10 +171,23 @@ pub async fn run_wake_loop(
                 where_found = %echo.where_found,
                 "AC-79: canary echo detected in LLM response — prompt injection suspected"
             );
-            // The `content` column records WHERE the echo was found
-            // (NOT the canary value itself, NOT the surrounding bytes).
-            // The harness response is discarded — no `assistant_message`
-            // or `tool_call` event is appended.
+            // T-AC79-8 payload: `where_found` audit tag plus the count
+            // of tool calls the model attempted in the offending
+            // response (so an operator can tell whether the LLM tried
+            // to smuggle 1 call or 50 — distinguishes a single-shot
+            // probe from a barrage). Canary value and surrounding
+            // bytes are NEVER persisted. Encoded as JSON so future
+            // fields can be added without breaking parsers.
+            let attempted_tool_calls = response
+                .choices
+                .first()
+                .and_then(|c| c.message.tool_calls.as_ref().map(|t| t.len()))
+                .unwrap_or(0);
+            let payload = format!(
+                "{{\"where_found\":{},\"model_attempted_tool_calls\":{}}}",
+                serde_json::Value::String(echo.where_found.clone()),
+                attempted_tool_calls,
+            );
             event::append_event(
                 pool,
                 agent_id,
@@ -184,7 +197,7 @@ pub async fn run_wake_loop(
                 None,
                 None,
                 None,
-                Some(&echo.where_found),
+                Some(&payload),
                 None,
             )
             .await?;
@@ -226,42 +239,62 @@ pub async fn run_wake_loop(
         // claimed tool call BEFORE any `tool_call` event is appended
         // and BEFORE `dispatch_tool` is invoked. The model cannot
         // smuggle malformed arguments past the schema floor.
+        //
+        // Aside on multi-choice: schema validation, like the dispatcher
+        // below, intentionally only inspects `choices.first()` — the
+        // response that the wake loop will actually consume. If
+        // multi-choice dispatch is ever added, both this gate and
+        // `dispatch_tool` need to widen together.
         if let Some(tcs) = &choice.message.tool_calls {
-            let mut invalid_reason: Option<String> = None;
+            let mut invalid: Option<(String, String)> = None; // (tool_name, why)
             for tc in tcs {
                 if let Err(why) =
                     tools::validate_tool_call_arguments(&tc.function.name, &tc.function.arguments)
                 {
-                    invalid_reason = Some(why);
+                    invalid = Some((tc.function.name.clone(), why));
                     break;
                 }
             }
-            if let Some(why) = invalid_reason {
+            if let Some((tool_name, why)) = invalid {
                 schema_invalid_attempts += 1;
                 warn!(
                     agent_id = %agent_id,
                     wake_id = %wake_id,
                     attempt = schema_invalid_attempts,
                     cap = config.schema_invalid_retry_cap,
+                    tool_name = %tool_name,
                     reason = %why,
                     "AC-79: model response failed JSON-Schema validation"
                 );
-                // The `content` column records the structural reason
-                // (tool name + schema-error message), not the offending
-                // arguments themselves — those bytes may be
-                // attacker-controlled and recording them risks polluting
-                // the audit log with the same payload that triggered the
-                // failure on the next operator who reads it.
+                // T-AC79-9 payload: structured JSON with `tool_name`,
+                // `schema_errors` (single-element list with the first
+                // structural failure — never the offending argument
+                // bytes themselves; those may be attacker-controlled),
+                // `attempt` (1-indexed), and `retry_cap`. From the log
+                // alone an auditor can tell whether an event was
+                // attempt 1 of 3 (recoverable) or attempt 3 of 3
+                // (terminal). NOTE: any text in `choice.message.content`
+                // accompanying the invalid tool calls is intentionally
+                // dropped — emitting an `assistant_message` for a
+                // response we are about to retry would pollute the
+                // audit chain with a half-emission.
+                let payload = format!(
+                    "{{\"tool_name\":{},\"schema_errors\":[{}],\"attempt\":{},\"retry_cap\":{}}}",
+                    serde_json::Value::String(tool_name.clone()),
+                    serde_json::Value::String(why.clone()),
+                    schema_invalid_attempts,
+                    config.schema_invalid_retry_cap,
+                );
                 event::append_event(
                     pool,
                     agent_id,
                     "model_response_schema_invalid",
                     "runtime",
                     Some(wake_id),
+                    Some(&tool_name),
                     None,
                     None,
-                    None,
-                    Some(&why),
+                    Some(&payload),
                     None,
                 )
                 .await?;
@@ -474,10 +507,20 @@ pub async fn run_wake_loop(
 /// from the OS CSPRNG. They live on the stack for exactly one wake and
 /// are never persisted, logged, or returned across the function boundary.
 fn mint_wake_prompt_context() -> WakePromptContext {
-    use rand::Rng;
-    let mut rng = rand::rng();
-    let nonce_bytes: [u8; 16] = rng.random();
-    let canary_bytes: [u8; 16] = rng.random();
+    use rand::rngs::OsRng;
+    use rand::TryRngCore;
+    let mut nonce_bytes = [0u8; 16];
+    let mut canary_bytes = [0u8; 16];
+    // Direct OsRng (T-AC79-1: "derived from OsRng"). `try_fill_bytes`
+    // surfaces a CSPRNG failure rather than panicking — but on every
+    // supported platform it is infallible, so we just unwrap. If the
+    // OS RNG genuinely fails the wake cannot proceed safely.
+    OsRng
+        .try_fill_bytes(&mut nonce_bytes)
+        .expect("AC-79 T-AC79-1: OsRng must produce a wake nonce");
+    OsRng
+        .try_fill_bytes(&mut canary_bytes)
+        .expect("AC-79 T-AC79-1: OsRng must produce a wake canary");
     WakePromptContext {
         wake_nonce: hex::encode(nonce_bytes),
         canary_hex: hex::encode(canary_bytes),

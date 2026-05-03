@@ -1,5 +1,24 @@
 # Open Pincery — Experiment Log
 
+## REVIEW-FIX-1 — AC-79 — 2026-05-03T05:10Z
+
+- **Gate**: post-review fix-cycle attempt 1 — PASS (re-review pending)
+- **Trigger**: REVIEW agent verdict FAIL on `e0b814e`. 1 Critical (3 scope-verbatim adversarial integration tests missing) + 3 Required (`prompt_injection_suspected` payload missing `model_attempted_tool_calls`; `model_response_schema_invalid` payload not structured JSON per T-AC79-9; no integration assertion that `wake_system_prompt` v3 is the active row) + Consider items (ThreadRng vs OsRng; choice asymmetry).
+- **Fixes**:
+  - `src/runtime/wake_loop.rs`: `prompt_injection_suspected` payload rewritten to JSON `{"where_found":"...","model_attempted_tool_calls":N}` (T-AC79-8). `model_response_schema_invalid` payload rewritten to JSON `{"tool_name":"...","schema_errors":["..."],"attempt":N,"retry_cap":N}` (T-AC79-9), `tool_name` also written to its dedicated column for indexing. `mint_wake_prompt_context` switched from `rand::rng()` ThreadRng to `rand::rngs::OsRng` (T-AC79-1: OS CSPRNG mandate). Inline comment documents the choice-asymmetry: schema gate inspects `choices.first()` like `dispatch_tool` does — both must widen together if multi-choice dispatch ever lands.
+  - `tests/prompt_injection_test.rs`: 4 new tests: (a) `injected_webhook_payload_is_wrapped_in_untrusted_delimiters_no_smuggled_dispatch` — asserts `<<untrusted:NONCE>>...<<end:NONCE>>` wrapping in outgoing prompt body and zero non-`sleep` tool_call events for an `IGNORE PREVIOUS INSTRUCTIONS` payload; (b) `forged_canary_echo_in_response_content_terminates_wake_with_prompt_injection_suspected` — wiremock `Respond` reflector extracts the per-wake canary from the outgoing system prompt (rightmost 32-hex marker), echoes it in `choices[0].message.content`, asserts wake terminates with `prompt_injection_suspected`, payload contains `where_found` + `model_attempted_tool_calls:0`, no `assistant_message` or `tool_call` lands; (c) `malformed_tool_call_args_emit_schema_invalid_event_then_recover` — sequential `Respond` returns malformed JSON args first then valid sleep, asserts exactly 1 `model_response_schema_invalid` row with `{tool_name=shell, attempt:1, retry_cap:3, schema_errors:[...]}` and the wake recovers cleanly to `sleep`; (d) `wake_system_prompt_v3_is_active_and_contains_required_substrings` — runtime proof for L-AC79-2: deactivates the test-harness v1 row, replays the AC-79 migration via `include_str!`, queries the active row, asserts version=3 + every v2 superset substring (`pcy credential add`, `REFUSE`, `POST /api/workspaces/`, `PLACEHOLDER:`, `list_credentials`) + every v3 untrusted-content discipline marker (`## CRITICAL: Untrusted Content Boundaries`, `<<untrusted:`, `<<end:`, `<<canary:`).
+- **Evidence**:
+  - `cargo fmt --all` clean.
+  - `cargo build --tests` clean on rust:1.95.
+  - `cargo clippy --all-targets -- -D warnings` clean.
+  - `cargo test --test prompt_injection_test`: 6 passed; 0 failed (4 new + 2 G4e).
+  - `cargo test --lib runtime::`: 104 passed; 0 failed (unchanged).
+- **Notes**:
+  - First reflector attempt grabbed the literal `HEX` placeholder from the v3 system prompt's instructional text (the prompt mentions `<<canary:HEX>>` as an example). Switched to scanning right-to-left and validating the captured token is exactly 32 lowercase hex chars — the appended runtime canary always wins.
+  - First v3-active assertion failed on `POST /api/workspaces/:id/credentials`; the v3 template uses `{workspace_id}`. Tightened the substring to the common prefix `POST /api/workspaces/`.
+- **Retries**: 1 (fixed forged-canary extractor + v3 substring). 1 docker rustfmt-not-installed retry.
+- **Next**: commit + push + re-dispatch REVIEW.
+
 ## BUILD G4e — AC-79 per-wake tool-call rate limit + adversarial integration tests + CHANGELOG — 2026-05-03T03:55Z
 
 - **Gate**: PASS (post-build slice, attempt 1)
