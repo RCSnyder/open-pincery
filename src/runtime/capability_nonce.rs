@@ -4,11 +4,17 @@
 //! 60-second-expiring nonce so a captured wake transcript or a
 //! compromised wake cannot replay yesterday's authorization.
 //!
-//! Mint site: `src/runtime/wake_loop.rs::run_wake_loop`, immediately
-//! after the LLM proposes a tool call and BEFORE
-//! `tools::validate_tool_call_arguments` (the AC-79 schema guard).
-//! That placement is the canonical TLA+ `AuthorizeExecution`
-//! boundary — see `docs/input/OpenPinceryCanonical.tla` line 845.
+//! Mint site: `src/runtime/wake_loop.rs::run_wake_loop`, AFTER the
+//! AC-79 JSON-Schema validation gate and the per-wake tool-call
+//! rate-limit check, immediately BEFORE `tools::dispatch_tool`. This
+//! is the canonical TLA+ `AuthorizeExecution` boundary as ratified
+//! by readiness R-AC80-7: minting downstream of AC-79 keeps
+//! schema-invalid replays from leaving orphan rows in
+//! `capability_nonces`, which strengthens T-AC80-12 (storage-growth
+//! attack-multiplier) without weakening T-AC80-1..6. See
+//! `docs/input/OpenPinceryCanonical.tla` line 845 for the abstract
+//! action and `scaffolding/readiness.md` (R-AC80-7) for the
+//! placement rationale.
 //!
 //! Consume site: `src/runtime/tools.rs::dispatch_tool`, AFTER the
 //! AC-35 capability-mode gate and BEFORE any per-tool argument
@@ -254,7 +260,7 @@ async fn classify_rejection(
         Option<chrono::DateTime<chrono::Utc>>,
         chrono::DateTime<chrono::Utc>,
     );
-    let row: Option<ClassifyRow> = sqlx::query_as(
+    let row: Option<ClassifyRow> = match sqlx::query_as::<_, ClassifyRow>(
         "SELECT wake_id, tool_name, capability_shape, consumed_at, expires_at \
                FROM capability_nonces \
               WHERE workspace_id = $1 AND nonce = $2",
@@ -263,7 +269,24 @@ async fn classify_rejection(
     .bind(&nonce[..])
     .fetch_optional(pool)
     .await
-    .unwrap_or(None);
+    {
+        Ok(r) => r,
+        Err(e) => {
+            // Audit-honesty: a transient DB error during classification
+            // is observably indistinguishable from a hostile cross-
+            // workspace probe (both surface as RejectionReason::Unknown).
+            // Emit a warn so the operator can correlate with infra
+            // metrics; the rejection event still goes out so the audit
+            // chain stays complete.
+            tracing::warn!(
+                error = %e,
+                workspace_id = %workspace_id,
+                wake_id = %wake_id,
+                "AC-80 classify_rejection DB error — falling back to Unknown"
+            );
+            None
+        }
+    };
 
     let Some((row_wake, row_tool, row_shape, consumed_at, expires_at)) = row else {
         return RejectionReason::Unknown;
