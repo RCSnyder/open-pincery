@@ -247,13 +247,14 @@ async fn classify_rejection(
     tool_name: &str,
     capability_shape: &str,
 ) -> RejectionReason {
-    let row: Option<(
+    type ClassifyRow = (
         Uuid,
         String,
         String,
         Option<chrono::DateTime<chrono::Utc>>,
         chrono::DateTime<chrono::Utc>,
-    )> = sqlx::query_as(
+    );
+    let row: Option<ClassifyRow> = sqlx::query_as(
         "SELECT wake_id, tool_name, capability_shape, consumed_at, expires_at \
                FROM capability_nonces \
               WHERE workspace_id = $1 AND nonce = $2",
