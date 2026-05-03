@@ -30,7 +30,7 @@ pub async fn test_pool() -> PgPool {
     // Clean all tables for a fresh test
     sqlx::query(
         "TRUNCATE webhook_dedup, auth_audit, tool_audit, llm_call_prompts, llm_calls, wake_summaries, 
-         agent_projections, events, agents, workspace_memberships, organization_memberships,
+         agent_projections, events, capability_nonces, agents, workspace_memberships, organization_memberships,
          workspaces, organizations, user_sessions, users, prompt_templates CASCADE"
     )
     .execute(&pool)
