@@ -1,5 +1,24 @@
 # Open Pincery — Experiment Log
 
+## REVIEW — AC-79 — 2026-05-03T05:25Z
+
+- **Gate**: post-review PASS (attempt 2 — re-review of `91ecfb8`).
+- **Verdict**: PASS. All previous Critical and Required findings closed; both Consider items addressed.
+- **Confirmed closed**:
+  - Critical (3 scope.md line-715 adversarial integration tests) — `injected_webhook_payload_is_wrapped_in_untrusted_delimiters_no_smuggled_dispatch`, `forged_canary_echo_in_response_content_terminates_wake_with_prompt_injection_suspected`, `malformed_tool_call_args_emit_schema_invalid_event_then_recover` all present and end-to-end against wiremock.
+  - Required #1 (`prompt_injection_suspected` payload) — JSON `{where_found, model_attempted_tool_calls}` with `serde_json::Value::String` escaping.
+  - Required #2 (`model_response_schema_invalid` payload) — JSON `{tool_name, schema_errors[], attempt, retry_cap}`; both string fields escape attacker-controlled `why` text.
+  - Required #3 (L-AC79-2 active-row integration proof) — `wake_system_prompt_v3_is_active_and_contains_required_substrings` reseeds via `include_str!` on the migration file (source of truth) and asserts every required substring.
+  - Consider (ThreadRng → OsRng) — `mint_wake_prompt_context` now uses `rand::rngs::OsRng::try_fill_bytes`.
+  - Consider (choice asymmetry) — explicit inline comment + consistent `choices.first()` use across schema gate, content emission, and dispatcher.
+- **New non-blocking Consider items** (not gate-failing):
+  - Hand-rolled JSON via `format!` + `serde_json::Value::String(...)` is correct but `serde_json::json!({...}).to_string()` would be harder to break in future edits.
+  - `injected_webhook_payload...` test could regex the matching `<<untrusted:NONCE>>...<<end:NONCE>>` nonce pair instead of asserting the open/close markers independently.
+- **New FYI / RECONCILE territory**: `readiness.md` T-AC79-8 wording says canary-echo terminates with `termination_reason = "FailureAuditPending"`; the implementation and the integration test both pin `"prompt_injection_suspected"`. Doc-vs-code drift to be folded into RECONCILE.
+- **Evidence**: cargo fmt + build --tests + clippy --all-targets -D warnings clean; cargo test --test prompt_injection_test 6/6 PASS; cargo test --lib runtime:: 104/104 PASS.
+- **Retries**: 2 (FAIL @ `e0b814e` → fix-cycle 1 → PASS @ `91ecfb8`).
+- **Next**: RECONCILE → VERIFY → DELIVERY.
+
 ## REVIEW-FIX-1 — AC-79 — 2026-05-03T05:10Z
 
 - **Gate**: post-review fix-cycle attempt 1 — PASS (re-review pending)
