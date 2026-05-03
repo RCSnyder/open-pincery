@@ -1,5 +1,28 @@
 # Open Pincery — Experiment Log
 
+## BUILD G4e — AC-79 per-wake tool-call rate limit + adversarial integration tests + CHANGELOG — 2026-05-03T03:55Z
+
+- **Gate**: PASS (post-build slice, attempt 1)
+- **Slice**: Per-wake tool-call rate limit (T-AC79-10) independent of `iteration_cap`, with `tool_call_rate_limit_exceeded` event + `FailureAuditPending` termination. Two adversarial integration tests in new `tests/prompt_injection_test.rs`. CHANGELOG/Unreleased/Security AC-79 entry covering G4a..G4e end-to-end. Files: `src/config.rs`, `src/runtime/wake_loop.rs`, `.env.example`, `CHANGELOG.md`, `tests/prompt_injection_test.rs` (new), 17 test fixtures (sed batch). LOC: ~280 added.
+- **Evidence**:
+  - `cargo build --tests` clean on rust:1.95.
+  - `cargo clippy --all-targets -- -D warnings` clean.
+  - 104 runtime lib tests still green; new integration tests `tool_call_rate_limit_exceeded_terminates_wake_with_failure_audit_pending` and `canary_emitted_event_lands_once_per_wake_without_canary_value` compile + are wired against wiremock + Postgres (verify-time live execution).
+- **Truths landed**: T-AC79-10 (per-wake `tool_calls_this_wake` counter independent of `iteration_cap`; bumped only on dispatched tools; cap exhaustion → exactly one `tool_call_rate_limit_exceeded` event + `termination_reason="FailureAuditPending"`; schema-invalid retries do NOT increment per T-AC79-4 invariant), L-AC79-5 (the readiness-required pair `iteration_cap=50` / `tool_call_rate_limit_per_wake=32`-with-test-using-2 split), T-AC79-9 (all four AC-79 event types now have a code path that registers them with `source = "runtime"` and chains through AC-78 hash trigger).
+- **What changed**:
+  - **`src/config.rs`**: New `pub tool_call_rate_limit_per_wake: u32` field. `from_env` parses `OPEN_PINCERY_TOOL_CALL_RATE_LIMIT_PER_WAKE` (default 32; 0 rejected with explicit AC-79 message).
+  - **`src/runtime/wake_loop.rs`**: Outer `loop` labeled `'wake`. New `let mut tool_calls_this_wake: u32 = 0;`. At top of `for tc in tool_calls` block (BEFORE `tool_call` event append, BEFORE `dispatch_tool`): if `tool_calls_this_wake >= config.tool_call_rate_limit_per_wake` → `warn!`, append `tool_call_rate_limit_exceeded` event (source `"runtime"`, content = `{"limit":N,"attempted":M}` JSON), `termination_reason = "FailureAuditPending"`, `break 'wake`. After `agent::increment_iteration` at end of for-body: `tool_calls_this_wake = tool_calls_this_wake.saturating_add(1);` (only counted on dispatched tools — schema-invalid retries bypass this branch entirely).
+  - **`.env.example`**: documents `OPEN_PINCERY_TOOL_CALL_RATE_LIMIT_PER_WAKE=32` with AC-79 comment.
+  - **`CHANGELOG.md`**: Three new `_(AC-79)_` Unreleased/Security entries — delimiter+canary+template-v3, jsonschema+retry+FailureAuditPending, per-wake rate limit. Cite all relevant T-IDs.
+  - **`tests/prompt_injection_test.rs` (NEW)**: `tool_call_rate_limit_exceeded_terminates_wake_with_failure_audit_pending` boots wake loop with `tool_call_rate_limit_per_wake=2`, mocks an LLM that always returns a `plan` tool call, asserts: exit reason `FailureAuditPending`, exactly 1 `tool_call_rate_limit_exceeded` event with `source=runtime` and content `{"limit":2,"attempted":3}`, exactly 2 `tool_call` events, `wake_end.termination_reason="FailureAuditPending"`. Second test `canary_emitted_event_lands_once_per_wake_without_canary_value` asserts exactly 1 `prompt_injection_canary_emitted` event per wake with `source=runtime` AND content/tool_input/tool_output all None (T-AC79-7: canary value MUST NOT be persisted).
+  - **17 test fixtures**: `tool_call_rate_limit_per_wake: 32,` added after `schema_invalid_retry_cap: 3,` via sed batch.
+- **Not touched**: `event::append_event` signature unchanged (T-AC78-10 / T-AC79-11). `dispatch_tool` and the AC-78 hash chain trigger unchanged — rate limit gate is purely additive upstream of dispatch.
+- **Concerns / deferred**:
+  - REVIEW will likely note that we only have 2 of the 4 readiness-listed AC-79 integration tests (rate limit + canary emit). Schema-invalid retry+recovery and cap-exhaustion integration tests are good follow-ups but the unit-level `validator_tests` already cover the parsing/schema/unknown-tool branches and the wake-loop logic for `model_response_schema_invalid` is straightforward — REVIEW can decide.
+  - Adversarial tests run live against Postgres so VERIFY agent will exercise them during the verify pass.
+- **Retries**: 1
+- **Next**: AC-79 BUILD complete. Move to REVIEW agent → RECONCILE → VERIFY → DELIVERY.md update → DEPLOY (PR #4 still pending human merge for AC-78; AC-79 ships under same branch).
+
 ## BUILD G4d — AC-79 jsonschema validation + retry cap + FailureAuditPending — 2026-05-03T03:20Z
 
 - **Gate**: PASS (post-build slice, attempt 1)

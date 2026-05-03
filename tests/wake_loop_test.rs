@@ -27,6 +27,7 @@ fn test_config(iteration_cap: i32) -> Config {
         max_prompt_chars: 100000,
         iteration_cap,
         schema_invalid_retry_cap: 3,
+        tool_call_rate_limit_per_wake: 32,
         stale_wake_hours: 2,
         wake_summary_limit: 20,
         event_window_limit: 200,

@@ -135,6 +135,16 @@ pub struct Config {
     /// against `iteration_cap` (so a misbehaving model cannot starve a
     /// well-behaved retry).
     pub schema_invalid_retry_cap: u32,
+    /// AC-79 (v9 Phase G G4e): per-wake cap on the number of tool calls
+    /// that may be dispatched within a single wake. Independent of
+    /// `iteration_cap` (which counts wake iterations and feeds
+    /// `agents.wake_iteration_count`). On exhaustion the wake emits
+    /// `tool_call_rate_limit_exceeded` once and terminates with
+    /// `termination_reason = "FailureAuditPending"`. Default 32, env
+    /// override `OPEN_PINCERY_TOOL_CALL_RATE_LIMIT_PER_WAKE`. A value
+    /// of 0 is rejected at startup — operators may tighten the limit
+    /// but not silently disable AC-79's tool-call rate floor.
+    pub tool_call_rate_limit_per_wake: u32,
     pub stale_wake_hours: i64,
     pub wake_summary_limit: i64,
     pub event_window_limit: i64,
@@ -181,6 +191,18 @@ impl Config {
                 if v == 0 {
                     return Err(
                         "OPEN_PINCERY_SCHEMA_INVALID_RETRY_CAP=0 is rejected: operators may tighten the schema-invalid retry cap but not silently disable AC-79 validation; minimum 1".into(),
+                    );
+                }
+                v
+            },
+            tool_call_rate_limit_per_wake: {
+                let raw = env_or("OPEN_PINCERY_TOOL_CALL_RATE_LIMIT_PER_WAKE", "32");
+                let v: u32 = raw.parse().map_err(|e| {
+                    format!("Invalid OPEN_PINCERY_TOOL_CALL_RATE_LIMIT_PER_WAKE={raw}: {e}")
+                })?;
+                if v == 0 {
+                    return Err(
+                        "OPEN_PINCERY_TOOL_CALL_RATE_LIMIT_PER_WAKE=0 is rejected: operators may tighten the per-wake tool-call rate limit but not silently disable AC-79 enforcement; minimum 1".into(),
                     );
                 }
                 v

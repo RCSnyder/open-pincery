@@ -105,7 +105,15 @@ pub async fn run_wake_loop(
     // terminates with `FailureAuditPending`.
     let mut schema_invalid_attempts: u32 = 0;
 
-    loop {
+    // AC-79 (T-AC79-10 / G4e): per-wake counter of dispatched tool
+    // calls. Distinct from `iteration_cap` (which gates wake
+    // iterations / `agents.wake_iteration_count`). On exhaustion the
+    // wake emits `tool_call_rate_limit_exceeded` once and terminates
+    // with `FailureAuditPending`. Schema-invalid retries (T-AC79-4)
+    // do NOT increment this counter — the call was never dispatched.
+    let mut tool_calls_this_wake: u32 = 0;
+
+    'wake: loop {
         // Check iteration cap
         let current = agent::get_agent(pool, agent_id)
             .await?
@@ -291,6 +299,44 @@ pub async fn run_wake_loop(
         // Handle tool calls
         if let Some(tool_calls) = &choice.message.tool_calls {
             for tc in tool_calls {
+                // AC-79 (T-AC79-10 / G4e): per-wake tool-call rate
+                // limit. Evaluated BEFORE any dispatch and BEFORE the
+                // `tool_call` event append so a wake that hits the
+                // cap leaves an audit log of N dispatches +
+                // exactly one `tool_call_rate_limit_exceeded`. The
+                // limit is independent of `iteration_cap` (different
+                // quantities); both checks are evaluated and whichever
+                // fires first terminates first.
+                if tool_calls_this_wake >= config.tool_call_rate_limit_per_wake {
+                    warn!(
+                        agent_id = %agent_id,
+                        wake_id = %wake_id,
+                        limit = config.tool_call_rate_limit_per_wake,
+                        attempted = tool_calls_this_wake + 1,
+                        "AC-79: per-wake tool-call rate limit exceeded"
+                    );
+                    let payload = format!(
+                        "{{\"limit\":{},\"attempted\":{}}}",
+                        config.tool_call_rate_limit_per_wake,
+                        tool_calls_this_wake + 1,
+                    );
+                    event::append_event(
+                        pool,
+                        agent_id,
+                        "tool_call_rate_limit_exceeded",
+                        "runtime",
+                        Some(wake_id),
+                        None,
+                        None,
+                        None,
+                        Some(&payload),
+                        None,
+                    )
+                    .await?;
+                    termination_reason = "FailureAuditPending".to_string();
+                    break 'wake;
+                }
+
                 // Record tool call event
                 event::append_event(
                     pool,
@@ -390,6 +436,10 @@ pub async fn run_wake_loop(
 
                 // Increment iteration
                 agent::increment_iteration(pool, agent_id).await?;
+                // AC-79 (T-AC79-10): only count tool calls that
+                // actually dispatched. Schema-invalid retries
+                // (T-AC79-4) bypass this branch entirely.
+                tool_calls_this_wake = tool_calls_this_wake.saturating_add(1);
             }
         } else if choice.finish_reason == "stop" {
             // No tool calls and stop — agent is done
