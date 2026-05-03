@@ -22,17 +22,28 @@ read_env_value() {
   awk -F= -v k="$key" '$1==k {v=$0; sub(/^[^=]*=/, "", v); gsub(/^"|"$/, "", v); print v}' "$file" | tail -n1
 }
 
+target_root() {
+  if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
+    echo "$CARGO_TARGET_DIR"
+    return
+  fi
+  echo "$ROOT_DIR/target"
+}
+
 pick_pcy_cmd() {
+  local target_dir
+  target_dir="$(target_root)"
+
   if command -v pcy >/dev/null 2>&1; then
     echo "pcy"
     return
   fi
-  if [[ -x "$ROOT_DIR/target/release/pcy" ]]; then
-    echo "$ROOT_DIR/target/release/pcy"
+  if [[ -x "$target_dir/release/pcy" ]]; then
+    echo "$target_dir/release/pcy"
     return
   fi
-  if [[ -x "$ROOT_DIR/target/debug/pcy" ]]; then
-    echo "$ROOT_DIR/target/debug/pcy"
+  if [[ -x "$target_dir/debug/pcy" ]]; then
+    echo "$target_dir/debug/pcy"
     return
   fi
   fail "pcy binary not found. Build it with 'cargo build --release --bin pcy'." "#from-signed-release-binary"
@@ -72,9 +83,9 @@ if [[ "$ready_ok" -ne 1 ]]; then
   fail "Service did not reach /ready within 60s." "#silent-wake"
 fi
 
-echo "Bootstrapping session..."
-"$PCY_CMD" --url "$BASE_URL" bootstrap --bootstrap-token "$BOOTSTRAP_TOKEN" >/tmp/pcy-bootstrap.out 2>/tmp/pcy-bootstrap.err \
-  || fail "pcy bootstrap failed: $(cat /tmp/pcy-bootstrap.err)" "#bootstrap-401"
+echo "Logging in..."
+"$PCY_CMD" --url "$BASE_URL" login --bootstrap-token "$BOOTSTRAP_TOKEN" >/tmp/pcy-login.out 2>/tmp/pcy-login.err \
+  || fail "pcy login failed: $(cat /tmp/pcy-login.err)" "#bootstrap-401"
 
 agent_name="smoke-$(date +%s)"
 echo "Creating agent: $agent_name"

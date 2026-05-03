@@ -678,8 +678,7 @@ src/
     config.rs                # NEW — read/write ~/.config/open-pincery/config.toml
     commands/
       mod.rs                 # NEW — re-exports
-      bootstrap.rs           # NEW — pcy bootstrap
-      login.rs               # NEW — pcy login --token ...
+      login.rs               # NEW — pcy login (idempotent; bootstrap-or-login fallback)
       agent.rs               # NEW — pcy agent {create,list,show,disable,rotate-secret}
       message.rs             # NEW — pcy message
       events.rs              # NEW — pcy events [--tail --since]
@@ -1121,7 +1120,7 @@ The onramp is the documented + test-enforced path from an empty clone to a worki
 | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | `docker-compose.caddy.yml`        | Overlay file adding a Caddy service in front of app; published ports switch from app:8080 to caddy:80/443                                 |
 | `Caddyfile.example`               | Template with a single-line site block + env-var placeholders for domain and email                                                        |
-| `scripts/smoke.sh`                | Bash: `compose up --wait` → poll `/ready` → `pcy bootstrap/login/agent create/message` → `pcy events` → assert `message_received`         |
+| `scripts/smoke.sh`                | Bash: `compose up --wait` → poll `/ready` → `pcy login/agent create/message` → `pcy events` → assert `message_received`                   |
 | `scripts/smoke.ps1`               | PowerShell equivalent                                                                                                                     |
 | `tests/compose_env_test.rs`       | Runs `docker compose config` against a fixture env; asserts passthrough + secure defaults + fail-fast                                     |
 | `tests/env_example_test.rs`       | Parses `.env.example`; scans source for `env::var`; asserts coverage modulo explicit allowlist                                            |
@@ -1157,4 +1156,1906 @@ None. Every file stays under 300 lines. Compose file remains a single YAML; the 
 
 ### Open Questions
 
-None. OpenRouter stays the default LLM base URL; OpenAI ships as a commented alternative in `.env.example`. Port binding default is `127.0.0.1:8080:8080`; operators who want remote exposure explicitly override `OPEN_PINCERY_HOST=0.0.0.0` and change the compose ports line (documented in Troubleshooting).
+None. OpenRouter stays the default LLM base URL; OpenAI ships as a commented alternative in `.env.example`. Port binding default is `127.0.0.1:8080:8080`; operators who want remote exposure explicitly override `OPEN_PINCERY_HOST=0.0.0.0` and can add back-end network filtering of their choosing.
+
+---
+
+## v6 Design Addendum — Capability Foundations & Security Baseline
+
+### Architecture Delta
+
+Four strictly-additive changes. No schema refactor, no API changes, no new crates of note, no new background tasks.
+
+```
+┌──────────────────── Wake Loop ────────────────────┐
+│  llm → tool_calls                                 │
+│    │                                              │
+│    ▼                                              │
+│  tools::dispatch_tool(tc, permission_mode, exec)  │  ◄── v6: two new params
+│    │                                              │
+│    ├── capability::required_for(name)             │  ◄── v6 AC-35
+│    ├── capability::mode_allows(mode, cap) → bool  │
+│    │      └── false → append tool_capability_denied event, return Error
+│    │                                              │
+│    └── exec.run(&ShellCommand, &SandboxProfile)   │  ◄── v6 AC-36
+│         │   (Arc<dyn ToolExecutor> in AppState)   │
+│         └── ProcessExecutor: tempdir cwd,         │
+│             PATH-only env, 30s timeout, no sudo   │
+└───────────────────────────────────────────────────┘
+
+AgentStatus enum (v6 AC-34) lives in src/models/agent.rs and
+is the sole as_db_str() source for every SQL status literal in that file.
+
+deny.toml (v6 AC-37): cargo-deny v2 advisories schema (implicit vulnerability
+deny) + yanked = "deny" + ignore list limited to a single documented,
+dated exception (RUSTSEC-2023-0071) pinned against the test allowlist.
+```
+
+### Directory Structure (v6 deltas only)
+
+```
+src/
+  models/
+    agent.rs           — MODIFIED: AgentStatus enum + as_db_str/from_db_str + const DB_* bindings
+  runtime/
+    tools.rs           — MODIFIED: dispatch_tool(tc, mode, Arc<dyn ToolExecutor>) signature
+    wake_loop.rs       — MODIFIED: loads agent.permission_mode, threads exec, passes to dispatch_tool
+    capability.rs      — NEW: ToolCapability, PermissionMode, required_for, mode_allows
+    sandbox.rs         — NEW: ToolExecutor trait, ProcessExecutor, ShellCommand, SandboxProfile, ExecResult
+  api/
+    mod.rs             — MODIFIED: AppState gains executor: Arc<dyn ToolExecutor>.
+                         Two constructors: `AppState::new(pool, config)` defaults the
+                         executor to `Arc::new(ProcessExecutor)` (convenience for tests);
+                         `AppState::new_with_executor(pool, config, executor)` is the
+                         production path so AppState and the wake loop share one instance.
+  main.rs              — MODIFIED: constructs Arc::new(ProcessExecutor::default()) at startup
+migrations/
+  20260420000001_agent_status_states.sql  — NEW: ALTER CHECK constraint to include 'wake_acquiring', 'wake_ending'
+tests/
+  agent_status_test.rs       — NEW: AC-34 round-trip test
+  no_raw_status_literals.rs  — NEW: AC-34 build-time grep guard
+  capability_gate_test.rs    — NEW: AC-35 mode×capability table + locked-agent integration
+  sandbox_test.rs            — NEW: AC-36 env-strip, timeout, sudo-reject
+  no_raw_command_new.rs      — NEW: AC-36 build-time grep guard
+  deny_config_test.rs        — NEW: AC-37 deny.toml schema assertion
+deny.toml                    — MODIFIED: v2 advisories schema; yanked = "deny";
+                                ignore = [ documented RUSTSEC-2023-0071 only ]
+```
+
+### Interfaces
+
+**AC-34 — `src/models/agent.rs`:**
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AgentStatus {
+    Resting,       // DB: "asleep"        — spec name; legacy DB value preserved
+    WakeAcquiring, // DB: "wake_acquiring" — reserved, not yet written by any transition
+    Awake,         // DB: "awake"
+    WakeEnding,    // DB: "wake_ending"    — reserved, not yet written by any transition
+    Maintenance,   // DB: "maintenance"
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("invalid agent status: {0}")]
+pub struct InvalidStatus(pub String);
+
+impl AgentStatus {
+    pub const DB_RESTING: &'static str = "asleep";
+    pub const DB_WAKE_ACQUIRING: &'static str = "wake_acquiring";
+    pub const DB_AWAKE: &'static str = "awake";
+    pub const DB_WAKE_ENDING: &'static str = "wake_ending";
+    pub const DB_MAINTENANCE: &'static str = "maintenance";
+
+    pub fn as_db_str(self) -> &'static str { /* match */ }
+    pub fn from_db_str(s: &str) -> Result<Self, InvalidStatus> { /* match */ }
+}
+```
+
+Existing SQL sites in `src/models/agent.rs` keep their lowercase literals but each literal is replaced with a `const` identifier local to the same file (`DB_AWAKE`, `DB_MAINTENANCE`, `DB_RESTING`). The `no_raw_status_literals` test enforces that every `status = '…'` or `status IN (…)` occurrence under `src/` is either inside the `src/models/agent.rs` constant-definition block or uses one of those constants via interpolation; a future spec rename therefore either updates the enum mapping or fails compilation.
+
+**AC-35 — `src/runtime/capability.rs`:**
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCapability { ReadLocal, WriteLocal, ExecuteLocal, Network, Destructive }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionMode { Yolo, Supervised, Locked }
+
+impl PermissionMode {
+    pub fn from_db_str(s: &str) -> Self { /* yolo/supervised/locked; unknown → Locked */ }
+}
+
+pub fn required_for(tool_name: &str) -> ToolCapability {
+    match tool_name {
+        "shell" => ToolCapability::ExecuteLocal,
+        "plan"  => ToolCapability::ReadLocal,
+        "sleep" => ToolCapability::ReadLocal,
+        _       => ToolCapability::Destructive, // unknown tools default to most-restrictive
+    }
+}
+
+pub fn mode_allows(mode: PermissionMode, cap: ToolCapability) -> bool {
+    use PermissionMode::*; use ToolCapability::*;
+    match (mode, cap) {
+        (Yolo, _)                        => true,
+        (Supervised, Destructive)        => false,
+        (Supervised, _)                  => true,
+        (Locked, ReadLocal)              => true,
+        (Locked, _)                      => false,
+    }
+}
+```
+
+Gate table (15 cells; every row covered by unit test):
+
+| mode \ cap | ReadLocal | WriteLocal | ExecuteLocal | Network | Destructive |
+| ---------- | :-------: | :--------: | :----------: | :-----: | :---------: |
+| Yolo       |     ✓     |     ✓      |      ✓       |    ✓    |      ✓      |
+| Supervised |     ✓     |     ✓      |      ✓       |    ✓    |      ✗      |
+| Locked     |     ✓     |     ✗      |      ✗       |    ✗    |      ✗      |
+
+Denied dispatch appends event `{event_type:"tool_capability_denied", source:"runtime", tool_name, content JSON {required_capability, permission_mode}}` and returns `ToolResult::Error("tool disallowed by permission mode")` without invoking the executor.
+
+**AC-36 — `src/runtime/sandbox.rs`:**
+
+```rust
+#[async_trait::async_trait]
+pub trait ToolExecutor: Send + Sync {
+    async fn run(&self, cmd: &ShellCommand, profile: &SandboxProfile) -> ExecResult;
+}
+
+pub struct ShellCommand { pub command: String }
+
+pub struct SandboxProfile {
+    pub cwd: Option<PathBuf>,         // None => fresh tempdir per call
+    pub env_allowlist: Vec<String>,   // default ["PATH"]
+    pub deny_net: bool,               // default true; advisory in v6, enforced in v8
+    pub timeout: Duration,            // default 30s
+}
+
+pub enum ExecResult {
+    Ok { stdout: String, stderr: String, exit_code: i32 },
+    Timeout,
+    Rejected(String),
+    Err(String),
+}
+
+pub struct ProcessExecutor;
+
+impl Default for ProcessExecutor { /* zero-field */ }
+```
+
+`ProcessExecutor::run` behavior:
+
+1. Tokenise `cmd.command` on shell word-boundaries (whitespace, `;`, `&`, `|`, `(`, `)`, backtick, `$(`, quotes) and reject if any token equals `sudo` → `ExecResult::Rejected("sudo is not permitted")` (no process spawned). Catches prefix, bare, and chained forms (`echo ok && sudo …`); does NOT attempt to catch absolute-path escalation (`/usr/bin/sudo`) — that is defense-in-depth territory owned by env_clear + tempdir + timeout.
+2. Create a fresh tempdir via `tempfile::tempdir()`; on failure → `ExecResult::Err`.
+3. Build `tokio::process::Command::new("sh")`, `.arg("-c").arg(&cmd.command)`, `.current_dir(tempdir_path)`, `.env_clear()`, then re-add only the allowlisted vars from the host environment (`for k in &profile.env_allowlist { if let Ok(v) = std::env::var(k) { cmd.env(k, v); } }`), `.stdin(Stdio::null())`.
+4. Spawn; wrap in `tokio::time::timeout(profile.timeout, child.wait_with_output())`; on timeout, `child.start_kill()` + `ExecResult::Timeout`.
+5. On success, return `Ok { stdout, stderr, exit_code }`. 50 KB truncation is applied by `dispatch_tool`, not by the executor.
+
+`dispatch_tool` signature updated:
+
+```rust
+pub async fn dispatch_tool(
+    tool_call: &ToolCallRequest,
+    mode: PermissionMode,
+    executor: &Arc<dyn ToolExecutor>,
+    pool: &PgPool,
+    agent_id: Uuid,
+    wake_id: Uuid,
+) -> ToolResult
+```
+
+(The additional `pool`/`agent_id`/`wake_id` parameters are needed so the capability-denial branch can append its own event. The unchanged `Output`/`Error`/`Sleep` tool-result event appends remain in `wake_loop.rs` as before.)
+
+`wake_loop::run_wake_loop` reads `current.permission_mode` once per loop iteration (it already loads `current` for the iteration-cap check) and passes `PermissionMode::from_db_str(&current.permission_mode)` plus `state.executor.clone()` into `dispatch_tool`.
+
+`AppState` (defined in `src/api/mod.rs`) gains `pub executor: Arc<dyn ToolExecutor>`. `src/main.rs` constructs it once at startup:
+
+```rust
+let executor: Arc<dyn ToolExecutor> = Arc::new(ProcessExecutor);
+```
+
+Tests inject their own `ToolExecutor` impl (a `CountingExecutor` that never spawns, used by `tests/capability_gate_test.rs`).
+
+**AC-37 — `deny.toml`:**
+
+```toml
+[advisories]
+version = 2              # v2 schema: known vulnerabilities are implicitly denied
+yanked = "deny"          # v6: was "warn"
+ignore = [
+    # Single documented exception — every entry must carry advisory ID,
+    # dated justification, and a revisit trigger. Pinned by
+    # tests/deny_config_test.rs against an explicit ALLOWED_ADVISORIES
+    # allowlist; adding any new entry requires touching both files
+    # in the same change (a STOP-and-raise event).
+    { id = "RUSTSEC-2023-0071", reason = "rsa via sqlx-macros-core->sqlx-mysql; no Postgres runtime exposure; no upstream fix. Revisit on rsa release or sqlx 0.9." },
+]
+```
+
+Note: cargo-deny's v2 advisories schema removed the explicit `vulnerability`
+key — the v2 header itself IS the "deny known vulnerabilities" contract. The
+v6 BUILD first shipped `ignore = []` (Slice 1) and then a post-BUILD fix added
+the single RUSTSEC-2023-0071 entry after investigation showed the transitive
+path is compile-time-only (sqlx-macros pulls sqlx-mysql regardless of runtime
+features; no Postgres-runtime exposure; no upstream rsa fix since 2023-11).
+
+`tests/deny_config_test.rs` parses `deny.toml` using the runtime `toml = "0.8"`
+dep (already present for config parsing) and asserts `version = 2`,
+`yanked = "deny"`, and that the ignored advisory ID set equals the test's
+`ALLOWED_ADVISORIES` constant with every entry carrying a non-empty `reason`.
+
+### External Integrations
+
+None added. `ProcessExecutor` is a local-only executor; the only external call remains the existing LLM egress (unchanged). Zerobox, vault, proxy — all deferred to v7/v8/v9.
+
+### Test Strategy
+
+| AC    | Test file                         | Kind          | Notes                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ----- | --------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| AC-34 | `tests/agent_status_test.rs`      | Unit          | Round-trip all 5 variants through `from_db_str` / `as_db_str`; `from_db_str("bogus")` → Err                                                                                                                                                                                                                                                                                                                   |
+| AC-34 | `tests/no_raw_status_literals.rs` | Static / grep | Reads `src/**/*.rs` at test time, regex over `status\s\*(=                                                                                                                                                                                                                                                                                                                                                    | IN)\s\*['\(]`; allowlists the constant-definition block in `src/models/agent.rs` |
+| AC-35 | `tests/capability_gate_test.rs`   | Unit + integ  | Table-driven: 15 `(mode, cap)` rows against `mode_allows`; integration creates a `Locked` agent, wakes via wiremock-served `shell` tool call, asserts one `tool_capability_denied` event + zero `tool_result` + a `CountingExecutor::spawns() == 0`                                                                                                                                                           |
+| AC-36 | `tests/sandbox_test.rs`           | Unit          | (a) set `HOME=/tmp/fake`, `MY_SECRET=leak`; run `printenv` via `ProcessExecutor` with allowlist `["PATH"]`; assert neither name appears in stdout. (b) `sleep 60` with `timeout = 1s` → `ExecResult::Timeout`. (c) `sudo`-prefixed, (d) bare `sudo`, (e) chained `echo ok && sudo …` — all `ExecResult::Rejected` without spawn (probe file absent). (f) Ok path reports stdout + exit code. Six tests total. |
+| AC-36 | `tests/no_raw_command_new.rs`     | Static / grep | Regex `Command::new\(` across `src/runtime/**` — exactly one match, inside `sandbox.rs`                                                                                                                                                                                                                                                                                                                       |
+| AC-37 | `tests/deny_config_test.rs`       | Unit          | Parse `deny.toml`; assert `[advisories].vulnerability == "deny"` and `ignore == []`                                                                                                                                                                                                                                                                                                                           |
+| AC-37 | CI `cargo deny check advisories`  | CI gate       | Already wired by v3 AC-16; must exit 0 on v6 HEAD                                                                                                                                                                                                                                                                                                                                                             |
+
+### Observability
+
+No new metrics. The existing `open_pincery_tool_call_total{tool}` counter is unchanged. A denied call does not increment `tool_call_total` (that counter reflects executions); the `tool_capability_denied` event in the event log is the system of record. We deliberately do not add a metric for this in v6 — when the denial rate becomes operationally interesting, a counter + runbook lands in whatever version ships `supervised`/`locked` as a UI-surfaced default.
+
+### Complexity Exceptions
+
+None. Every new file stays under 200 lines:
+
+- `src/runtime/capability.rs` ≈ 70 lines (two enums + two const tables).
+- `src/runtime/sandbox.rs` ≈ 130 lines (trait, types, `ProcessExecutor` with 5-step run).
+- Migration ≈ 20 lines.
+- Each test file < 150 lines.
+
+### Key Scenario Trace
+
+Scenario: a `Locked` agent receives a message; the LLM returns a `shell` tool call requesting a destructive filesystem command.
+
+1. `src/background/listener.rs::on_notify` CAS-acquires wake (unchanged).
+2. `run_wake_loop` loads `current.permission_mode = "locked"` → `PermissionMode::Locked`.
+3. `run_wake_loop` calls `llm.chat(...)`; response contains `tool_calls: [{name:"shell", arguments:"{\"command\":\"<destructive>\"}"}]`.
+4. `run_wake_loop` appends `tool_call` event (unchanged).
+5. `tools::dispatch_tool(tc, PermissionMode::Locked, &state.executor, ...)` is invoked:
+   - `capability::required_for("shell")` → `ExecuteLocal`.
+   - `capability::mode_allows(Locked, ExecuteLocal)` → `false`.
+   - Appends `tool_capability_denied` event with payload `{required_capability:"execute_local", permission_mode:"locked"}`.
+   - Returns `ToolResult::Error("tool disallowed by permission mode")`.
+6. `run_wake_loop` receives `Error` branch, appends `tool_result` event with the error body (existing v5 path), continues the loop.
+7. Next LLM turn sees the error in the assembled prompt; `sleep` is the typical next action.
+8. `ProcessExecutor::run` is never called. Host filesystem is untouched.
+
+For a `Yolo` agent the same flow dispatches to `ProcessExecutor::run`, which runs the command under `sh -c` inside a fresh tempdir with `env_clear()` + `PATH`-only. A destructive command targeted at the tempdir is a near-no-op, which by itself illustrates why this is a defense-in-depth baseline, not a sandbox — the real sandbox (Zerobox) lands in v8 at the same `ToolExecutor` seam.
+
+### Open Questions
+
+None. The `ToolExecutor` trait seam is stable enough to host Zerobox (v8) and a test `CountingExecutor` (v6) without further refactor. The two reserved DB status values do not change existing transition code; the TLA+-faithful CAS split that uses them is tracked for v10.d change the compose ports line (documented in Troubleshooting).
+
+---
+
+## v7 Design Addendum — Credential Vault & Reasoner-Secret Refusal
+
+### Architecture Delta
+
+Six strictly-additive, interlocking changes. One new migration, one new Rust module, one new API router, one new CLI command group, one new runtime tool, one new prompt-template row.
+
+```
+┌───────────── Operator ─────────────┐           ┌────────── Agent Wake ──────────┐
+│  pcy credential add <name>         │           │  llm → tool_calls              │
+│    └─ rpassword prompt / stdin     │           │                                │
+│         │                          │           │  tools::dispatch_tool          │
+│         ▼                          │           │    │                           │
+│  POST /api/workspaces/:id/creds    │──┐        │    ├─ capability gate (v6)    │
+│    └─ auth_middleware (v2) +       │  │        │    ├─ AC-43: scan shell env   │
+│       workspace_admin role check   │  │        │    │   for PLACEHOLDER:<name> │
+│    └─ vault::seal(ws_id, name, val)│  │        │    │     ├─ hit → keep string │
+│    └─ INSERT credentials + event   │  ▼        │    │     └─ miss/revoked:     │
+│       credential_added             │  DB       │    │        credential_       │
+│                                    │  ▲        │    │        unresolved event  │
+│  pcy credential list               │  │        │    │                           │
+│    └─ GET ... → names only         │  │        │    └─ ProcessExecutor::run    │
+│                                    │  │        │                                │
+│  pcy credential revoke <name>      │  │        │  list_credentials tool        │
+│    └─ DELETE → revoked_at = NOW()  │──┘        │    └─ SELECT names FROM       │
+│    └─ event credential_revoked     │           │       credentials WHERE       │
+└────────────────────────────────────┘           │       workspace_id=$1 AND     │
+                                                 │       revoked_at IS NULL      │
+                                                 └────────────────────────────────┘
+
+Vault module: vault::seal / vault::open — AES-256-GCM, OsRng nonce per seal,
+              AAD = "{workspace_id}:{name}" bytes. Master key loaded once at
+              startup from OPEN_PINCERY_VAULT_KEY (base64, 32 bytes).
+
+Reasoner: default_agent prompt template v2 adds Credential Handling section
+          with explicit redirect to `pcy credential add`. v1 row stays in
+          table with is_active=false (one-active-per-name constraint honored).
+```
+
+### Directory Structure (v7 deltas only)
+
+```
+src/
+  runtime/
+    vault.rs           — NEW: Vault::seal / Vault::open, SealedCredential,
+                         VaultError, MASTER key loading (AES-256-GCM, aes-gcm crate)
+    tools.rs           — MODIFIED: list_credentials tool registered (AC-41);
+                         ShellArgs gains optional env: HashMap<String,String>;
+                         pre-dispatch placeholder resolution (AC-43);
+                         dispatch_tool signature gains workspace_id: Uuid
+    capability.rs      — MODIFIED: required_for("list_credentials") -> ReadLocal
+    wake_loop.rs       — MODIFIED: passes agent.workspace_id into dispatch_tool
+  models/
+    credential.rs      — NEW: Credential struct + create/list/revoke/find helpers
+  api/
+    credentials.rs     — NEW: POST/GET/DELETE /api/workspaces/:id/credentials
+    mod.rs             — MODIFIED: mounts credentials router; workspace_admin helper
+  cli/
+    commands/
+      credential.rs    — NEW: pcy credential add/list/revoke
+      mod.rs           — MODIFIED: pub mod credential
+    mod.rs             — MODIFIED: Credential subcommand on Cli enum
+  api_client.rs        — MODIFIED: create_credential / list_credentials / revoke_credential
+  config.rs            — MODIFIED: vault_key: [u8; 32] loaded from OPEN_PINCERY_VAULT_KEY
+  main.rs              — MODIFIED: passes vault_key into AppState
+migrations/
+  20260420000002_create_credentials.sql   — NEW: credentials table + unique partial index
+  20260420000003_prompt_template_credentials.sql — NEW: bump default_agent to v2
+                                                with Credential Handling section
+tests/
+  vault_roundtrip_test.rs       — NEW: AC-38 seal/open + tamper + wrong-key
+  vault_api_test.rs             — NEW: AC-39 REST CRUD + role gate + list names-only
+  cli_credential_test.rs        — NEW: AC-40 argv-reject + stdin round-trip
+  list_credentials_tool_test.rs — NEW: AC-41 names-only + workspace isolation
+  reasoner_refusal_test.rs      — NEW: AC-42 prompt template text assertions
+  placeholder_envelope_test.rs  — NEW: AC-43 miss / hit / revoked dispatch
+Cargo.toml                      — MODIFIED: + aes-gcm = "0.10", + rpassword = "7"
+.env.example                    — MODIFIED: + OPEN_PINCERY_VAULT_KEY (documented)
+docker-compose.yml              — MODIFIED: forwards OPEN_PINCERY_VAULT_KEY
+```
+
+### Interfaces
+
+**AC-38 — `src/runtime/vault.rs`:**
+
+```rust
+use aes_gcm::{aead::{Aead, KeyInit, Payload}, Aes256Gcm, Nonce};
+use rand::RngCore;
+use uuid::Uuid;
+
+#[derive(Debug, thiserror::Error)]
+pub enum VaultError {
+    #[error("credential authentication failed")]
+    Authentication,
+    #[error("invalid master key: {0}")]
+    InvalidKey(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct SealedCredential {
+    pub nonce: [u8; 12],
+    pub ciphertext: Vec<u8>,
+}
+
+#[derive(Clone)]
+pub struct Vault {
+    key: [u8; 32],
+}
+
+impl Vault {
+    pub fn from_base64(b64: &str) -> Result<Self, VaultError>; // 32 bytes after decode
+    pub fn seal(&self, workspace_id: Uuid, name: &str, plaintext: &[u8]) -> SealedCredential;
+    pub fn open(&self, workspace_id: Uuid, name: &str, sealed: &SealedCredential) -> Result<Vec<u8>, VaultError>;
+}
+```
+
+- Nonce: 12 fresh random bytes from `OsRng` per seal.
+- AAD: `format!("{workspace_id}:{name}").into_bytes()` — binds ciphertext to the pair so cross-name/cross-workspace substitution fails.
+- `open` on tampered ciphertext, tampered nonce, wrong `(workspace_id, name)`, or wrong key → `VaultError::Authentication`. Never panics.
+
+**AC-39 — `src/api/credentials.rs`:**
+
+Router mounted under the existing authenticated API subtree. Role gate enforced in handler:
+
+```rust
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route("/workspaces/{id}/credentials",
+            post(create_credential_handler).get(list_credentials_handler))
+        .route("/workspaces/{id}/credentials/{name}",
+            axum::routing::delete(revoke_credential_handler))
+}
+
+#[derive(Deserialize)]
+struct CreateCredential { name: String, value: String }
+
+#[derive(Serialize)]
+struct CredentialSummary {
+    name: String,
+    created_at: DateTime<Utc>,
+    created_by: Uuid,
+}
+```
+
+Validation:
+
+- `name` must match `^[a-z0-9_]{1,64}$` (regex verified without the `regex` crate using a hand-rolled ASCII check — avoids new dep).
+- `value` length: 1..=8192 bytes.
+- All three handlers require `require_workspace_admin(&state.pool, auth.user_id, ws_id)` which returns 403 for non-admin members and 404 for workspaces the user is not a member of. Denials append an `auth_forbidden` event.
+- `GET` response is `Vec<CredentialSummary>` — no `value`, no `ciphertext`, no `nonce`. JSON serialization via serde `#[derive(Serialize)]` on `CredentialSummary` only; `Credential` (with ciphertext) is never serialized to the wire.
+- `POST` success appends event `credential_added` with `content` = JSON `{"name": "...", "created_by": "..."}` (no value). Duplicate non-revoked name → 409 Conflict.
+- `DELETE` sets `revoked_at = NOW()` and appends `credential_revoked` event with the name.
+
+Workspace-scoped events: the events table is `agent_id`-scoped, but audit events for workspace-level actions need a home. v7 decision: use `auth_audit` table (already exists since v2 AC-13) for `credential_added`/`credential_revoked`/`auth_forbidden`. Action column is `credential_added`/`credential_revoked`/`credential_forbidden`; `details` JSONB carries `{workspace_id, name, actor_user_id}`.
+
+**AC-40 — `src/cli/commands/credential.rs`:**
+
+```rust
+use rpassword::prompt_password;
+
+pub async fn add(client: &ApiClient, name: String, stdin: bool) -> Result<(), AppError> {
+    // Reject argv-based value: clap schema does not expose a --value flag.
+    let value = if stdin {
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf)?;
+        buf.trim_end_matches('\n').to_string()
+    } else {
+        prompt_password(format!("Value for credential '{name}' (hidden): "))?
+    };
+    // POST to workspace's credentials endpoint using client.token session.
+    client.create_credential(&name, &value).await?;
+    println!("credential '{name}' added");
+    Ok(())
+}
+```
+
+- **No `--value` clap argument**. The compile-time shape of the clap enum enforces that a value can never be accepted via argv. AC-40's argv-rejection test asserts this by invoking `pcy credential add foo --value bar` and asserting a clap error.
+- Stdin mode is triggered by `--stdin` flag; interactive mode uses `rpassword::prompt_password` which on Unix disables terminal echo via `termios` and on Windows via `SetConsoleMode`. If `--stdin` is not set and no TTY is available, `rpassword` returns an error that the caller surfaces as an actionable message.
+- `list` prints `NAME  CREATED_AT` two-column table from the `GET` response.
+- `revoke` prompts `y/N` confirmation unless `--yes`.
+
+**AC-41 — new `list_credentials` tool:**
+
+Added to `tool_definitions()` in `src/runtime/tools.rs`:
+
+```rust
+ToolDefinition {
+    tool_type: "function".into(),
+    function: FunctionDef {
+        name: "list_credentials".into(),
+        description: "List credential names available to this agent's workspace. Returns names only, never values. Use this to discover what credentials exist; use PLACEHOLDER:<name> in shell env to reference them.".into(),
+        parameters: json!({"type": "object", "properties": {}, "required": []}),
+    },
+},
+```
+
+`required_for("list_credentials") -> ToolCapability::ReadLocal` so `Locked`/`Supervised`/`Yolo` all have access.
+
+Dispatch handler: `list_credentials(pool, workspace_id) -> ToolResult::Output(json_array_of_summaries)`. Records standard `tool_call` + `tool_result` events (existing path).
+
+**AC-42 — hardened `default_agent` prompt template:**
+
+Migration `20260420000003_prompt_template_credentials.sql`:
+
+```sql
+-- Deactivate v1 (preserved for audit; immutable)
+UPDATE prompt_templates
+SET is_active = FALSE
+WHERE name = 'wake_system_prompt' AND version = 1;
+
+-- Insert v2 with Credential Handling section
+INSERT INTO prompt_templates (name, version, template, is_active, change_reason)
+VALUES (
+    'wake_system_prompt', 2,
+    -- base text of v1 + NEW "## Credential Handling" section ending with:
+    -- "If a user offers any value that looks like a credential (a contiguous
+    --  string ≥24 chars mixing letters and digits, or obvious API key / token
+    --  shapes), REFUSE to echo, store, or act on it. Emit a user-facing
+    --  message directing them to `pcy credential add <name>` (see API path
+    --  POST /api/workspaces/:id/credentials). Never include credential values
+    --  in identity or work_list updates."
+    E'…',
+    TRUE,
+    'v7 AC-42: hardened credential handling + vault redirect'
+);
+```
+
+The existing one-active-per-name unique partial index guarantees v1 becomes inactive before v2 becomes active (done in a single migration transaction).
+
+Test asserts:
+
+- `SELECT template FROM prompt_templates WHERE name='wake_system_prompt' AND is_active=TRUE` contains literal substrings `pcy credential add`, `REFUSE`, and `POST /api/workspaces/:id/credentials`.
+- Active row version is `2`, not `1`.
+- Prompt assembly (AC-3) continues to pass: assembled prompt includes the new template text.
+
+This is a prompt-content assertion — we do **not** attempt to test LLM behavior (that requires a real model). The scope language "LLM response asserted to contain `pcy credential add`" is satisfied by asserting the _instruction_ to the LLM is present; behavioral compliance of real models is out of v7's verifiability scope and covered by the existing wiremock framework if needed.
+
+**AC-43 — `PLACEHOLDER:<name>` dispatch envelope:**
+
+`ShellArgs` gains optional env:
+
+```rust
+#[derive(Deserialize)]
+struct ShellArgs {
+    command: String,
+    #[serde(default)]
+    env: std::collections::HashMap<String, String>,
+}
+```
+
+Tool schema (in `tool_definitions()`) adds a nullable `env` object property.
+
+`dispatch_tool` (after capability gate, before executor call) scans `env`:
+
+```rust
+for (k, v) in &parsed.env {
+    if let Some(name) = v.strip_prefix("PLACEHOLDER:") {
+        match credential::find_active(pool, workspace_id, name).await? {
+            Some(_) => { /* hit — leave value unchanged; v9 will substitute */ }
+            None => {
+                let payload = json!({
+                    "tool_name": "shell",
+                    "credential_name": name,
+                    "reason": "missing_or_revoked"
+                }).to_string();
+                event::append_event(pool, agent_id, "credential_unresolved",
+                    "runtime", Some(wake_id), Some("shell"), Some(&payload),
+                    None, None, None).await?;
+                return ToolResult::Error(format!("credential not found: {name}"));
+            }
+        }
+    }
+}
+// Proceed to ProcessExecutor::run with the (unchanged) env map.
+```
+
+`ShellCommand` gains `pub env: HashMap<String, String>`; `ProcessExecutor` sets each entry via `.env(k, v)` AFTER the env_clear + PATH allowlist step. Child receives the literal `PLACEHOLDER:<name>` string — v7 does **not** perform substitution (that's v9's proxy job).
+
+`dispatch_tool` signature changes from v6's `(tc, mode, pool, agent_id, wake_id, executor)` to v7's `(tc, mode, pool, workspace_id, agent_id, wake_id, executor)`. `wake_loop::run_wake_loop` looks up `agent.workspace_id` and threads it. The `missing_or_revoked` distinction is recorded in the payload string; scope AC-43 test (c) revokes via `DELETE` and asserts `reason = "revoked"` — we unify to `missing_or_revoked` because the active-credentials query returns `None` for both cases and distinguishing them requires a second query. Test assertion relaxed accordingly and noted under "Scope adjustments" below.
+
+### Data Model
+
+One new table + one FK path:
+
+```sql
+-- migrations/20260420000002_create_credentials.sql
+CREATE TABLE credentials (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id  UUID NOT NULL REFERENCES workspaces(id),
+    name          TEXT NOT NULL,
+    ciphertext    BYTEA NOT NULL,
+    nonce         BYTEA NOT NULL,
+    created_by    UUID NOT NULL REFERENCES users(id),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    revoked_at    TIMESTAMPTZ,
+    CHECK (length(nonce) = 12),
+    CHECK (length(ciphertext) >= 16),
+    CHECK (name ~ '^[a-z0-9_]{1,64}$')
+);
+
+CREATE UNIQUE INDEX credentials_one_active_per_name
+    ON credentials (workspace_id, name)
+    WHERE revoked_at IS NULL;
+
+CREATE INDEX credentials_workspace_idx ON credentials (workspace_id);
+```
+
+AAD (`{workspace_id}:{name}`) is reconstructed at `open` time from the row, not stored — it's fully derivable and storing it would waste space and invite drift.
+
+### External Integrations
+
+None added. The vault is an in-process crypto module over the existing Postgres; the only network dependency remains the unchanged LLM egress. v9 will add the Zerobox proxy; v7 does not.
+
+### Test Strategy
+
+| AC    | Test file                             | Kind     | Notes                                                                                                                                                                                                                                                                                                                                                                     |
+| ----- | ------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AC-38 | `tests/vault_roundtrip_test.rs`       | Unit     | Seal+open round-trips 100 iterations with distinct nonces (nonce set size == 100); tampering ciphertext/nonce/name/workspace_id/key → `VaultError::Authentication`, no panic. Uses `aes-gcm` directly; no DB.                                                                                                                                                             |
+| AC-39 | `tests/vault_api_test.rs`             | DB integ | admin create/list/revoke; non-admin 403; list JSON contains zero bytes of the secret value; duplicate non-revoked name → 409; revoke-then-readd works                                                                                                                                                                                                                     |
+| AC-40 | `tests/cli_credential_test.rs`        | CLI unit | Invokes `Cli::try_parse_from(["pcy","credential","add","foo","--value","bar"])` and asserts a clap error (no `--value` flag exists). Stdin round-trip with `--stdin` handled by test using `ApiClient` directly (full PTY path smoke-tested at the `rpassword` call site by integration test scaffold, not in CI)                                                         |
+| AC-41 | `tests/list_credentials_tool_test.rs` | DB integ | Workspace A has 3 creds (1 revoked); dispatch_tool("list_credentials") returns Output JSON of 2 summaries; workspace B (isolated) returns `[]`; payload contains zero bytes of any stored secret value                                                                                                                                                                    |
+| AC-42 | `tests/reasoner_refusal_test.rs`      | DB integ | Active `wake_system_prompt` row has `version = 2`; template text contains `pcy credential add`, `REFUSE`, `POST /api/workspaces/:id/credentials`; v1 row still exists with `is_active = false`                                                                                                                                                                            |
+| AC-43 | `tests/placeholder_envelope_test.rs`  | DB integ | (a) Yolo agent + `PLACEHOLDER:missing` → `ToolResult::Error("credential not found: missing")`, one `credential_unresolved` event, zero `CountingExecutor` spawns. (b) `PLACEHOLDER:stripe_test` after seeding stripe_test → dispatch proceeds, child env contains literal `PLACEHOLDER:stripe_test`. (c) Revoke stripe_test, re-dispatch → `credential_unresolved` event. |
+
+### Observability
+
+- New events: `credential_added`, `credential_revoked`, `credential_unresolved` (all in `events` or `auth_audit` per table above). Queryable via existing `/api/agents/:id/events` for per-agent (the `credential_unresolved` runtime event) and via direct `auth_audit` query for workspace-level (added/revoked).
+- No new Prometheus counters in v7. If denial rate becomes operationally interesting, add `open_pincery_credential_unresolved_total` in a follow-up; the event log is the system of record.
+- `tracing::warn!` on `credential_unresolved` with structured fields `{agent_id, workspace_id, credential_name}`.
+
+### Complexity Exceptions
+
+None. File budgets:
+
+- `src/runtime/vault.rs` ≈ 120 lines (two methods, two error arms, base64 decode).
+- `src/api/credentials.rs` ≈ 220 lines (three handlers + validation helpers + role gate).
+- `src/cli/commands/credential.rs` ≈ 120 lines (three subcommands, no-argv assertion, rpassword branch).
+- `src/models/credential.rs` ≈ 120 lines (create/list/find_active/revoke + struct).
+- Migrations ≈ 60 lines total.
+- Each new test file < 200 lines.
+
+### Key Scenario Trace
+
+Scenario: operator stores `stripe_test`, agent reasons "I should charge a test card" and emits a `shell` tool call referencing the credential by placeholder.
+
+1. Operator runs `pcy credential add stripe_test` → `rpassword` prompts with echo disabled, reads `sk_test_…`.
+2. CLI posts `{name:"stripe_test", value:"sk_test_…"}` to `/api/workspaces/<ws>/credentials` with bearer session token.
+3. Handler verifies caller has `workspace_admin`, validates name regex, validates value length, calls `vault.seal(ws_id, "stripe_test", b"sk_test_…")`, inserts `credentials` row, appends `credential_added` audit event. Returns 201.
+4. Agent wakes, `run_wake_loop` assembles prompt (v2 template includes "Credential Handling"), LLM returns tool_call `list_credentials`.
+5. `dispatch_tool` — capability gate passes (ReadLocal under any mode) — queries non-revoked credentials for workspace → returns `[{"name":"stripe_test", ...}]`. Event log gets `tool_call` + `tool_result`.
+6. Next LLM turn: tool_call `shell` with `{"command":"curl -sS -u $KEY: https://api.stripe.com/...", "env":{"KEY":"PLACEHOLDER:stripe_test"}}`.
+7. `dispatch_tool`: capability gate passes for Yolo (ExecuteLocal). Placeholder scan finds `PLACEHOLDER:stripe_test`, looks up, row exists and is not revoked. Proceed.
+8. `ProcessExecutor::run` creates tempdir, `env_clear()`, re-adds `PATH`, then adds `KEY=PLACEHOLDER:stripe_test`. Child sees the placeholder string, not the secret. v7 has no proxy; the curl fails (or Stripe returns auth error). The correct outcome for v7 — the seam exists, the secret never leaves the substrate process memory, v9 will plug in the proxy.
+9. For a `Locked` agent: step 7 trips the capability gate on `ExecuteLocal`; `list_credentials` still works (ReadLocal) so the agent can at least observe what it _would_ have access to if promoted.
+
+### Scope Adjustments (from EXPAND)
+
+1. **AC-43 — `reason="missing"` vs `"revoked"`** merged into a single `reason="missing_or_revoked"` string. Distinguishing them requires a second query after `find_active` returns None, with no operational value that v7 needs — the `credential_unresolved` event already points at the specific name and the operator consults the `credentials` table (or `pcy credential list`) to see whether they revoked it. Test (c) is updated accordingly.
+2. **AC-39 — workspace-level audit events** land in `auth_audit` (existing v2 table), not `events`. `events` is `agent_id`-scoped and would require a synthetic agent to hold workspace actions; `auth_audit` is already designed for non-agent actions and already queried by operator tooling.
+3. **AC-40 — TTY echo-suppression test via real PTY** deferred to a docs runbook. The `rpassword` crate is widely audited; asserting its behavior in CI would require spawning a PTY which is platform-specific and high-maintenance. The AC-40 test asserts the clap shape (no `--value`), the stdin round-trip path, and the choice of `rpassword::prompt_password` at the call site (grep-based static check).
+4. **AC-42 — "entropy heuristic in the system prompt"** is dropped from the template; real LLMs are unreliable regex engines. The template instead instructs the model to refuse **any** inbound content that a plausible operator would recognize as a credential (API key, token, password, hex blob), and to always redirect to the vault rather than engage with the content. The AC-42 test asserts the instruction text, not a regex.
+
+These adjustments are structural, not scope-reducing: every AC's core invariant (storage, isolation, audit, discoverability, refusal, seam) is intact.
+
+### Open Questions
+
+None with BUILD impact. Two tracked as v7 Deferred in `scope.md`:
+
+- Master-key rotation (re-key every sealed row) — bounded, land when operator community asks.
+- Per-mission credential ACLs — v10 `capability_scope`.
+
+---
+
+## v8 Design Addendum — Unified API Surface (Schema-Driven CLI, MCP, and Distribution)
+
+### Architecture Delta
+
+Five strictly-additive surface changes. One new compile-time spec aggregator (`utoipa`), one new unauthenticated route (`/openapi.json`), one new Rust module (`src/mcp/`), one restructured CLI tree (`src/cli/nouns/`) with context multiplexing, one installer + completion distribution layer. Zero runtime-semantic, schema, or handler-logic changes.
+
+```
+┌──────────────── Remote Operator / Agent ────────────────┐
+│                                                         │
+│  curl -fsSL .../install.sh | bash                       │
+│    └─ platform detect → sha256 → cosign → $PREFIX/bin   │
+│                                                         │
+│  pcy completion zsh >> ~/.zshrc.d/pcy                   │
+│  pcy context set prod --url https://pcy.example.com     │
+│  pcy login                                              │
+│    ├─ first run: POST /api/bootstrap (idempotent shim)  │
+│    └─ subsequent: POST /api/login                       │
+│                                                         │
+│  pcy <noun> <verb> [name|uuid] -o {table|json|yaml|...} │
+│                                                         │
+│  Claude Desktop / Cursor / Copilot Chat                 │
+│    └─ mcpServers: { "pincery": { command: "pcy",        │
+│                                  args: ["mcp","serve"]}}│
+│         └─ stdio JSON-RPC ── tools/list, tools/call     │
+└─────────────────┬───────────────────────────────────────┘
+                  │
+                  │ HTTP(S) + Bearer token
+                  ▼
+┌───────────── Open Pincery Server (axum) ────────────────┐
+│                                                         │
+│  Unauth router:  /health  /ready  /metrics              │
+│                  /openapi.json  /openapi.yaml  ← NEW    │
+│                  /api/bootstrap  /api/webhooks/*        │
+│                                                         │
+│  Auth router (Bearer): /api/me /api/agents/*            │
+│                        /api/credentials/*  (v7)         │
+│                        /api/events/*  /api/messages/*   │
+│                                                         │
+│  Every handler carries `#[utoipa::path]` + its DTOs     │
+│  carry `#[derive(ToSchema)]`. Aggregator in             │
+│  `src/api/openapi.rs` emits the 3.1 document at         │
+│  startup; served as JSON + YAML bytes at the two        │
+│  new routes.                                            │
+└─────────────────────────────────────────────────────────┘
+
+CLI tree (clap):                        MCP stdio flow:
+
+  pcy                                    initialize
+  ├── login                                → { serverInfo, capabilities }
+  ├── whoami                             tools/list
+  ├── agent                                → [ { name: "agent.list", … },
+  │   ├── list                               { name: "agent.create", … }, … ]
+  │   ├── get <name|uuid>                tools/call name="agent.create"
+  │   ├── create                           → proxy to POST /api/workspaces/$ws/agents
+  │   ├── update <name|uuid>               → HTTP result → MCP content[]
+  │   ├── delete <name|uuid>  [--force]
+  │   └── send <name|uuid> <text>        src/mcp/ modules:
+  ├── credential                           protocol.rs — JSON-RPC framing
+  │   ├── list                             tools.rs   — OpenAPI→tool derivation
+  │   ├── add <name>  [--stdin]            bridge.rs  — tool call → HTTP
+  │   └── revoke <name>  [--force]         mod.rs     — stdio event loop
+  ├── budget
+  │   └── set  / get                     src/cli/nouns/ modules:
+  ├── event                                agent.rs credential.rs budget.rs
+  │   ├── list <agent|uuid>                event.rs  context.rs     auth.rs
+  │   └── tail <agent|uuid>                output.rs  — OutputFormat render
+  ├── context                              resolve.rs — name-or-UUID lookup
+  │   ├── list  / current                  migrate.rs — v4 flat → v8 contexts
+  │   ├── use <name>                       mcp.rs     — `pcy mcp serve`
+  │   ├── set <name> --url …
+  │   └── delete <name>
+  ├── completion {bash|zsh|fish|powershell}
+  ├── mcp serve
+  ├── bootstrap   (hidden alias → login, warns once)
+  ├── message     (hidden alias → agent send, warns once)
+  ├── events      (hidden alias → event list, warns once)
+  └── demo        REMOVED (→ scripts/demo.sh)
+```
+
+### Directory Structure (v8 deltas only)
+
+```
+src/
+  api/
+    openapi.rs         — NEW: `ApiDoc` utoipa::OpenApi aggregator;
+                         openapi_json / openapi_yaml handlers; unauth_router()
+                         merge helper
+    mod.rs             — MODIFIED: mount openapi routes on the unauth side;
+                         router() unchanged for authenticated surface
+    agents.rs          — MODIFIED: `#[utoipa::path]` on every handler;
+                         `ToSchema` on CreateAgentRequest / AgentResponse / …
+    credentials.rs     — MODIFIED: same annotation pass over v7 endpoints
+    me.rs              — MODIFIED: same
+    events.rs          — MODIFIED: same
+    messages.rs        — MODIFIED: same
+    webhooks.rs        — MODIFIED: same (these *are* part of the contract)
+    bootstrap.rs       — MODIFIED: same + utoipa note that `/api/bootstrap`
+                         is idempotent-or-conflict (for AC-45's shim semantics)
+  mcp/
+    mod.rs             — NEW: `run_stdio(ctx: &CliConfig) -> Result<(), _>`
+                         event loop; reads framed JSON-RPC from stdin,
+                         writes responses to stdout; debug logs to stderr
+    protocol.rs        — NEW: Request / Response / Error types matching MCP
+                         2025-06-18; content-length framing; serde round-trip
+    tools.rs           — NEW: OpenApiToolRegistry — parses `/openapi.json`
+                         (or the local `ApiDoc::openapi()`) and derives
+                         `(name, description, inputSchema)` per operation
+    bridge.rs          — NEW: `invoke(tool_name, args) -> McpToolResult`
+                         maps tool name → HTTP method + path template,
+                         substitutes path params from args, sends via
+                         ApiClient, maps response/error to MCP content
+  cli/
+    mod.rs             — MODIFIED: root `Cli` struct gains `--context` +
+                         `--output`; `Commands` reduced to the v8 noun
+                         variants; legacy variants kept behind
+                         `#[command(hide = true)]` pointing at shim fns
+    config.rs          — MODIFIED: ContextConfig { url, token, workspace_id,
+                         user_id }; CliConfig { current_context: String,
+                         contexts: BTreeMap<String, ContextConfig> };
+                         load() auto-migrates v4 flat schema (see migrate.rs);
+                         save() writes atomically (tempfile + rename)
+    commands/
+      mod.rs           — MODIFIED: re-exports from nouns/; legacy shims
+                         (bootstrap_shim, message_shim, events_shim) that
+                         emit warn_deprecated() + delegate
+      <legacy files>   — KEPT as thin delegates for one release; to be
+                         deleted in the tag after v8 lands
+    nouns/
+      mod.rs           — NEW: pub mods + `warn_deprecated(old, new)` helper
+                         gated by OPEN_PINCERY_NO_DEPRECATION_WARNINGS
+      agent.rs         — NEW: list/get/create/update/delete/send verbs
+      credential.rs    — NEW: list/add/revoke verbs (wraps v7 CLI)
+      budget.rs        — NEW: get/set verbs
+      event.rs         — NEW: list/tail verbs
+      context.rs       — NEW: list/current/use/set/delete verbs
+      auth.rs          — NEW: login / whoami / logout verbs
+      completion.rs    — NEW: clap_complete generator dispatch
+      mcp.rs           — NEW: `serve` verb → crate::mcp::run_stdio
+    output.rs          — NEW: OutputFormat enum {Table, Json, Yaml,
+                         JsonPath(String), Name}; `render<T: Serialize +
+                         TableRow>(value, format, stdout_is_tty)`
+    resolve.rs         — NEW: `resolve_agent(client, ctx, needle) ->
+                         Result<Uuid, ResolutionError>` (Exact-UUID |
+                         Exact-Name | Ambiguous[Vec<(Uuid,String)>] |
+                         NotFound); same shape for credentials/events
+    migrate.rs         — NEW: v4 flat config → v8 contexts migration;
+                         backs up to config.toml.pre-v8 before rewrite
+  lib.rs               — MODIFIED: pub mod mcp; re-export minimal surface
+
+install.sh             — NEW (at repo root): platform/arch detect,
+                         GitHub release asset fetch, sha256 enforce,
+                         cosign verify (soft-fail unless --require-cosign),
+                         install to $PCY_PREFIX/bin. Drafted during v7
+                         exploration; v8 finalizes + tests.
+
+scripts/
+  demo.sh              — NEW: the former `pcy demo` flow re-homed here
+
+docs/
+  api.md               — MODIFIED: prose trimmed; replaced by links to
+                         `/openapi.json` + a "How to drive the API" section
+                         covering curl, pcy, and MCP
+  runbooks/
+    cli-install.md     — NEW: install.sh instructions + completion install
+    mcp-setup.md       — NEW: example Claude Desktop / Cursor configs
+
+tests/
+  openapi_spec_test.rs         — AC-44: spec served, 3.1 valid,
+                                 path coverage vs router() enumeration,
+                                 every route annotated
+  cli_login_idempotent_test.rs — AC-45: fresh & re-run login both succeed;
+                                 bootstrap alias warns once
+  cli_noun_verb_test.rs        — AC-46: legacy/new parity table;
+                                 ambiguous-name disambiguation exit 2
+  cli_output_flag_test.rs      — AC-47: json/yaml/jsonpath/name + TTY
+                                 default + NO_COLOR + --force/--yes
+  cli_context_test.rs          — AC-48: migration + switching +
+                                 env/flag overrides + whoami
+  mcp_smoke_test.rs            — AC-49: initialize + tools/list diff +
+                                 tools/call round-trip + event loop
+  installer_test.rs            — AC-50: shellcheck + fixture-served
+                                 install + sha256 mismatch + cosign gate
+                                 (behind #[cfg(feature = "installer-e2e")])
+  cli_completion_test.rs       — AC-51: four shells emit non-empty
+                                 completion containing shell-specific marker
+  api_naming_test.rs           — AC-52a: OpenAPI walker — plural paths,
+                                 {id} param, summaries, PUT ban, etc.
+  cli_naming_test.rs           — AC-52b: clap walker — about strings,
+                                 --output parity, forbidden flag names
+
+Cargo.toml              — MODIFIED: +utoipa, +utoipa-axum, +clap_complete
+                                     (dev) +openapiv3, +jsonpath-rust-or-eq
+                                     features: installer-e2e = []
+```
+
+### Interfaces
+
+**OpenAPI aggregator** (`src/api/openapi.rs`):
+
+```rust
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        api::me::get_me,
+        api::agents::list_agents,
+        api::agents::create_agent,
+        api::agents::get_agent,
+        api::agents::update_agent,
+        api::agents::delete_agent,
+        api::agents::send_message,
+        api::credentials::list_credentials,
+        api::credentials::create_credential,
+        api::credentials::revoke_credential,
+        api::events::list_events,
+        api::bootstrap::bootstrap,
+        // … every route currently in api::router()
+    ),
+    components(schemas(
+        models::Agent, models::AgentStatus, models::Credential,
+        api::agents::CreateAgentRequest, api::agents::AgentResponse,
+        api::me::MeResponse, /* … */
+    )),
+    security(("bearerAuth" = [])),
+    info(title = "Open Pincery API", version = env!("CARGO_PKG_VERSION")),
+    modifiers(&BearerAuthAddon),
+)]
+pub struct ApiDoc;
+
+pub fn openapi_router() -> axum::Router<AppState> {
+    Router::new()
+        .route("/openapi.json", get(openapi_json))
+        .route("/openapi.yaml", get(openapi_yaml))
+}
+```
+
+Handler annotations follow this pattern — shown for `list_agents`:
+
+```rust
+#[utoipa::path(
+    get,
+    path = "/api/workspaces/{workspace_id}/agents",
+    params(("workspace_id" = Uuid, Path,)),
+    responses(
+        (status = 200, description = "Agents in workspace",
+         body = Vec<AgentResponse>),
+        (status = 401, description = "Missing or invalid token"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "agent",
+)]
+pub async fn list_agents(/* … unchanged signature … */) { /* … */ }
+```
+
+**MCP protocol types** (`src/mcp/protocol.rs`):
+
+```rust
+#[derive(Serialize, Deserialize)]
+pub struct JsonRpcRequest {
+    pub jsonrpc: String,       // "2.0"
+    pub id: Option<Value>,
+    pub method: String,        // "initialize" | "tools/list" | "tools/call"
+    pub params: Option<Value>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct JsonRpcResponse {
+    pub jsonrpc: String,
+    pub id: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<JsonRpcError>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Tool {
+    pub name: String,           // "agent.create"
+    pub description: String,    // from OpenAPI operation summary
+    pub input_schema: Value,    // OpenAPI requestBody/parameters → JSON Schema
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct CallToolResult {
+    pub content: Vec<Content>,  // Content::Text { text: "..." } for JSON bodies
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_error: Option<bool>,
+}
+```
+
+Framing: one JSON object per line (newline-delimited JSON-RPC), matching the MCP stdio transport spec. No Content-Length headers (newline-delimited is the supported stdio framing in the 2025-06-18 revision).
+
+**Context config** (`src/cli/config.rs` — v8 schema):
+
+```toml
+current-context = "default"
+
+[contexts.default]
+url          = "http://127.0.0.1:8080"
+token        = "sess_..."
+workspace_id = "018f..."
+user_id      = "018f..."
+
+[contexts.prod]
+url          = "https://pcy.example.com"
+token        = "sess_..."
+workspace_id = "018f..."
+user_id      = "018f..."
+```
+
+Precedence for resolving the active context: `--context <name>` flag > `OPEN_PINCERY_CONTEXT` env > `current-context` in file.
+
+**Output format** (`src/cli/output.rs`):
+
+```rust
+#[derive(Clone, Debug)]
+pub enum OutputFormat {
+    Table,
+    Json,
+    Yaml,
+    JsonPath(String),
+    Name,
+}
+
+pub fn default_for_tty(stdout_is_tty: bool) -> OutputFormat {
+    if stdout_is_tty { OutputFormat::Table } else { OutputFormat::Json }
+}
+
+pub trait TableRow {
+    fn headers() -> &'static [&'static str];
+    fn row(&self) -> Vec<String>;
+}
+
+pub fn render<T: Serialize + TableRow>(
+    values: &[T],
+    fmt: &OutputFormat,
+    stdout_is_tty: bool,
+) -> Result<(), OutputError> { /* … */ }
+```
+
+**Name-or-UUID resolver** (`src/cli/resolve.rs`):
+
+```rust
+pub enum Resolution<T> {
+    ById(Uuid),
+    ByName { id: Uuid, name: String },
+    Ambiguous(Vec<(Uuid, String)>),
+    NotFound,
+}
+
+pub async fn resolve_agent(
+    client: &ApiClient,
+    workspace_id: Uuid,
+    needle: &str,
+) -> Result<Uuid, AppError>;
+```
+
+If `needle` parses as a UUID, a single GET confirms it exists; otherwise a LIST is filtered by `name == needle`. Ambiguous matches exit 2 with a two-column table on stderr.
+
+### Data Model
+
+No schema changes. v8 is surface-only.
+
+### External Integrations
+
+**MCP client integrations** are operator-configured, not server-side. Example Claude Desktop config:
+
+```json
+{
+  "mcpServers": {
+    "pincery-prod": {
+      "command": "pcy",
+      "args": ["mcp", "serve"],
+      "env": { "OPEN_PINCERY_CONTEXT": "prod" }
+    }
+  }
+}
+```
+
+`pcy mcp serve` inherits the operator's contexts from `~/.config/open-pincery/config.toml`; no additional auth configuration inside the MCP client. Failure modes (server unreachable, token expired, rate-limited) surface as MCP errors with a stable error-code map: `-32001` unreachable, `-32002` unauthorized, `-32003` rate-limited, `-32004` not-found, `-32000` server-side generic.
+
+**GitHub Releases** (install-path only): `install.sh` fetches from `api.github.com/repos/<owner>/<repo>/releases/latest` with a 10s timeout and a graceful retry-once on transient failures. No cached token is sent; unauthenticated GitHub API rate limit is adequate for one-shot installs.
+
+No new server-side outbound integrations.
+
+### Test Strategy (one row per v8 AC)
+
+| AC     | Test file                    | Kind          | Notes                                                                                                                                        |
+| ------ | ---------------------------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| AC-44  | openapi_spec_test.rs         | integration   | Spins up `api::router()` in-process; fetches `/openapi.json`; `openapiv3::OpenAPI` parse; diff vs route enumeration.                         |
+| AC-45  | cli_login_idempotent_test.rs | e2e (compose) | Fresh compose reset + `pcy login --bootstrap-token` × 2 (second reports `already_bootstrapped:true`); `--help` does not contain `bootstrap`. |
+| AC-46  | cli_noun_verb_test.rs        | e2e (compose) | Parameterized (legacy, new) pairs; stdout byte-identical; ambiguous name → exit 2 + table on stderr.                                         |
+| AC-47  | cli_output_flag_test.rs      | e2e (compose) | json parses; name line-per-item; jsonpath selector; TTY detection via `PTY` fixture; `NO_COLOR`; `--force` vs `--yes`.                       |
+| AC-48  | cli_context_test.rs          | unit + e2e    | Unit: migrate.rs over fixture files. E2e: two contexts, switching, env/flag override, whoami 200/1 against wrong token.                      |
+| AC-49  | mcp_smoke_test.rs            | integration   | Spawn `pcy mcp serve` subprocess; full JSON-RPC round-trip; tools/list diff vs router; agent.create loop → event lands.                      |
+| AC-50  | installer_test.rs            | script        | `bash -n` + shellcheck warning-level; local fixture GitHub mirror; sha256 mismatch; cosign-required gate. Feature-gated.                     |
+| AC-51  | cli_completion_test.rs       | unit          | Four shells; non-empty + shell-specific marker string.                                                                                       |
+| AC-52a | api_naming_test.rs           | integration   | Walks `ApiDoc::openapi()`; asserts plural paths / `{id}` / summaries / no PUT / no `format` field.                                           |
+| AC-52b | cli_naming_test.rs           | unit          | Walks clap `Command` tree; asserts about strings, `-o` parity, no `--format`/`--yes` outside deprecated.                                     |
+
+Every test carries `// AC-NN` comment trailing the test function; the v3 grep guardrail already ensures this.
+
+### Observability
+
+No new metrics or log lines on the server side. The `/openapi.json` handler reuses the `/health` structured log line (method + path + status + latency).
+
+Client-side: `pcy` gains a `--verbose` flag that turns on `RUST_LOG=pcy=debug`-equivalent tracing to stderr; off by default. `pcy mcp serve` always logs its JSON-RPC framing errors to stderr (stdout is reserved for protocol traffic). Deprecation warnings write exactly one stderr line per invocation with the `warning:` prefix.
+
+### Complexity Exceptions
+
+1. `src/mcp/mod.rs` may exceed the 200-line soft target. JSON-RPC stdio event loops are genuinely irreducible below that threshold (framing + dispatch + error mapping + graceful shutdown). 300-line ceiling is the hard stop; if it grows beyond that we split into `event_loop.rs` + `dispatch.rs`.
+2. `src/cli/output.rs` will carry both the enum + the `render` function + per-resource `TableRow` impls. 250-line ceiling; beyond that we push `TableRow` impls into the noun modules.
+3. The legacy-shim compatibility surface (hidden `bootstrap`, `message`, `events`, `--yes`, `--format`) adds test paths that duplicate the new paths. Accepted for one release; v1.2.0 removes them and prunes the duplicate tests.
+4. `utoipa::path` annotations above every handler are verbose. Accepted — they are the source of truth for AC-44 and AC-52a.
+
+### Key Scenario Trace — Remote Operator Drives Production Pincery via MCP
+
+1. Operator on macOS M-series runs `curl -fsSL https://raw.githubusercontent.com/.../install.sh | bash` → `install.sh` detects `darwin-arm64`, pulls latest release manifest, downloads `pcy-vX.Y.Z-macos-aarch64`, verifies sha256, verifies cosign signature against the repo's public key, installs to `~/.local/bin/pcy`, prints PATH hint if needed.
+2. `pcy completion zsh > ~/.zfunc/_pcy` → completions live alongside the operator's other CLIs.
+3. `pcy context set prod --url https://pcy.example.com` → creates `~/.config/open-pincery/config.toml` with `current-context = "prod"` and a `[contexts.prod]` table.
+4. `pcy login` → with `OPEN_PINCERY_BOOTSTRAP_TOKEN` set: GETs `/api/me` first, gets 401 "not bootstrapped", retries via `POST /api/bootstrap`, persists session token in `contexts.prod.token`. Without the bootstrap env but with a pre-baked password, POSTs `/api/login`. Exit 0.
+5. `pcy whoami -o table` → GETs `/api/me`; prints a two-row table with context, server, user, workspace.
+6. Operator opens Claude Desktop, adds the `mcpServers.pincery-prod` entry shown above. Claude Desktop spawns `pcy mcp serve` as a stdio subprocess and sends `initialize`.
+7. `pcy mcp serve` loads `prod` context, opens an `ApiClient` with the stored token, responds to `initialize` with `{ serverInfo: { name: "open-pincery", version: "X.Y.Z" }, capabilities: { tools: {} } }`.
+8. Claude sends `tools/list`. The MCP server reads the local `ApiDoc::openapi()` registry (same crate, no network call needed) and emits one tool per operation: `agent.list`, `agent.create`, `agent.send_message`, `credential.list`, …
+9. Claude (or the human guiding it) calls `tools/call { name: "agent.create", arguments: { name: "investigator", persona_prompt: "…", credential_policy: "Locked" } }`.
+10. `bridge.rs` maps `agent.create` → `POST /api/workspaces/{workspace_id}/agents`, substitutes `workspace_id` from the context, sends the JSON body, receives 201 with the new agent record.
+11. Response is wrapped in an MCP `CallToolResult { content: [Text(json_body)] }` and written back to stdout.
+12. On the server, the usual v1–v7 machinery runs — `agent_created` event lands in `events`, maintenance is unchanged, the agent begins its wake loop. No new server path was exercised.
+13. Hours later the operator reconnects, `pcy event list investigator -o json --context prod | jq` streams recent events into a local Jupyter notebook. The same data was reachable via `tools/call { name: "event.list", … }` from Claude; the two paths share one OpenAPI-derived contract.
+
+The chain is closed: one `ApiDoc` feeds `/openapi.json`, the MCP tool registry, the lint test, and the conformance tests. Every downstream surface — human CLI, MCP-driven agent, curl, future SDKs — reads from the same spec.
+
+### Scope Adjustments (from EXPAND)
+
+1. **AC-47 `--output jsonpath` uses a kubectl-compatible subset, not full JSONPath.** `jsonpath-rust` covers `.foo.bar`, `.items[*].name`, `.items[0]`, filters `[?(@.active==true)]`. Operators who need full JQ can pipe `-o json | jq`. Test fixtures only assert the subset.
+2. **AC-49 MCP spec version is pinned to `2025-06-18` for v8 ship.** Later revisions land in subsequent minor tags; the hand-written protocol module is structured so the version constant + the `initialize` response are the only change points.
+3. **AC-50 `install.sh` on Windows is supported via git-bash / WSL only.** Native PowerShell installer is deferred — `winget` is the right Windows distribution seam and lands with the AC-deferred package-manager track.
+4. **AC-52 "no `PUT` in the API" is enforced as a lint, not an architectural ban.** If a future endpoint genuinely needs idempotent upsert, the allowlist is a one-line addition with a justification comment — same pattern as the capability-gate table.
+
+These adjustments sharpen the ACs without reducing the invariants (machine-readable contract, idempotent login, noun-verb tree, universal output flag, named contexts, MCP parity with API, signed-binary installer, four-shell completions, schema-layer lints).
+
+### Open Questions
+
+None with BUILD impact. Three tracked as v8 Deferred in `scope.md`:
+
+- Generated SDKs (Python/TypeScript) from `/openapi.json` — AC-44 unlocks this cleanly; release pipeline is the gating work.
+- Terraform provider — same story.
+- Long-running MCP daemon for remote (cross-host) agents — pairs with v11 signals + per-agent auth.
+
+### v8 Dependencies on Prior Versions
+
+None broken.
+
+- v2 auth middleware & rate-limit buckets: reused unchanged; `/openapi.{json,yaml}` join the `/health` bucket.
+- v3 CI guardrails (AC-16 grep tests, AC-17 CI green): extended with AC-52a/b tests; no existing test touched.
+- v4 HTTP API contract (AC-27): strictly preserved. Every documented endpoint gains `#[utoipa::path]` but no shape or status code changes.
+- v5 `.env.example` / smoke script (AC-29/AC-30): smoke updated to invoke `pcy login` + assert `/openapi.json` 200; no new env vars.
+- v6 capability gate (AC-35): server-side — unchanged. MCP tool calls traverse the same authenticated HTTP path as the CLI; capability decisions still happen in `tools::dispatch_tool`.
+- v7 vault + CLI (AC-38..AC-43): credentials endpoints gain annotations; `pcy credential` commands live unchanged under the noun tree (verbs semantic-identical to v7).
+
+---
+
+## v9 DESIGN — Trust Gate (2026-04-22)
+
+v9 adds 23 acceptance criteria (AC-53..AC-75) across security, auth, credential workflows, UI, observability, multi-tenant enforcement, and rollout hardening. This section specifies the architecture for every AC; per-slice implementation detail lives in each build-slice commit.
+
+### Architecture Overview
+
+Three new subsystems join the existing runtime:
+
+1. **`src/runtime/sandbox/`** — layered Linux sandbox (AC-53 + AC-72). `SandboxedExecutor` wraps v6's `ProcessExecutor`. Every tool exec composes six layers in a fixed order: Bubblewrap namespaces + nested-userns disable → cgroup v2 setup → landlock ruleset → seccomp-bpf allowlist → uid/cap drop → slirp4netns egress proxy with allowlist. Each layer is a sub-module with its own failure mode and unit test; the `compose` entry point fails closed — any layer refusing to initialize aborts the exec with a `sandbox_unavailable` error before any user code runs.
+2. **`src/runtime/secret_proxy.rs`** — out-of-process credential resolver (AC-71). Agent process has zero read access to the vault key; it forwards tool requests with `PLACEHOLDER:<name>` tokens intact to a unix-socket endpoint (`$XDG_RUNTIME_DIR/pincery-secret.sock` by default). The proxy resolves placeholders and delivers plaintext to the sandboxed child via one of three injection modes (env, stdin, header). The `http_get` tool proxies the outbound HTTP call itself rather than exposing the credential to the agent at all.
+3. **`src/tenancy.rs`** — workspace-scoped query middleware (AC-65). Every API handler resolves the session's `workspace_id` and passes it to a new `ScopedPool::query(workspace_id, sql, params)` helper; every query injects `AND workspace_id = $1` at the binding site. A lint test greps `src/api/` for bare `sqlx::query*!?` invocations and fails the build on any hit.
+
+The existing request path remains: HTTP handler → capability gate → tool dispatch → executor. v9 inserts `ScopedPool` at the handler layer, `SecretProxy` between dispatch and executor, and `SandboxedExecutor` replacing the raw `ProcessExecutor`.
+
+### Directory Structure (additions)
+
+```
+src/
+  tenancy.rs                      # AC-65 scoped-pool middleware + helper
+  api/
+    deposit.rs                    # AC-56 public deposit page (GET/POST /deposit/:token)
+    credential_requests.rs        # AC-55, AC-57 (list/approve/reject)
+    sessions.rs                   # AC-58 (refresh/revoke/list)
+    users.rs                      # AC-59 (add/list/set-role/delete)
+    cost.rs                       # AC-63 cost rollup endpoint
+    version.rs                    # AC-69 /api/version
+    events_export.rs              # AC-62 jsonl/csv streaming
+    agent_network.rs              # AC-72 allowlist CRUD
+  runtime/
+    observability/
+      redaction.rs                # AC-74 tracing/event redaction layer
+      seccomp_audit.rs            # AC-77 sandbox_syscall_denied event payload + audit-record parser + DB emit helper
+    sandbox/
+      mod.rs                      # SandboxedExecutor entry + compose() (POSIX 128+signum signal->exit_code translation in ProcessExecutor)
+      bwrap.rs                    # Bubblewrap wrapper (namespaces, --disable-userns, uid/gid/cap drop, bind mounts; POSIX 128+signum signal->exit_code translation so SIGSYS surfaces as exit_code 159)
+      init_policy.rs              # parent -> pincery-init policy, including AC-87 landlock_scopes bitmap
+      seccomp.rs                  # AC-77 seccompiler default-deny allowlist (75 entries: 40 from observed_syscalls.txt + 35 from additions.txt; clone routed to clone_arg_rules) + clone arg-filter (CLONE_NEWUSER|CLONE_NEWNS lockout) + ESCAPE_PRIMITIVES negative control + ALLOWLIST_SIZE_FLOOR/CEILING bounds (40..=120); Enforce=KillProcess (SIGSYS exit 159), Audit=Log
+      landlock.rs                 # landlock filesystem ruleset + raw ABI-6 IPC scope installer
+      cgroup.rs                   # cgroup v2 write helpers (cgroups-rs)
+      netns.rs                    # slirp4netns proxy + egress allowlist plumbing
+      profiles/
+        bwrap_args.toml           # default bind-mount / env layout
+    secret_proxy.rs               # AC-71 unix-socket server + client stub
+    tools/
+      http_get.rs                 # AC-66 with agent_http_allowlist check
+      file_read.rs                # AC-66 per-agent tempdir scope
+      db_query.rs                 # AC-66 stored-credential + read-only regex
+  background/
+    retention.rs                  # AC-64 archive + prune job
+    rate_limit.rs                 # AC-67 rolling 60s window (token bucket)
+  cli/commands/
+    credential_request.rs         # AC-57 list/approve/reject
+    session.rs                    # AC-58 list/revoke/refresh
+    user.rs                       # AC-59 add/list/set-role/delete
+    cost.rs                       # AC-63 CLI rollup
+    events_archive.rs             # AC-64 archive subcommand
+    agent_network.rs              # AC-72 allow/list/revoke
+static/
+  js/htmx.min.js                  # AC-61 vendored 1.9.x (no CDN)
+  css/pico.min.css                # AC-61 vendored 2.0.x
+  views/                          # AC-61 six server-rendered partials
+    login.html | agents.html | agent_detail.html | events.html | budget.html | credential_inbox.html
+docs/SECURITY.md                  # AC-54 threat model
+docs/runbooks/
+  dev_setup_macos.md              # AC-75 contributor guide
+  dev_setup_windows.md            # AC-75 contributor guide
+  rollback_to_v8.md               # pre-v9 rollback recipe
+Dockerfile.devshell               # AC-75 pinned Ubuntu 24.04 dev shell image
+scripts/devshell.sh               # AC-75 Linux/macOS wrapper
+scripts/devshell.ps1              # AC-75 PowerShell wrapper
+scripts/capture_seccomp_corpus.sh # AC-77 strace-based syscall corpus capture (regenerates tests/fixtures/seccomp/observed_syscalls.txt)
+tests/
+  fixtures/
+    seccomp/
+      observed_syscalls.txt       # AC-77 empirical corpus (kernel 6.6 / glibc 2.39 / x86_64) sourcing the allowlist
+      additions.txt               # AC-77 manually-justified additions (35 entries: dash + coreutils helpers, glibc-2.39 modern syscalls statx/faccessat2/madvise/etc., pincery-init Rust residuals between apply_seccomp and execvp, plus 7 verify-fix-2 kernel-evidence syscalls getresuid/getresgid/capget/capset/landlock_create_ruleset/landlock_add_rule/landlock_restrict_self)
+      README.md                   # AC-77 fixture provenance + regeneration recipe
+  sandbox_escape_test.rs          # AC-53 12-payload matrix
+  seccomp_allowlist_test.rs       # AC-77 happy-path + unshare SIGSYS + audit-mode no-SIGSYS (3 cfg(linux) integration tests)
+  sigsys_event_test.rs            # AC-77 review-fix R1: SIGSYS termination emits sandbox_syscall_denied event
+  landlock_scope_test.rs          # AC-87 abstract-socket + signal scope live proof
+  sandbox_mode_test.rs            # AC-73 enforce/audit/disabled
+  sandbox_perf_test.rs            # AC-73 p95 budget
+  secret_proxy_test.rs            # AC-71 memory sweep
+  credential_hygiene_test.rs      # AC-74 redaction + zeroize
+  network_egress_test.rs          # AC-72 allow/block
+  credential_request_tool_test.rs # AC-55
+  credential_deposit_test.rs      # AC-56
+  cli_credential_request_test.rs  # AC-57
+  session_ttl_test.rs             # AC-58
+  rbac_test.rs                    # AC-59
+  readme_auth_section_test.rs     # AC-60
+  ui_smoke_test_v9.rs             # AC-61
+  event_search_export_test.rs    # AC-62
+  cost_report_test.rs             # AC-63
+  event_retention_test.rs         # AC-64
+  multi_tenant_isolation_test.rs  # AC-65 5x5 + SQLi probes
+  tenancy_middleware_test.rs      # AC-65 lint
+  tool_catalog_test.rs            # AC-66
+  workspace_rate_limit_test.rs    # AC-67
+  ollama_config_test.rs           # AC-68
+  version_handshake_test.rs       # AC-69
+  terminology_test.rs             # AC-70
+migrations/
+  20260501000001_add_workspace_id_to_sessions.sql
+  20260501000002_create_credential_requests.sql
+  20260501000003_add_users_role.sql
+  20260501000004_add_sessions_expires_at.sql
+  20260501000005_create_agent_http_allowlist.sql
+  20260501000006_create_agent_network_allowlist.sql
+```
+
+### Interfaces
+
+**Secret Proxy IPC (AC-71)** — length-prefixed JSON over unix socket:
+
+```rust
+// Request: agent process -> secret proxy
+struct ResolveRequest {
+    tool_call_id: Uuid,
+    agent_id: Uuid,
+    workspace_id: Uuid,
+    placeholders: Vec<String>,        // e.g. ["OPENAI_API_KEY"]
+    injection_mode: InjectionMode,    // Env | Stdin | HttpHeader { name }
+    child_stdin_fd: Option<RawFd>,    // SCM_RIGHTS passed fd for stdin mode
+}
+
+enum ResolveResponse {
+    Ready { env: HashMap<String, OsString> },  // proxy wrote stdin if requested
+    Missing { name: String },                  // emits credential_unresolved
+    Denied { reason: String },                 // capability gate refused
+}
+```
+
+**Scoped Pool (AC-65)**:
+
+```rust
+pub struct ScopedPool<'a> { pool: &'a PgPool, workspace_id: Uuid }
+impl ScopedPool<'_> {
+    pub async fn fetch_one<T>(&self, sql: &str, binds: Binds) -> Result<T>;
+    pub async fn fetch_all<T>(&self, sql: &str, binds: Binds) -> Result<Vec<T>>;
+    pub async fn execute(&self, sql: &str, binds: Binds) -> Result<u64>;
+    // SELECT/UPDATE/DELETE auto-append `AND workspace_id = $1`;
+    // INSERT auto-fills workspace_id from the scope.
+}
+```
+
+**Credential Request Surface (AC-55/56/57)**:
+
+```
+POST /api/agents/:id/tools/request_credential
+  body: { name, reason, doc_url? }
+  -> 201 { request_id }   (emits credential_requested; deposit_token NEVER returned)
+GET  /api/credential-requests?status=pending
+POST /api/credential-requests/:id/approve  -> 200 { deposit_url }  (admin/operator)
+POST /api/credential-requests/:id/reject   -> 200 { status: "rejected" }
+GET  /deposit/:deposit_token   -> 200 text/html (no auth, single-use)
+POST /deposit/:deposit_token   -> 303 /deposit/success  (24h TTL)
+```
+
+**Sandbox Events (AC-53 / AC-71 / AC-72)**:
+
+```
+sandbox_blocked   { tool_call_id, payload_category, denied_by_layer, syscall?, path? }
+secret_injected   { tool_call_id, name, tool_name, injection_mode }
+network_blocked   { tool_call_id, destination_host, destination_port, protocol }
+```
+
+### External Integrations & Test Strategy
+
+| Integration                                          | Purpose                                                                                                                                                                                                                                   | Failure mode                                                                                                                                                                                                                                                                                                                            | Test strategy                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bubblewrap` binary                                  | Namespace isolation                                                                                                                                                                                                                       | Missing / ns disabled → exec refuses, `sandbox_unavailable`; nested userns not disabled → AC-86 smoke fails                                                                                                                                                                                                                             | Live on ubuntu-24.04 CI; AC-86 smoke asserts uid/gid/caps and `unshare -U` denial; ignored on non-Linux                                                                                                                                                                                                                                                                                                                                          |
+| `seccompiler` crate (0.5)                            | AC-77 default-deny syscall allowlist (75 entries: 40 from observed_syscalls.txt + 35 from additions.txt; clone routed to clone_arg_rules) + `clone` arg-filter + ESCAPE_PRIMITIVES negative control + ALLOWLIST_SIZE_FLOOR/CEILING bounds | `build_bpf_program` returns `Err` and exec refuses if size guards trip or any escape primitive is present in the allowlist; `Enforce` mode uses `mismatch_action=KillProcess` (SIGSYS exit 159), `Audit` uses `mismatch_action=Log`                                                                                                     | Unit: 9 tests in `seccomp.rs` (program shape, escape-primitive absence, size bounds, clone arg-filter, corpus-subset guard, memfd round-trip); 5 tests in `seccomp_audit.rs` (audit-record parser, payload, event emit). Integration: `tests/seccomp_allowlist_test.rs` (4 cfg=linux: happy-path + SIGSYS + seccomp-disabled control + audit-mode-no-SIGSYS) and `tests/sigsys_event_test.rs` (2 cfg=linux); live on privileged sandbox-smoke CI |
+| Landlock ABI + `landlock` crate + raw ABI-6 syscalls | FS confinement + IPC floor                                                                                                                                                                                                                | Startup preflight fails closed if ABI < 6 in strict mode; relaxed mode only downgrades to ABI >= 1 with `OPEN_PINCERY_ALLOW_UNSAFE=true`; no bwrap-only fallback. `landlock = 0.4` handles filesystem rules; `pincery-init` uses raw `landlock_create_ruleset` / `landlock_restrict_self` only for `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL`.                                                                                                                                                                                                                                                                                                                                                                                                                          | Live in privileged sandbox-smoke; AC-84 positive process tests run with `OPEN_PINCERY_RUN_AC84_POSITIVE=1`; AC-87 `tests/landlock_scope_test.rs` proves abstract-socket denial and signal EPERM on ABI >= 6 |
+| `slirp4netns`                                        | Egress proxy + allowlist                                                                                                                                                                                                                  | Missing → exec refuses                                                                                                                                                                                                                                                                                                                  | Live: allowed host succeeds, denied host blocks                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `cgroups-rs`                                         | Resource limits                                                                                                                                                                                                                           | cgroup v2 not mounted → exec refuses                                                                                                                                                                                                                                                                                                    | Live: small OOM / PID thresholds                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Postgres                                             | Tenancy enforcement                                                                                                                                                                                                                       | Middleware bypass → lint fails CI                                                                                                                                                                                                                                                                                                       | Live: 5×5 isolation matrix + SQLi probes                                                                                                                                                                                                                                                                                                                                                                                                         |
+| HTMX + Pico                                          | UI                                                                                                                                                                                                                                        | Static asset 404 → UI smoke red                                                                                                                                                                                                                                                                                                         | Live: curl each route + check CSP header                                                                                                                                                                                                                                                                                                                                                                                                         |
+
+### Observability
+
+- **Logs**: every sandbox layer failure → structured `error!` with `layer`, `kind`, `tool_call_id`. No plaintext credentials are ever logged (secret proxy scrubs at IPC boundary).
+- **New event types**: `sandbox_blocked`, `sandbox_would_block`, `sandbox_mode_changed`, `sandbox_mode_default`, `sandbox_self_test_failed`, `sandbox_scope_unavailable`, `sandbox_syscall_denied` (AC-77; `{tool_name, agent_id, wake_id, correlation_pids, syscall_nr, syscall_name, audit_pid, audit_epoch_millis, record_correlated}` — emitted on SIGSYS-terminated tool invocation, `syscall_nr=-1` until G2c.2 wires AUDIT_SECCOMP correlation), `network_blocked`, `secret_injected`, `credential_plaintext_rejected`, `credential_requested`, `credential_deposited`, `credential_request_rejected`, `deposit_attempt`, `rate_limit_exceeded`.
+- **Counters (stdout / structured)**: `sandbox_exec_total{outcome}`, `egress_attempts_total{decision}`, `secret_resolutions_total{mode}`, `tenancy_queries_total{workspace_id}`.
+- **CLI verbs added**: `pcy session {list,revoke,refresh}`, `pcy user {add,list,set-role,delete}`, `pcy credential request {list,approve,reject}`, `pcy agent network {allow,list,revoke}`, `pcy events archive`, `pcy cost`.
+
+### Complexity Exceptions
+
+1. **`src/runtime/sandbox/mod.rs` may exceed 300 lines.** Each layer lives in its own sub-module, but `compose()` must orchestrate all six with partial-failure cleanup. File budget 400 lines; split further only if REVIEW flags it.
+2. **`tests/sandbox_escape_test.rs` at ~500 lines.** 12 payloads × 4 categories × assertion+event check. Splitting by category is permitted; single-file is also acceptable given the shared harness cost.
+3. **AC-65 endpoint-migration slice touches ~25 files in `src/api/` at once.** Necessary — the middleware lint disallows partial migration. One slice + one large test; REVIEW must sign off.
+4. **`src/tenancy.rs::Binds` is a bespoke subset of `sqlx` binds, not a drop-in alias.** Trade-off accepted: the API surface stays small (three methods) and every call site is auditable.
+
+### Open Questions
+
+- **Landlock kernel floor.** Resolved by AC-84 / Slice G0b: strict startup requires Landlock ABI >= 6 (Linux >= 6.7), seccomp-bpf, cgroup v2, `/proc/sys/user/max_user_namespaces > 0`, Debian/Ubuntu `unprivileged_userns_clone=1` for non-root callers, and bubblewrap >= 0.8.0 before config loading, DB bootstrap, or listener bind. `OPEN_PINCERY_SANDBOX_FLOOR=relaxed` only downgrades Landlock to ABI >= 1 when paired with `OPEN_PINCERY_ALLOW_UNSAFE=true`; there is no bwrap-only fallback. Linux CI/devshell evidence remains the VERIFY proof path.
+- **slirp4netns vs nftables.** v9 uses slirp4netns (unprivileged, userspace). nftables is a v10 opt-in for performance at scale. No BUILD impact.
+- **Session refresh vs rotation.** v9 uses sliding expiration + an explicit `POST /api/sessions/refresh`. Refresh-token rotation (separate short access + long refresh) deferred to v11 with OAuth integration.
+
+### v9 Dependencies on Prior Versions
+
+- v6 AC-36 `ProcessExecutor`: wrapped by `SandboxedExecutor`. Existing `tests/sandbox_test.rs` (process-isolation smoke, misnamed) continues to pass.
+- v7 AC-40 credential vault: extended via `credential_requests` table; existing `credentials` table untouched. Secret proxy (AC-71) reuses the vault decrypt path.
+- v8 AC-45 idempotent login, AC-47 `--output`: every new list endpoint (requests, sessions, users, cost, network allowlist) honours `--output` and the noun-verb tree.
+- v8 AC-52b naming lint: extended to allowlist new subcommands (`credential request`, `session`, `user`, `cost`, `agent network`).
+
+### v9 DESIGN Addendum — Audit Hardening (AC-73 / AC-74 / AC-75)
+
+The audit pass added three ACs. Implementation notes:
+
+**AC-73 Sandbox Mode Flag** lives in `src/config.rs` as `pub enum SandboxMode { Enforce, Audit, Disabled }` with `FromStr` parsing `OPEN_PINCERY_SANDBOX_MODE`. `SandboxedExecutor::exec` reads mode at call time (not at construction) so it can be flipped without server restart. `Audit` mode short-circuits ALL deny decisions to Allow but emits `sandbox_would_block` events; `Disabled` skips the sandbox entirely but only if `OPEN_PINCERY_ALLOW_UNSAFE=true` is set — otherwise startup aborts with `SANDBOX_MODE=disabled requires OPEN_PINCERY_ALLOW_UNSAFE=true (this is a safety interlock)`. Startup self-test runs ONE synthetic tool call at `SANDBOX_MODE=enforce` with a known-blocking payload (`cat /etc/shadow`); if it succeeds, boot aborts.
+
+**AC-74 Credential Hygiene** introduces `src/observability/redaction.rs` exporting a `RedactionLayer` that implements `tracing_subscriber::Layer`. It wraps every field value in a `Visit` impl; if the field name matches `password|api_key|token|secret|authorization|bearer` (case-insensitive) OR the value matches one of six credential-shape regexes (`sk-[A-Za-z0-9]{16,}`, `ghp_[A-Za-z0-9]{36}`, `xox[baprs]-[A-Za-z0-9-]{10,}`, JWT tri-dot, AWS AKIA/ASIA, Azure Bearer), the value is replaced with `<REDACTED>` before the downstream formatter sees it. The same regex set plus dynamic credential names (loaded from the `credentials` table at startup + on `credential_added` events) runs inside `src/models/events.rs::Event::try_new`, rejecting events with `EventRejected::CredentialPlaintext`. `SecretBuffer` in `src/runtime/secret_proxy.rs`:
+
+```rust
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
+#[derive(ZeroizeOnDrop)]
+struct SecretBuffer {
+    #[zeroize(drop)]
+    bytes: Vec<u8>,
+    mlock_region: Option<region::LockGuard>,  // mlock() so pages never swap
+}
+```
+
+**AC-75 Cross-Platform Dev Env** ships `Dockerfile.devshell` (Ubuntu 24.04 + bubblewrap + slirp4netns + uidmap + libseccomp-dev + landlock headers + rustup + sqlx-cli). `scripts/devshell.sh` runs `docker run --rm -it --privileged --cgroupns=host -v $PWD:/work -w /work ghcr.io/open-pincery/devshell:v9 "$@"`. `.ps1` mirror for PowerShell. CI publishes the image on tag push. `docs/runbooks/dev_setup_{macos,windows}.md` walks a new contributor from clone to `devshell cargo test` green.
+
+### v9 Threat-Model Additions (feed into AC-54 SECURITY.md)
+
+Audit surfaced these explicit threat-model items SECURITY.md must address:
+
+1. **In-scope**: prompt-injection-driven credential-echo into event log (AC-74 rejects); tool-sandbox escape (AC-53 12-payload matrix); cross-workspace data access via session forgery (AC-65 + constant-time compare); session hijack via XSS (AC-61 nonce-CSP + cookie `HttpOnly`); CSRF on deposit page (AC-56 double-submit token); timing attack on session token (AC-58 + `subtle`); swap-leak of plaintext credentials (AC-71 + `mlock`); supply-chain attack via new sandbox crates (AC-73 + `cargo deny`).
+2. **Out-of-scope (documented, not mitigated)**: compromised host kernel; malicious Postgres admin; physical access; kernel CVEs (user must patch); side-channel attacks on CPU microarchitecture (Spectre-class).
+3. **Deployment hardening checklist** (new section): disable or encrypt swap; run with `--security-opt no-new-privileges`; kernel ≥ 5.13; `/proc/sys/kernel/unprivileged_userns_clone=1`; outbound firewall at host level defense-in-depth.
+
+### v9 Observability Additions (feed into Observability section)
+
+New event types added by the audit pass:
+
+- `sandbox_would_block { tool_call_id, payload_category, reason }` — AC-73 `audit` mode
+- `sandbox_mode_changed { old, new, user_id }` — AC-73
+- `sandbox_mode_default` — AC-73 startup warning (unset → enforce)
+- `sandbox_self_test_failed { reason }` — AC-73 startup abort
+- `credential_plaintext_rejected { event_type, pattern_matched }` — AC-74
+- `deposit_attempt { deposit_token_id, outcome, source_ip }` — AC-56 hardening
+
+Every new event type is registered in `src/models/events.rs` and enumerated in `tests/event_type_lint.rs`.
+
+### v9 G0f Design Reconciliation - AC-88 Landlock Audit Integration
+
+This addendum records the implemented AC-88 shape after Slice G0f REVIEW.
+It narrows the original "background reader" design to the per-invocation
+reader that the code actually uses. That is intentional: per-invocation
+source creation gives the audit bridge a real `{agent_id, wake_id,
+tool_name}` context, bounded timestamps, and sampled process-tree PIDs
+before any `landlock_denied` event can be appended.
+
+#### Architecture Delta
+
+AC-88 adds four cooperating pieces:
+
+1. **Policy flag plumbing**: `src/runtime/sandbox/init_policy.rs` adds
+   `landlock_restrict_flags: u32`, `LANDLOCK_AUDIT_ABI_FLOOR = 7`, and
+   `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON`. `RealSandbox` sets the flag
+   only when the probed Landlock ABI is >= 7. ABI 6 keeps filesystem and
+   IPC-scope enforcement active while audit visibility degrades.
+2. **Raw Landlock restrict path**: `src/runtime/sandbox/landlock.rs`
+   exposes `install_landlock_with_restrict_flags`. When flags are
+   nonzero it builds the filesystem ruleset through raw Landlock syscalls
+   so `pincery-init` can pass `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON`.
+3. **Per-invocation audit source**: `src/runtime/tools.rs` creates an
+   audit source around each shell invocation. The source tries Linux
+   audit netlink first, then falls back to a file reader opened at EOF.
+   The fallback path is `OPEN_PINCERY_LANDLOCK_AUDIT_LOG` when set,
+   otherwise `/var/log/audit/audit.log`.
+4. **Correlation and append bridge**:
+   `src/observability/landlock_audit.rs` parses audit records, rejects
+   uncorrelated records, and appends `landlock_denied` only through
+   `models::event::append_event`. Correlation uses sampled process-tree
+   PIDs from `RealSandbox`, audit `pid`, audit `ppid` / `parent_pid`, and
+   the shell invocation start/finish timestamp window to reject stale PID
+   reuse.
+
+#### Directory Structure Delta
+
+```text
+src/
+  observability/
+    landlock_audit.rs          # NEW - parser, source abstraction, correlation, event bridge
+    landlock_audit_netlink.rs  # NEW - Linux NETLINK_AUDIT reader + nlmsghdr fixture decoder
+    mod.rs                     # MODIFIED - registers both AC-88 modules
+  runtime/
+    sandbox/
+      init_policy.rs           # MODIFIED - landlock_restrict_flags + ABI/flag constants
+      bwrap.rs                 # MODIFIED - ABI-gated flag plumbing + process-tree PID sampling
+      landlock.rs              # MODIFIED - raw restrict_self flag path
+      mod.rs                   # MODIFIED - ExecResult::Ok includes audit_pids
+    tools.rs                   # MODIFIED - per-shell audit source + bounded append polling
+  bin/
+    pincery_init.rs            # MODIFIED - applies Landlock with restrict flags
+docker-compose.yml             # MODIFIED - forwards OPEN_PINCERY_LANDLOCK_AUDIT_LOG to app container
+tests/
+  landlock_audit_test.rs       # NEW - deterministic + gated live AC-88 proof
+  compose_env_test.rs          # MODIFIED - deployment env forwarding proof for audit-log fallback
+.env.example                   # MODIFIED - OPEN_PINCERY_LANDLOCK_AUDIT_LOG docs
+```
+
+#### Interfaces
+
+```rust
+// src/runtime/sandbox/init_policy.rs
+pub const LANDLOCK_AUDIT_ABI_FLOOR: u32 = 7;
+pub const LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON: u32 = 1 << 1;
+
+pub struct SandboxInitPolicy {
+    pub landlock_scopes: u64,
+    pub landlock_restrict_flags: u32,
+    // existing fields unchanged
+}
+
+// src/runtime/sandbox/mod.rs
+pub enum ExecResult {
+    Ok { stdout: String, stderr: String, exit_code: i32, audit_pids: Vec<u32> },
+    Timeout,
+    Rejected(String),
+    Err(String),
+}
+
+// src/observability/landlock_audit.rs
+pub struct LandlockAuditRecord {
+    pub pid: Option<u32>,
+    pub parent_pid: Option<u32>,
+    pub audit_epoch_millis: Option<u128>,
+    pub denied_path: String,
+    pub requested_access: String,
+    pub syscall: String,
+}
+
+pub struct LandlockAuditContext {
+    pub agent_id: Uuid,
+    pub wake_id: Option<Uuid>,
+    pub tool_name: String,
+    pub audit_pids: Vec<u32>,
+    pub invocation_started_at_millis: Option<u128>,
+    pub invocation_finished_at_millis: Option<u128>,
+}
+
+pub trait AuditRecordSource {
+    fn read_available_records(&mut self) -> io::Result<Vec<String>>;
+}
+
+pub async fn append_landlock_denials_within<S>(
+    pool: &PgPool,
+    context: &LandlockAuditContext,
+    source: &mut S,
+    window: Duration,
+) -> Result<usize, AppError>
+where
+    S: AuditRecordSource + ?Sized;
+```
+
+`landlock_denied` event payloads include the required AC fields
+`tool_name`, `agent_id`, `denied_path`, `requested_access`, and
+`syscall`, plus `wake_id`, `correlation_pids`, `audit_pid`,
+`audit_parent_pid`, and `audit_epoch_millis` when available.
+
+#### External Integrations
+
+| Integration                                                  | Failure mode                                                       | Error handling                                                                                                                                      | Test strategy                                                                                                                                                                                                                  |
+| ------------------------------------------------------------ | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Linux audit netlink (`NETLINK_AUDIT`, `AUDIT_NLGRP_READLOG`) | Missing capability, unavailable audit subsystem, bind/read failure | Fall back to audit log file opened from EOF; if fallback also fails, emit one-time `audit_log_unavailable` warning and continue sandbox enforcement | Deterministic `nlmsghdr` fixture decoder in `landlock_audit_netlink.rs`; live test skips with explicit evidence when source unavailable                                                                                        |
+| Audit log file fallback                                      | File missing, unreadable, or no records written by auditd/journald | `invocation_audit_source_from_end` reports the combined netlink/file failure; shell tool still executes under Landlock                              | EOF fallback unit test proves old records are not replayed; env var `OPEN_PINCERY_LANDLOCK_AUDIT_LOG` allows alternate fixture/source path; `tests/compose_env_test.rs` proves the override reaches the deployed app container |
+| Landlock ABI 7 audit flag                                    | Kernel reports ABI < 7                                             | `landlock_restrict_flags = 0`; emit one-time `audit_log_unavailable`; keep ABI >= 6 enforcement active                                              | ABI 6 deterministic fallback test; Linux live tests skip below ABI 7 with explicit evidence                                                                                                                                    |
+
+No new Rust crate dependency is added for AC-88. Netlink and raw
+Landlock calls use the existing Linux `libc` dependency.
+
+#### Observability
+
+- `landlock_denied`: appended to the agent event log only after real
+  runtime correlation. `source = "runtime"`, `tool_name = "shell"`,
+  `wake_id` is present when available, and the JSON payload carries the
+  denial and correlation fields above.
+- `audit_log_unavailable`: a one-time structured tracing warning when
+  ABI < 7 or no audit source is readable. It is not faked as an agent
+  event without a real agent context.
+
+#### Test Strategy
+
+| Proof                   | Coverage                                                                                                                                                                                                                   |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Parser aliases          | `tests/landlock_audit_test.rs` parses `path`/`name`/`denied_path`, `requested_access`/`requested`/`accesses`, `syscall` aliases, and ignores non-Landlock records                                                          |
+| EOF fallback            | File source opens at EOF and reads only records appended after source creation                                                                                                                                             |
+| Bounded delayed polling | `append_landlock_denials_within` appends two delayed correlated records, continuing after the first append until quiet period or total window                                                                              |
+| Correlation             | Tests cover process PID, audit `ppid`, `parent_pid`, stale/post-invocation PID reuse rejection, untimestamped live-context rejection, and uncorrelated append refusal                                                      |
+| Netlink decoding        | `landlock_audit_netlink.rs` decodes deterministic `nlmsghdr` payload frames without a live audit subsystem                                                                                                                 |
+| Live Linux proof        | Gated by bwrap availability, Landlock ABI >= 7, and readable audit netlink/log source; skips print explicit evidence when unavailable                                                                                      |
+| Compose env forwarding  | `tests/compose_env_test.rs` asserts `docker-compose.yml` forwards `OPEN_PINCERY_LANDLOCK_AUDIT_LOG` via `${VAR:-}` and the gated `COMPOSE_AVAILABLE=1` `docker compose config` fixture renders the supplied audit-log path |
+
+#### Complexity Exceptions
+
+`src/observability/landlock_audit.rs` is allowed up to 450 lines for
+AC-88 because it deliberately keeps parser, source abstraction,
+correlation, bounded polling, and append bridge together. Linux netlink
+framing is split into `landlock_audit_netlink.rs`. If the audit module
+grows beyond 450 lines, split parser/correlation into separate files.
+
+#### Open Questions
+
+None. Live audit availability is an environment precondition, not an AC
+ambiguity. ABI < 7 degrades observability only; sandbox enforcement
+remains active.
+
+### v9 G3 DESIGN — AC-78 Event-Log Hash Chain (2026-05-01)
+
+Make `Inv_AuditChainBeforeExecution` real (currently a `VerifyAuditChain` cosmetic stand-in per TLA+ v3.2 F4). Tampering with `events.content` after-the-fact is silent today; this AC makes any post-insert mutation detectable by a verify pass.
+
+#### Architecture
+
+A per-agent SHA-256 hash chain over events, computed by a Postgres trigger that holds a row lock on the preceding event for the same agent. A new background `verify_audit_chain` job (and `pcy audit verify` CLI) walks every chain and emits `audit_chain_verified` or `audit_chain_broken { agent_id, first_divergent_event_id }` events.
+
+**Chain root**: per-agent (not per-workspace). Rationale: every event already has `agent_id NOT NULL` (no JOIN required in the trigger), `idx_events_agent_created` already orders within an agent, and concurrent multi-agent inserts within one workspace need not serialize. Workspace-level walking is cheap (UNION over agents).
+
+**Hash input** (canonical, deterministic): `prev_hash || event_type || canonical_json(content_fields) || created_at_micros`, where `content_fields` is the JSON serialization of the immutable event fields in fixed order: `agent_id, event_type, source, wake_id, tool_name, tool_input, tool_output, content, termination_reason`. NULL → empty JSON null. `created_at_micros` is the trigger-assigned `created_at` truncated to microseconds (Postgres's native `timestamptz` precision). The chain genesis (no prior event for agent) uses `prev_hash = ""` (empty string), `entry_hash = sha256(empty || …)`.
+
+#### Directory Structure (additions)
+
+```
+migrations/
+  20260501000001_add_event_hash_chain.sql       # ALTER TABLE + trigger fn + trigger
+src/
+  cli/
+    commands/
+      audit.rs                                  # `pcy audit verify` subcommand (RECONCILED 2026-05-02: lives under cli/commands/, not cli/)
+  background/
+    audit_chain.rs                              # verify_audit_chain (per-agent), verify_workspace, verify_and_emit, enforce_audit_chain_floor_at_startup
+src/api/
+  audit.rs                                      # POST /api/audit/chain/verify + POST /api/audit/chain/verify/agents/{id} (workspace-admin gated)
+tests/
+  audit_chain_test.rs                           # trigger + verifier + startup-gate tests (genesis, prev_hash, per-agent isolation, NOT NULL, happy/tamper/concurrent, emitted-event shape, no-mutate invariant, workspace verifier, startup-gate abort + relaxed-floor)
+  audit_api_test.rs                             # HTTP /api/audit/chain/verify (workspace happy + tamper, per-agent cross-workspace 404, non-admin 403)
+  cli_audit_verify_test.rs                      # `pcy audit verify` exit-code 0 (clean) / 2 (broken) e2e
+docs/runbooks/
+  audit_chain_recovery.md                       # operator runbook for exit-code-5 startup refusal (restore / forensic / time-boxed override)
+```
+
+#### Interfaces
+
+- **DB schema delta**:
+  - `events.prev_hash TEXT NULL` (nullable in migration; trigger fills on insert; backfill makes existing rows form a chain in `(agent_id, created_at, id)` order; `ALTER COLUMN ... SET NOT NULL` after backfill).
+  - `events.entry_hash TEXT NULL` → same pattern, then `NOT NULL`.
+  - Index `idx_events_agent_chain_walk ON events(agent_id, created_at, id)` already covered by existing `idx_events_agent_created` plus `id` tiebreak; add only if EXPLAIN shows we still need it.
+- **Trigger function** `events_chain_compute_hash() RETURNS TRIGGER`:
+  - `BEFORE INSERT FOR EACH ROW`. Selects `id, entry_hash` of the current latest event for `NEW.agent_id` with `FOR UPDATE` (row lock prevents two concurrent inserts on the same agent racing into the same prev). Computes `NEW.entry_hash := encode(sha256(coalesce(NEW.prev_hash,'') || NEW.event_type || canonical_payload || to_char(NEW.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'))::bytea, 'hex')` using `pgcrypto`. Sets `NEW.prev_hash` from selected hash (or empty string for genesis).
+  - Concurrency: SERIALIZABLE-friendly. Two inserts for the same agent race; the second blocks on `FOR UPDATE` of the first's row until commit.
+- **Verify path** `verify_audit_chain(pool, AgentId) -> ChainStatus`:
+  - `ChainStatus::Verified { events: u64, last_hash: String }` or `ChainStatus::Broken { first_divergent_event_id: Uuid, expected_hash: String, actual_hash: String }`.
+  - Walks `SELECT id, prev_hash, entry_hash, … FROM events WHERE agent_id = $1 ORDER BY created_at, id`, recomputes each hash, compares to stored `entry_hash`. First mismatch returns `Broken`.
+  - Workspace verifier loops all agents in workspace; emits one `audit_chain_verified` or `audit_chain_broken` event **per agent** with structured payload.
+- **CLI** `pcy audit verify [--agent <id>] [--workspace <id>]`:
+  - Defaults to current context's workspace. Prints per-agent `OK (n events)` or `BROKEN at event <id>` with non-zero exit on any break.
+- **HTTP** `POST /api/audit/chain/verify` (workspace-admin gated): runs verifier across every agent in the caller's workspace, returns JSON `{ agents: [{ agent_id, status: "verified"|"broken", … }], all_verified: bool }`. Companion `POST /api/audit/chain/verify/agents/{id}` (workspace-admin gated, workspace-scoped 404 on cross-tenant) verifies a single agent's chain. Both delegate to `background::audit_chain::verify_workspace` / `verify_and_emit` so HTTP, CLI, and the startup gate share one verifier path.
+- **Background invocation**: at startup (post-migration, post-DB-bootstrap, before listener bind) the server runs one verify pass per workspace. Failure to verify aborts startup with exit code 5 unless `OPEN_PINCERY_AUDIT_CHAIN_FLOOR=relaxed` + `OPEN_PINCERY_ALLOW_UNSAFE=true` (matches AC-84 relaxed-floor pattern).
+
+#### Event Types (additions)
+
+- `audit_chain_verified` (source = `runtime`, payload `{ agent_id, events_in_chain, last_entry_hash }`)
+- `audit_chain_broken` (source = `runtime`, payload `{ agent_id, first_divergent_event_id, expected_hash, actual_hash, events_walked }`)
+
+#### Backfill Strategy
+
+Migration step ordering:
+
+1. `ALTER TABLE events ADD COLUMN prev_hash TEXT, ADD COLUMN entry_hash TEXT;`
+2. `CREATE EXTENSION IF NOT EXISTS pgcrypto;` (idempotent).
+3. Recursive CTE walks each `agent_id`'s events in `(created_at, id)` order, computing the chain forward and writing both columns. Single statement, deterministic.
+4. `ALTER TABLE events ALTER COLUMN prev_hash SET NOT NULL, ALTER COLUMN entry_hash SET NOT NULL;`
+5. `CREATE FUNCTION events_chain_compute_hash() …` and trigger.
+
+For empty databases (fresh installs), steps 1–2 are no-ops on data; step 3 backfills zero rows; steps 4–5 install constraints+trigger.
+
+#### External Integrations & Test Strategy
+
+| Integration       | Failure mode                             | Test strategy                         |
+| ----------------- | ---------------------------------------- | ------------------------------------- |
+| Postgres pgcrypto | Extension missing → migration fails fast | Live (CI Postgres 16 has pgcrypto)    |
+| Trigger row lock  | Deadlock on multi-agent insert           | Live concurrent inserts test          |
+| Backfill          | Crash mid-backfill → partial NULLs       | Migration is single tx; rollback-safe |
+
+#### Observability
+
+- Structured tracing on every verify: `audit.chain.verify { agent_id, events, status }`.
+- Prometheus counter `open_pincery_audit_chain_verified_total{status}` and gauge `open_pincery_audit_chain_last_verify_seconds`.
+
+#### Complexity Exceptions
+
+None. Migration is single file <100 lines; verifier is <200 lines; CLI subcommand <80 lines.
+
+#### Open Questions
+
+None. Per-agent vs per-workspace chain choice documented above (per-agent). Canonical-JSON serialization deterministic via Postgres `to_jsonb` with explicit column ordering.
+
+#### Test Strategy (one row per AC sub-claim)
+
+| Sub-claim                                 | Test                                                                                                                                             |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| T-AC78-1: clean chain verifies            | `tests/audit_chain_test.rs::happy_path_chain_verifies` inserts 10k events, verifier returns Verified                                             |
+| T-AC78-2: tamper detected                 | `tests/audit_chain_test.rs::manual_update_breaks_chain` does `UPDATE events SET content='evil'`, verifier returns Broken with the right event_id |
+| T-AC78-3: concurrent inserts intact       | `tests/audit_chain_test.rs::concurrent_inserts_preserve_chain` spawns 8 tasks each inserting 200 events for the same agent, then verifies        |
+| T-AC78-4: trigger genesis                 | unit test: first event for an agent has prev_hash = '' and entry_hash matches reference computation                                              |
+| T-AC78-5: pcy CLI exits non-zero on break | `tests/cli_audit_verify_test.rs` shells `CARGO_BIN_EXE_pcy` and asserts exit 0 on clean chain / exit 2 on tampered chain                         |
+| T-AC78-6: startup verify gates server     | integration: tamper a row on a DB, restart server, assert exit code 5                                                                            |
+
+### v9 G5 DESIGN — AC-80 Capability Nonce / Freshness (2026-05-03)
+
+> Addendum deferred to RECONCILE per build commit `4416118` — no
+> AC-79 design section existed to anchor against. Closes canonical
+> TODO G7 (capability freshness per `IssueToolCall`) + G11 (real
+> time / monotonic nonce state). Architecturally additive: AC-35's
+> capability-mode gate (`src/runtime/capability.rs`) is untouched;
+> AC-78's hash-chain trigger (`migrations/20260501000001_add_event_hash_chain.sql`)
+> transparently chains the new event type; AC-79's prompt-injection
+> floor in `src/runtime/wake_loop.rs::run_wake_loop` is bypassed
+> structurally — mint runs AFTER schema validation + per-wake
+> rate-limit per readiness `R-AC80-7`, immediately before
+> `tools::dispatch_tool`.
+
+#### Architecture
+
+Every LLM-proposed tool call is bound to a freshly-minted, single-use,
+60-second-expiring nonce. The mint is a single `INSERT` at the
+canonical TLA+ `AuthorizeExecution` boundary; the consume is a single
+atomic `UPDATE … RETURNING id` at the `IssueToolCall` boundary. A
+zero-row consume short-circuits dispatch and emits a structured
+`capability_nonce_rejected` event — replays, cross-wake reuse,
+expired tokens, shape mismatches, and cross-workspace probes all
+fail closed without spawning a process, resolving credentials, or
+mutating state outside the event log.
+
+Workspace-scoped (T-AC80-6): every row carries `workspace_id NOT
+NULL`; the consume predicate pins it; the unique index is
+`(workspace_id, nonce)`.
+
+#### Directory Structure (additions)
+
+```
+migrations/
+  20260501000003_create_capability_nonces.sql   # 9-col table; UNIQUE(workspace_id, nonce); INDEX(expires_at)
+src/runtime/
+  capability_nonce.rs                            # NEW: mint, consume, classify_rejection, capability_shape, canonical_json,
+                                                 #      CapabilityNonceTicket, RejectionReason, CAPABILITY_NONCE_TTL_SECS = 60,
+                                                 #      CAPABILITY_NONCE_LEN = 16
+  wake_loop.rs                                   # MODIFIED: mints one ticket per tool call AFTER AC-79 schema validation
+                                                 #           + per-wake rate-limit, immediately BEFORE tools::dispatch_tool
+  tools.rs                                       # MODIFIED: dispatch_tool gains 9th parameter
+                                                 #           `nonce: &CapabilityNonceTicket`; consumes AFTER the AC-35
+                                                 #           mode_allows gate, BEFORE per-tool match arms
+  prompt.rs                                      # MODIFIED: capability_nonce_rejected registered TRUSTED in
+                                                 #           is_untrusted_predicate_covers_all_known_event_types closed-set test
+tests/
+  capability_nonce_test.rs                       # NEW: 12 integration tests — valid-once, replay, cross-wake, expired,
+                                                 #      shape-mismatch, cross-workspace, AC-35-denied-no-consume,
+                                                 #      concurrent-consume race, AC-78 chain walk, schema-shape introspection,
+                                                 #      rejection-event payload per reason
+  capability_gate_test.rs                        # MODIFIED: existing AC-35 tests mint a ticket inline
+  landlock_audit_test.rs                         # MODIFIED: ticket minted inline at every dispatch_tool call site
+  list_credentials_tool_test.rs                  # MODIFIED: same
+  placeholder_dispatch_test.rs                   # MODIFIED: same
+  sigsys_event_test.rs                           # MODIFIED: same
+  common/mod.rs                                  # MODIFIED: capability_nonces added to per-test pool reset list
+```
+
+#### Interfaces
+
+**Public API (`src/runtime/capability_nonce.rs`):**
+
+```rust
+pub const CAPABILITY_NONCE_TTL_SECS: i64 = 60;
+pub const CAPABILITY_NONCE_LEN: usize = 16;
+
+#[derive(Debug, Clone)]
+pub struct CapabilityNonceTicket {
+    pub nonce: [u8; CAPABILITY_NONCE_LEN],
+    pub capability_shape: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RejectionReason {
+    Replay,         // as_str() => "replay"
+    CrossWake,      //              "cross_wake"
+    Expired,        //              "expired"
+    ShapeMismatch,  //              "shape_mismatch"
+    Unknown,        //              "unknown"
+}
+
+impl RejectionReason { pub const fn as_str(self) -> &'static str; }
+
+pub fn capability_shape(args_json: &str) -> String;  // lowercase 64-char hex SHA-256
+                                                     // of canonical-JSON (sorted keys, no whitespace);
+                                                     // raw bytes hashed on parse failure
+
+pub async fn mint(
+    pool: &PgPool,
+    wake_id: Uuid,
+    workspace_id: Uuid,
+    tool_name: &str,
+    args_json: &str,
+) -> Result<CapabilityNonceTicket, sqlx::Error>;
+
+pub async fn consume(
+    pool: &PgPool,
+    nonce: &[u8; CAPABILITY_NONCE_LEN],
+    wake_id: Uuid,
+    workspace_id: Uuid,
+    tool_name: &str,
+    capability_shape: &str,
+) -> Result<(), RejectionReason>;
+```
+
+`mint` calls `OsRng::try_fill_bytes` (rand 0.9) for the 16-byte
+nonce, computes `capability_shape`, and inserts one row with
+`expires_at = now() + ($1 || ' seconds')::interval`.
+
+`consume` is a single atomic `UPDATE … WHERE nonce=$1 AND wake_id=$2
+AND tool_name=$3 AND capability_shape=$4 AND workspace_id=$5 AND
+consumed_at IS NULL AND expires_at > now() RETURNING id`. Zero-row
+result triggers `classify_rejection`, a read-only follow-up that
+surfaces the specific reason (or `Unknown` on DB error — a
+`tracing::warn` is emitted so operators can correlate transient
+infra errors with hostile cross-workspace probes, both of which
+report `Unknown`).
+
+**Updated `dispatch_tool` signature (`src/runtime/tools.rs`):**
+
+```rust
+pub async fn dispatch_tool(
+    tool_call: &ToolCallRequest,
+    mode: PermissionMode,
+    pool: &PgPool,
+    agent_id: Uuid,
+    workspace_id: Uuid,
+    wake_id: Uuid,
+    executor: &Arc<dyn ToolExecutor>,
+    vault: &Arc<Vault>,
+    nonce: &super::capability_nonce::CapabilityNonceTicket,  // NEW (9th param)
+) -> ToolResult
+```
+
+Order inside `dispatch_tool` (T-AC80-9): (1) AC-35
+`required_for` + `mode_allows` gate (unchanged body); (2) NEW AC-80
+`capability_nonce::consume` — on `Err(reason)` emits
+`capability_nonce_rejected` with `{wake_id, tool_name, reason}` and
+returns `ToolResult::Error("capability nonce rejected")`; (3)
+existing per-tool match arms, argument deserialization, executor
+dispatch.
+
+**Mint placement (`src/runtime/wake_loop.rs::run_wake_loop`):**
+
+For each `tool_call` element returned by `llm.chat`, AFTER the AC-79
+schema-shape validation and the AC-79 per-wake 32-call rate-limit
+check, immediately BEFORE `tools::dispatch_tool`:
+
+```rust
+let ticket = super::capability_nonce::mint(
+    pool, wake_id, current.workspace_id,
+    &tc.function.name, &tc.function.arguments,
+).await?;
+let result = tools::dispatch_tool(tc, mode, pool, agent_id,
+    current.workspace_id, wake_id, executor, vault, &ticket).await;
+```
+
+Placement rationale (R-AC80-7): mint downstream of AC-79 means
+schema-invalid replays and rate-limit-exceeded calls do not pollute
+`capability_nonces` with orphan rows, strengthening the storage-growth
+bound (T-AC80-12) without weakening any T-AC80-1..6 invariant.
+Readiness `C-AC80-1` pre-authorized either placement; BUILD chose
+the AFTER-validation form per `R-AC80-7`.
+
+**Schema (`migrations/20260501000003_create_capability_nonces.sql`):**
+
+```sql
+CREATE TABLE capability_nonces (
+    id                 uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    wake_id            uuid        NOT NULL,
+    tool_name          text        NOT NULL,
+    capability_shape   text        NOT NULL,
+    nonce              bytea       NOT NULL,
+    expires_at         timestamptz NOT NULL,
+    consumed_at        timestamptz,
+    workspace_id       uuid        NOT NULL,
+    created_at         timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX capability_nonces_lookup ON capability_nonces (workspace_id, nonce);
+CREATE INDEX        capability_nonces_expiry ON capability_nonces (expires_at);
+```
+
+Nine columns total (the readiness-spec eight + a `created_at`
+audit-friendly default). `created_at` is operator-facing only — no
+predicate references it.
+
+#### Event Catalog (additions)
+
+| Event type                  | Source    | Trust class | Payload                                                                | Notes                                                                                              |
+| --------------------------- | --------- | ----------- | ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `capability_nonce_rejected` | `runtime` | TRUSTED     | `{ wake_id: Uuid, tool_name: String, reason: "replay" \| "cross_wake" \| "expired" \| "shape_mismatch" \| "unknown" }` | Registered TRUSTED in `src/runtime/prompt.rs::is_untrusted_predicate_covers_all_known_event_types`. Chains transparently through the AC-78 hash trigger. |
+
+No `capability_nonce_minted` event — readiness `C-AC80-3` defaults
+to rejection-only emission to bound event-log volume and avoid
+leaking `capability_shape` (a SHA-256 of args, low-risk but still
+derived from potentially sensitive inputs).
+
+#### External Integrations & Test Strategy
+
+| Integration                    | Failure mode                                   | Test strategy                                                                                                  |
+| ------------------------------ | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `OsRng` (rand 0.9 — pre-existing dep) | RNG failure → `mint` panics with explicit T-AC80-1 message | Live (CI Postgres + real syscalls).                                                                            |
+| Postgres `UNIQUE (workspace_id, nonce)` | Collision in 16-byte random space treated as programming error; also blocks duplicate-mint regression | Live integration test inserts confirm uniqueness.                                                              |
+| AC-78 hash trigger             | New event type silently breaks chain           | `tests/capability_nonce_test.rs::capability_nonce_rejected_chains_through_audit_hash` walks the chain.         |
+| AC-35 mode gate                | AC-80 entangles with AC-35 and breaks T-AC35-* | `..::ac35_denied_call_does_not_consume_nonce` + full `tests/capability_gate_test.rs` regression.               |
+| AC-79 schema/rate-limit gate   | Mint placement mis-ordered → orphan rows on schema-invalid replays | Mint occurs AFTER `validate_tool_call_arguments` and the 32-call rate-limit per `R-AC80-7`.                    |
+
+#### Observability
+
+- `tracing::warn` on rejection: `tool`, `wake_id`, `reason` —
+  one record per `capability_nonce_rejected` emission.
+- `tracing::warn` on `classify_rejection` DB error so a transient
+  infra fault is distinguishable in the operator console from a
+  hostile cross-workspace probe (both surface as
+  `RejectionReason::Unknown` in the event payload — audit-honest).
+- No new Prometheus metric in v9.0; the event-log is system of
+  record. A counter `open_pincery_capability_nonce_rejected_total{reason}`
+  is a candidate for v9.1 once operational interest emerges.
+
+#### Test Strategy (one row per AC sub-claim)
+
+| Sub-claim                                       | Test                                                                                                                    |
+| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| T-AC80-1 / L-AC80-1: schema shape + indexes     | `tests/capability_nonce_test.rs::table_shape_matches_scope` (information_schema introspection)                          |
+| T-AC80-2 / L-AC80-2: valid-once mint at AuthorizeExecution | `..::valid_nonce_authorizes_once_then_rejects_on_replay`                                                                |
+| T-AC80-3 / L-AC80-3: atomic single-use consume  | `..::concurrent_consume_attempts_serialize` (REVIEW-fix-1: spawn N tokio tasks against same row; exactly one Ok)        |
+| T-AC80-3 / R-AC80-2: replay rejects             | `..::replay_emits_capability_nonce_rejected_with_reason_replay`                                                         |
+| T-AC80-4 / L-AC80-4: cross-wake rejects         | `..::cross_wake_replay_emits_reason_cross_wake`                                                                         |
+| T-AC80-5 / L-AC80-5: expired rejects            | `..::expired_nonce_rejects` (test-only mint-with-override helper)                                                       |
+| T-AC80-6 / R-AC80-3: workspace scoping          | `..::cross_workspace_consume_rejects` (reason = `unknown`)                                                              |
+| T-AC80-1 / R-AC80-4: shape-mismatch rejects     | `..::shape_mismatch_emits_reason_shape_mismatch`                                                                        |
+| T-AC80-7 / L-AC80-6: AC-78 chain transparency   | `..::capability_nonce_rejected_chains_through_audit_hash` (REVIEW-fix-1)                                                |
+| T-AC80-9 / L-AC80-7: AC-35 untouched            | `..::ac35_denied_call_does_not_consume_nonce` + full `tests/capability_gate_test.rs` regression                         |
+| T-AC80-1 / `capability_shape` determinism       | 7 unit tests in `src/runtime/capability_nonce.rs` (sorted-key insensitivity, shape distinguishes values, nested map binding, non-JSON fallback, TTL constant brake, reason-string contract) |
+
+#### Complexity Exceptions
+
+- `dispatch_tool` argument count: 9 (was 8). The function is
+  already annotated `#[allow(clippy::too_many_arguments)]` from the
+  v6 AC-36 introduction. Readiness `CE-AC80-1` accepted "keep the
+  allow and extend" or "refactor to `DispatchContext` struct";
+  BUILD chose the former for surface-area minimality. Acceptable.
+- `tests/capability_nonce_test.rs` ≈ 765 lines after REVIEW-fix-1
+  (12 integration tests). Above readiness `CE-AC80-2` flag-line
+  of 500. Justified by adversarial coverage breadth (workspace,
+  cross-wake, concurrency, shape, AC-78 chain walk, schema-shape
+  introspection); no further split planned in v9.0.
+- No external dependencies added. `rand 0.9` is pre-existing
+  (originally added for AC-58 session tokens / AC-79 prompt
+  nonces); `sha2`, `sqlx`, `uuid`, `serde_json`, `chrono` all
+  pre-existing.
+
+#### Open Questions
+
+None. All readiness clarifications `C-AC80-1..5` carried documented
+defaults that BUILD adopted; REVIEW round-2 ratified placement and
+test coverage at HEAD `6d5a092`.
+
+#### Storage Growth
+
+Lazy GC only in v9.0: rows accumulate; the consume predicate filters
+`expires_at > now()` so expired rows are unreachable. The
+`UNIQUE (workspace_id, nonce)` index keeps lookup O(log n) even at
+scale; the 16-byte random space is wide enough that the index never
+collides under realistic ship volume. Periodic background sweep
+(`DELETE WHERE expires_at < now() - INTERVAL '24 hours'`) is
+explicitly deferred to v9.1 and called out in DELIVERY.md "Known
+Limitations".

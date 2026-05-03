@@ -67,9 +67,13 @@ async fn test_budget_exceeded_blocks_wake_and_llm_call() {
         llm_maintenance_model: "test-model".into(),
         max_prompt_chars: 100000,
         iteration_cap: 50,
+        schema_invalid_retry_cap: 3,
+        tool_call_rate_limit_per_wake: 32,
         stale_wake_hours: 2,
         wake_summary_limit: 20,
         event_window_limit: 200,
+        vault_key_b64: common::TEST_VAULT_KEY_B64.into(),
+        sandbox: open_pincery::config::ResolvedSandboxMode::default(),
     });
 
     // Should never be called when budget is exhausted.
@@ -83,10 +87,18 @@ async fn test_budget_exceeded_blocks_wake_and_llm_call() {
     let shutdown = CancellationToken::new();
     let alive = Arc::new(AtomicBool::new(false));
 
+    let executor: Arc<dyn open_pincery::runtime::sandbox::ToolExecutor> =
+        Arc::new(open_pincery::runtime::sandbox::ProcessExecutor);
+    let vault = Arc::new(
+        open_pincery::runtime::vault::Vault::from_base64(common::TEST_VAULT_KEY_B64).unwrap(),
+    );
+
     let listener_task = tokio::spawn(open_pincery::background::listener::start_listener(
         pool.clone(),
         config,
         llm,
+        executor,
+        vault,
         shutdown.clone(),
         alive.clone(),
     ));

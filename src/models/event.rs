@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::error::AppError;
 
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct Event {
     pub id: Uuid,
     pub agent_id: Uuid,

@@ -15,10 +15,14 @@ use tower_http::services::{ServeDir, ServeFile};
 use uuid::Uuid;
 
 pub mod agents;
+pub mod audit;
 pub mod bootstrap;
+pub mod credentials;
 pub mod events;
 pub mod health;
+pub mod me;
 pub mod messages;
+pub mod openapi;
 pub mod webhooks;
 
 use crate::{
@@ -40,6 +44,13 @@ pub struct AppState {
     /// to be `true`.
     pub listener_alive: Arc<AtomicBool>,
     pub stale_alive: Arc<AtomicBool>,
+    /// AC-36 / T-v6-15: shared sandboxed tool executor. Held here so
+    /// HTTP handlers and the wake loop use the same instance, and so
+    /// tests can inject a mock executor without rebuilding app wiring.
+    pub executor: Arc<dyn crate::runtime::sandbox::ToolExecutor>,
+    /// AC-38 (v7): credential vault. Shared across HTTP handlers and
+    /// the wake loop so one master key is loaded per process.
+    pub vault: Arc<crate::runtime::vault::Vault>,
 }
 
 #[derive(Clone)]
@@ -131,7 +142,36 @@ pub async fn auth_rate_limit(
 }
 
 impl AppState {
+    /// Default constructor — uses the real `ProcessExecutor`. Kept
+    /// 2-arg so existing tests and callers don't need to know about
+    /// the executor. Production code that wants to share the same
+    /// executor instance with the wake loop should use
+    /// [`AppState::new_with_executor`] instead.
     pub fn new(pool: PgPool, config: crate::config::Config) -> Self {
+        Self::new_with_executor(
+            pool,
+            config,
+            Arc::new(crate::runtime::sandbox::ProcessExecutor),
+        )
+    }
+
+    /// AC-36 / T-v6-15: construct with a caller-supplied executor so
+    /// `AppState` and the wake loop can share one instance (and tests
+    /// can inject a mock).
+    pub fn new_with_executor(
+        pool: PgPool,
+        config: crate::config::Config,
+        executor: Arc<dyn crate::runtime::sandbox::ToolExecutor>,
+    ) -> Self {
+        // AC-38 (v7): decode the vault master key here so the same
+        // constructor works for both production wiring and every test
+        // that already calls `new_with_executor`. A bad key is a
+        // configuration error — panic with a clear message rather than
+        // silently starting with a broken vault.
+        let vault = Arc::new(
+            crate::runtime::vault::Vault::from_base64(&config.vault_key_b64)
+                .unwrap_or_else(|e| panic!("invalid OPEN_PINCERY_VAULT_KEY: {e}")),
+        );
         let unauth_limiter = Arc::new(RateLimiter::keyed(Quota::per_minute(
             NonZeroU32::new(10).unwrap(),
         )));
@@ -145,6 +185,8 @@ impl AppState {
             auth_limiter,
             listener_alive: Arc::new(AtomicBool::new(false)),
             stale_alive: Arc::new(AtomicBool::new(false)),
+            executor,
+            vault,
         }
     }
 }
@@ -168,8 +210,11 @@ pub(crate) async fn scoped_agent(
 pub fn router(state: AppState) -> Router {
     let authed = Router::new()
         .merge(agents::router())
+        .merge(audit::router())
         .merge(messages::router())
         .merge(events::router())
+        .merge(credentials::router())
+        .merge(me::router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -194,6 +239,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", axum::routing::get(health::health))
         .route("/ready", axum::routing::get(health::ready))
+        .merge(openapi::router())
         .merge(unauthed)
         .nest("/api", authed)
         .fallback_service(static_files)

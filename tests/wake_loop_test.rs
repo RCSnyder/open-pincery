@@ -4,10 +4,13 @@ use open_pincery::config::Config;
 use open_pincery::models::{agent, event, user, workspace};
 use open_pincery::runtime::{
     llm::{LlmClient, Pricing},
+    sandbox::{ProcessExecutor, ToolExecutor},
+    vault::Vault,
     wake_loop,
 };
 use rust_decimal::Decimal;
 use std::str::FromStr;
+use std::sync::Arc;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -23,9 +26,13 @@ fn test_config(iteration_cap: i32) -> Config {
         llm_maintenance_model: "test-model".into(),
         max_prompt_chars: 100000,
         iteration_cap,
+        schema_invalid_retry_cap: 3,
+        tool_call_rate_limit_per_wake: 32,
         stale_wake_hours: 2,
         wake_summary_limit: 20,
         event_window_limit: 200,
+        vault_key_b64: common::TEST_VAULT_KEY_B64.into(),
+        sandbox: open_pincery::config::ResolvedSandboxMode::default(),
     }
 }
 
@@ -113,7 +120,9 @@ async fn test_wake_loop_sleep_termination() {
         Pricing::default(),
     );
 
-    let reason = wake_loop::run_wake_loop(&pool, &llm, &config, a.id, wake_id)
+    let executor: Arc<dyn ToolExecutor> = Arc::new(ProcessExecutor);
+    let vault = Arc::new(Vault::from_base64(common::TEST_VAULT_KEY_B64).unwrap());
+    let reason = wake_loop::run_wake_loop(&pool, &llm, &config, a.id, wake_id, &executor, &vault)
         .await
         .unwrap();
     assert_eq!(reason, "sleep");
@@ -199,7 +208,9 @@ async fn test_wake_loop_iteration_cap() {
         "test-model".into(),
     );
 
-    let reason = wake_loop::run_wake_loop(&pool, &llm, &config, a.id, wake_id)
+    let executor: Arc<dyn ToolExecutor> = Arc::new(ProcessExecutor);
+    let vault = Arc::new(Vault::from_base64(common::TEST_VAULT_KEY_B64).unwrap());
+    let reason = wake_loop::run_wake_loop(&pool, &llm, &config, a.id, wake_id, &executor, &vault)
         .await
         .unwrap();
     assert_eq!(reason, "iteration_cap");

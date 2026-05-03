@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod credential;
 pub mod event;
 pub mod llm_call;
 pub mod projection;

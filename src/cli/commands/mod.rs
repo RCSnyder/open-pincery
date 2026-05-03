@@ -1,8 +1,11 @@
 pub mod agent;
-pub mod bootstrap;
+pub mod audit;
 pub mod budget;
+pub mod completion;
+pub mod credential;
 pub mod demo;
 pub mod events;
 pub mod login;
 pub mod message;
 pub mod status;
+pub mod whoami;

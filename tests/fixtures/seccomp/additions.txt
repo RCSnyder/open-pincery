@@ -1,0 +1,82 @@
+# AC-77 Slice G2a — manual additions to the empirical corpus.
+#
+# Each entry has format:
+#   <syscall_name>  # <rationale>
+#
+# Rationale must name *why* the syscall is required despite not being
+# captured by `scripts/capture_seccomp_corpus.sh` against the AC-76
+# happy-path command set. Lines starting with `#` are comments.
+#
+# Additions cover three populations:
+#   1. dash (`sh -c <command>`) and the coreutils invoked from it.
+#   2. The user binary's glibc-2.39 dynamic-linker startup on Ubuntu
+#      24.04 (kernel 6.x), which uses some modern syscalls that the
+#      `strace -c` host-side capture in `capture_seccomp_corpus.sh`
+#      missed because the AC-76 corpus binaries used the older
+#      variants on the capture host.
+#   3. The `pincery-init` Rust wrapper's residual syscalls between
+#      `apply_seccomp` (last apply step) and `execvp(user_argv)`.
+#      Specifically `verify_no_new_privs` (one prctl) and
+#      `verify_fully_enforced` (Rust `std::fs::read_to_string` of
+#      `/proc/self/status`, which on Rust 1.83+/Linux uses statx +
+#      File internals) both run while the seccomp filter is active.
+#
+# Failing to allow population (3) is a v9 BUILD bug that VERIFY
+# caught: the original "Rust binaries do not run inside the sandbox"
+# assumption was wrong, /bin/true (and 9 of 12 AC-76 escape payloads)
+# SIGSYS-killed in the privileged smoke job, and the empirical
+# corpus had to be widened. See `scaffolding/log.md` AC-77 verify-fix
+# entry.
+#
+# This file is parsed by
+# `tests/seccomp_allowlist_test.rs::allowlist_matches_observed_corpus`
+# (gated on `OPEN_PINCERY_RUN_AC77_REGEN=1`) — every additions entry
+# must be in `allowed_syscalls()` for the regen test to pass.
+
+exit_group  # mandatory: every program terminates via exit_group(2). strace -c omits it for the parent it is summarizing, so the empirical capture missed it.
+exit  # legacy single-thread exit path; glibc may still emit it for some abort sequences.
+prctl  # pincery-init verify_no_new_privs (PR_GET_NO_NEW_PRIVS) runs after the seccomp install (T-AC77-2c).
+futex  # glibc internal locks (e.g. malloc arenas, stdio file locks) call futex unconditionally even in single-threaded programs.
+clone3  # modern glibc (>=2.34) uses clone3 for fork(); not all happy-path commands fork (echo, true), so a minimal capture may miss it. Allowed bare; namespace lockout enforced by AC-86 cap-drop + bwrap --disable-userns (T-AC77-4).
+restart_syscall  # kernel re-entry after EINTR; any signal-interrupted syscall in dash or coreutils returns through it.
+tgkill  # abort(3) and glibc's assertion-failure path send SIGABRT via tgkill; mandatory for any panic path.
+nanosleep  # `timeout 1s sh -c ...` (AC-76 fork-bomb / pid-exhaustion harness shape) sleeps via nanosleep; coreutils sleep(1) likewise.
+clock_nanosleep  # glibc on some configs prefers clock_nanosleep over nanosleep for the same primitives.
+clock_gettime  # `date(1)`, `timeout(1)` deadline computation, glibc startup time probes. vDSO is preferred but the syscall fallback is required.
+ppoll  # dash pipeline wait + glibc signal-aware poll variant. Used by `cat | tr | wc` style pipelines beyond what the minimal corpus exercised.
+poll  # legacy poll variant; some coreutils still emit it.
+sigaltstack  # glibc thread / signal-stack setup at program startup; not always captured by strace -c on simple builtins.
+fcntl  # FD_CLOEXEC setup and pipe configuration in dash; ubiquitous in glibc startup.
+getcwd  # dash `$PWD` probe and many coreutils relative-path resolution.
+readlinkat  # glibc `/proc/self/exe` lookup and dash `command -v` resolution.
+uname  # glibc startup probe and `uname(1)`; not on the minimal echo path but standard.
+statx  # glibc 2.34+ dynamic linker uses statx for ld.so.cache + library metadata; Rust `std::fs` uses statx to size buffers in `read_to_string`. pincery-init verify_fully_enforced reads /proc/self/status this way. Primary fix for the v9 verify-FAIL where /bin/true SIGSYS-killed.
+faccessat2  # modern glibc replaces access(2) with faccessat2(2) on some configurations; defensive against capture-host vs runner-host glibc skew.
+gettid  # Rust `std::thread::current()` and panic / log paths read TID; pincery-init touches it during verify_*.
+madvise  # Rust default allocator (System) calls madvise(MADV_DONTNEED) on heap shrink; glibc malloc uses MADV_FREE on free of large blocks.
+mremap  # glibc realloc() of large blocks uses mremap to grow in-place; can be hit by Rust String allocations during status parsing.
+getdents64  # directory enumeration -- not used by /bin/true, but `command -v echo`, `id`, and shell PATH search may scan dirs. Defensive.
+sched_yield  # Rust spin-based primitives and glibc futex contention path can fall back to sched_yield.
+sched_getaffinity  # glibc startup may call sched_getaffinity for thread-pool sizing even in single-threaded binaries.
+tkill  # glibc abort(3) fallback when tgkill is unavailable; defensive twin of tgkill.
+readlink  # legacy form of readlinkat; glibc may emit it for /proc/self/exe lookup on some configurations.
+pselect6  # signal-aware select used by glibc's pthread_kill / nptl signal handling on some paths.
+
+# -- AC-77 verify-fix-2 (kernel-evidence) --
+# Captured from CI runs 25216296931 and 25216465822 dmesg: every
+# SECCOMP_RET_KILL_PROCESS audit record reported
+# `arch=c000003e syscall=118` originating from libc text. On x86_64
+# `ausyscall --dump` resolves: 117=setresuid, 118=getresuid,
+# 119=setresgid, 120=getresgid. So the missing syscall is
+# `getresuid` -- a pure read of the calling process's own real,
+# effective, and saved uids. glibc-2.39 emits it post-init even
+# when the credentials are unchanged, inside pincery-init's
+# verify_fully_enforced path which runs after apply_seccomp.
+# Pure read, no escape primitive.
+getresuid  # glibc-2.39 init-time uid read; CI dmesg syscall=118 (runs 25216296931, 25216465822).
+getresgid  # glibc-2.39 init-time gid read; CI dmesg syscall=120 (run 25216646797).
+capget     # paired read for capset; safe.
+capset     # glibc-2.39 init-time ambient-cap drop; CI dmesg syscall=126 (run 25216780344). Defense-in-depth: bwrap cap-drop ALL + PR_SET_NO_NEW_PRIVS prevent any privilege gain (kernel returns EPERM).
+landlock_create_ruleset  # CI dmesg syscall=444 (run 25216950177). Required when pincery-init runs under an externally-installed seccomp filter. Landlock is monotonic; cannot weaken existing policy.
+landlock_add_rule        # paired with landlock_create_ruleset.
+landlock_restrict_self   # paired with landlock_create_ruleset; only tightens.

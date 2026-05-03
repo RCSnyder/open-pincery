@@ -6,24 +6,27 @@ use axum::{
     Json, Router,
 };
 use serde::Serialize;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::AppState;
 use crate::error::AppError;
 use crate::models::{user, workspace};
 
-#[derive(Serialize)]
-struct BootstrapResponse {
-    user_id: Uuid,
-    organization_id: Uuid,
-    workspace_id: Uuid,
-    session_token: String,
+/// Response from POST /api/bootstrap.
+#[derive(Serialize, ToSchema)]
+pub struct BootstrapResponse {
+    pub user_id: Uuid,
+    pub organization_id: Uuid,
+    pub workspace_id: Uuid,
+    pub session_token: String,
 }
 
-#[derive(Serialize)]
-struct LoginResponse {
-    user_id: Uuid,
-    session_token: String,
+/// Response from POST /api/login.
+#[derive(Serialize, ToSchema)]
+pub struct LoginResponse {
+    pub user_id: Uuid,
+    pub session_token: String,
 }
 
 pub fn router() -> Router<AppState> {
@@ -32,7 +35,21 @@ pub fn router() -> Router<AppState> {
         .route("/api/login", post(login))
 }
 
-async fn bootstrap(
+/// Initialise the system. Creates the local admin user, default
+/// organization, default workspace, and returns a session token.
+/// Requires the `OPEN_PINCERY_BOOTSTRAP_TOKEN` as a bearer header.
+/// Returns 409 Conflict if the system has already been bootstrapped.
+#[utoipa::path(
+    post,
+    path = "/api/bootstrap",
+    tag = "auth",
+    responses(
+        (status = 201, description = "System bootstrapped", body = BootstrapResponse),
+        (status = 401, description = "Missing or invalid bootstrap token"),
+        (status = 409, description = "System already bootstrapped"),
+    ),
+)]
+pub async fn bootstrap(
     State(state): State<AppState>,
     req: axum::extract::Request,
 ) -> Result<impl IntoResponse, AppError> {
@@ -83,7 +100,20 @@ async fn bootstrap(
     ))
 }
 
-async fn login(
+/// Obtain a new session token for the existing local admin, using
+/// the bootstrap token. AC-45 (v8) makes `pcy login` idempotent by
+/// layering this on top of the bootstrap call.
+#[utoipa::path(
+    post,
+    path = "/api/login",
+    tag = "auth",
+    responses(
+        (status = 200, description = "Session token issued", body = LoginResponse),
+        (status = 400, description = "System not yet bootstrapped"),
+        (status = 401, description = "Missing or invalid bootstrap token"),
+    ),
+)]
+pub async fn login(
     State(state): State<AppState>,
     req: axum::extract::Request,
 ) -> Result<impl IntoResponse, AppError> {
@@ -101,7 +131,7 @@ async fn login(
     let admin = user::find_local_admin(&state.pool)
         .await?
         .ok_or(AppError::BadRequest(
-            "System not bootstrapped yet. Run 'pcy bootstrap' first.".into(),
+            "System not bootstrapped yet. Run 'pcy login --bootstrap-token <token>' first.".into(),
         ))?;
 
     let raw_token = crate::auth::generate_token();

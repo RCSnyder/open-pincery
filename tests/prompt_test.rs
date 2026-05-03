@@ -1,7 +1,7 @@
 mod common;
 
 use open_pincery::models::{agent, user, workspace};
-use open_pincery::runtime::prompt;
+use open_pincery::runtime::prompt::{self, WakePromptContext};
 
 /// AC-3: Prompt assembly produces system prompt + messages + tools
 #[tokio::test]
@@ -37,7 +37,11 @@ async fn test_prompt_assembly() {
     .await
     .unwrap();
 
-    let assembled = prompt::assemble_prompt(&pool, a.id, 200, 20, 100000)
+    let ctx = WakePromptContext {
+        wake_nonce: "deadbeefcafebabe1122334455667788".into(),
+        canary_hex: "0011223344556677aabbccddeeff0011".into(),
+    };
+    let assembled = prompt::assemble_prompt(&pool, a.id, 200, 20, 100000, &ctx)
         .await
         .unwrap();
 
@@ -47,4 +51,25 @@ async fn test_prompt_assembly() {
     assert!(!assembled.tools.is_empty());
     assert!(assembled.tools.iter().any(|t| t.function.name == "shell"));
     assert!(assembled.tools.iter().any(|t| t.function.name == "sleep"));
+
+    // AC-79 T-AC79-1: canary embedded in system prompt; untrusted message
+    // wrapped with per-wake nonce delimiters.
+    assert!(
+        assembled
+            .system_prompt
+            .contains("<<canary:0011223344556677aabbccddeeff0011>>"),
+        "canary must be present in assembled system_prompt"
+    );
+    let user_msg = assembled
+        .messages
+        .iter()
+        .find(|m| m.role == "user")
+        .expect("user message present");
+    let content = user_msg.content.as_deref().unwrap_or("");
+    assert!(
+        content.contains("<<untrusted:deadbeefcafebabe1122334455667788>>")
+            && content.contains("<<end:deadbeefcafebabe1122334455667788>>")
+            && content.contains("What's up?"),
+        "message_received content must be wrapped in <<untrusted:NONCE>>...<<end:NONCE>>; got {content:?}"
+    );
 }

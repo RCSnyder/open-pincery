@@ -21,14 +21,24 @@ function Read-EnvValue([string]$Key, [string]$Path) {
   return ($line -split "=", 2)[1].Trim('"')
 }
 
+function Get-TargetRoot {
+  if ($env:CARGO_TARGET_DIR) {
+    return $env:CARGO_TARGET_DIR
+  }
+
+  return (Join-Path $Root "target")
+}
+
 function Get-PcyCommand {
   $cmd = Get-Command pcy -ErrorAction SilentlyContinue
   if ($cmd) { return "pcy" }
 
-  $release = Join-Path $Root "target\release\pcy.exe"
+  $targetRoot = Get-TargetRoot
+
+  $release = Join-Path $targetRoot "release\pcy.exe"
   if (Test-Path $release) { return $release }
 
-  $debug = Join-Path $Root "target\debug\pcy.exe"
+  $debug = Join-Path $targetRoot "debug\pcy.exe"
   if (Test-Path $debug) { return $debug }
 
   Fail "pcy binary not found. Build it with 'cargo build --release --bin pcy'." "#from-signed-release-binary"
@@ -75,10 +85,10 @@ if (-not $ready) {
   Fail "Service did not reach /ready within 60s." "#silent-wake"
 }
 
-Write-Host "Bootstrapping session..."
-& $Pcy --url $BaseUrl bootstrap --bootstrap-token $BootstrapToken *> "$env:TEMP\pcy-bootstrap.log"
+Write-Host "Logging in..."
+& $Pcy --url $BaseUrl login --bootstrap-token $BootstrapToken *> "$env:TEMP\pcy-login.log"
 if ($LASTEXITCODE -ne 0) {
-  Fail "pcy bootstrap failed. Check $env:TEMP\pcy-bootstrap.log" "#bootstrap-401"
+  Fail "pcy login failed. Check $env:TEMP\pcy-login.log" "#bootstrap-401"
 }
 
 $AgentName = "smoke-$(Get-Date -UFormat %s)"

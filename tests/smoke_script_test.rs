@@ -9,9 +9,10 @@ fn ac_30_smoke_scripts_exist_and_cover_required_steps() {
     let ps1 = std::fs::read_to_string("scripts/smoke.ps1").expect("scripts/smoke.ps1 must exist");
 
     for needle in [
+        "CARGO_TARGET_DIR",
         "docker compose up -d --wait",
         "/ready",
-        "bootstrap",
+        "login --bootstrap-token",
         "agent create",
         "message",
         "events",
