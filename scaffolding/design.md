@@ -2789,3 +2789,273 @@ None. Per-agent vs per-workspace chain choice documented above (per-agent). Cano
 | T-AC78-4: trigger genesis                 | unit test: first event for an agent has prev_hash = '' and entry_hash matches reference computation                                              |
 | T-AC78-5: pcy CLI exits non-zero on break | `tests/cli_audit_verify_test.rs` shells `CARGO_BIN_EXE_pcy` and asserts exit 0 on clean chain / exit 2 on tampered chain                         |
 | T-AC78-6: startup verify gates server     | integration: tamper a row on a DB, restart server, assert exit code 5                                                                            |
+
+### v9 G5 DESIGN — AC-80 Capability Nonce / Freshness (2026-05-03)
+
+> Addendum deferred to RECONCILE per build commit `4416118` — no
+> AC-79 design section existed to anchor against. Closes canonical
+> TODO G7 (capability freshness per `IssueToolCall`) + G11 (real
+> time / monotonic nonce state). Architecturally additive: AC-35's
+> capability-mode gate (`src/runtime/capability.rs`) is untouched;
+> AC-78's hash-chain trigger (`migrations/20260501000001_add_event_hash_chain.sql`)
+> transparently chains the new event type; AC-79's prompt-injection
+> floor in `src/runtime/wake_loop.rs::run_wake_loop` is bypassed
+> structurally — mint runs AFTER schema validation + per-wake
+> rate-limit per readiness `R-AC80-7`, immediately before
+> `tools::dispatch_tool`.
+
+#### Architecture
+
+Every LLM-proposed tool call is bound to a freshly-minted, single-use,
+60-second-expiring nonce. The mint is a single `INSERT` at the
+canonical TLA+ `AuthorizeExecution` boundary; the consume is a single
+atomic `UPDATE … RETURNING id` at the `IssueToolCall` boundary. A
+zero-row consume short-circuits dispatch and emits a structured
+`capability_nonce_rejected` event — replays, cross-wake reuse,
+expired tokens, shape mismatches, and cross-workspace probes all
+fail closed without spawning a process, resolving credentials, or
+mutating state outside the event log.
+
+Workspace-scoped (T-AC80-6): every row carries `workspace_id NOT
+NULL`; the consume predicate pins it; the unique index is
+`(workspace_id, nonce)`.
+
+#### Directory Structure (additions)
+
+```
+migrations/
+  20260501000003_create_capability_nonces.sql   # 9-col table; UNIQUE(workspace_id, nonce); INDEX(expires_at)
+src/runtime/
+  capability_nonce.rs                            # NEW: mint, consume, classify_rejection, capability_shape, canonical_json,
+                                                 #      CapabilityNonceTicket, RejectionReason, CAPABILITY_NONCE_TTL_SECS = 60,
+                                                 #      CAPABILITY_NONCE_LEN = 16
+  wake_loop.rs                                   # MODIFIED: mints one ticket per tool call AFTER AC-79 schema validation
+                                                 #           + per-wake rate-limit, immediately BEFORE tools::dispatch_tool
+  tools.rs                                       # MODIFIED: dispatch_tool gains 9th parameter
+                                                 #           `nonce: &CapabilityNonceTicket`; consumes AFTER the AC-35
+                                                 #           mode_allows gate, BEFORE per-tool match arms
+  prompt.rs                                      # MODIFIED: capability_nonce_rejected registered TRUSTED in
+                                                 #           is_untrusted_predicate_covers_all_known_event_types closed-set test
+tests/
+  capability_nonce_test.rs                       # NEW: 12 integration tests — valid-once, replay, cross-wake, expired,
+                                                 #      shape-mismatch, cross-workspace, AC-35-denied-no-consume,
+                                                 #      concurrent-consume race, AC-78 chain walk, schema-shape introspection,
+                                                 #      rejection-event payload per reason
+  capability_gate_test.rs                        # MODIFIED: existing AC-35 tests mint a ticket inline
+  landlock_audit_test.rs                         # MODIFIED: ticket minted inline at every dispatch_tool call site
+  list_credentials_tool_test.rs                  # MODIFIED: same
+  placeholder_dispatch_test.rs                   # MODIFIED: same
+  sigsys_event_test.rs                           # MODIFIED: same
+  common/mod.rs                                  # MODIFIED: capability_nonces added to per-test pool reset list
+```
+
+#### Interfaces
+
+**Public API (`src/runtime/capability_nonce.rs`):**
+
+```rust
+pub const CAPABILITY_NONCE_TTL_SECS: i64 = 60;
+pub const CAPABILITY_NONCE_LEN: usize = 16;
+
+#[derive(Debug, Clone)]
+pub struct CapabilityNonceTicket {
+    pub nonce: [u8; CAPABILITY_NONCE_LEN],
+    pub capability_shape: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RejectionReason {
+    Replay,         // as_str() => "replay"
+    CrossWake,      //              "cross_wake"
+    Expired,        //              "expired"
+    ShapeMismatch,  //              "shape_mismatch"
+    Unknown,        //              "unknown"
+}
+
+impl RejectionReason { pub const fn as_str(self) -> &'static str; }
+
+pub fn capability_shape(args_json: &str) -> String;  // lowercase 64-char hex SHA-256
+                                                     // of canonical-JSON (sorted keys, no whitespace);
+                                                     // raw bytes hashed on parse failure
+
+pub async fn mint(
+    pool: &PgPool,
+    wake_id: Uuid,
+    workspace_id: Uuid,
+    tool_name: &str,
+    args_json: &str,
+) -> Result<CapabilityNonceTicket, sqlx::Error>;
+
+pub async fn consume(
+    pool: &PgPool,
+    nonce: &[u8; CAPABILITY_NONCE_LEN],
+    wake_id: Uuid,
+    workspace_id: Uuid,
+    tool_name: &str,
+    capability_shape: &str,
+) -> Result<(), RejectionReason>;
+```
+
+`mint` calls `OsRng::try_fill_bytes` (rand 0.9) for the 16-byte
+nonce, computes `capability_shape`, and inserts one row with
+`expires_at = now() + ($1 || ' seconds')::interval`.
+
+`consume` is a single atomic `UPDATE … WHERE nonce=$1 AND wake_id=$2
+AND tool_name=$3 AND capability_shape=$4 AND workspace_id=$5 AND
+consumed_at IS NULL AND expires_at > now() RETURNING id`. Zero-row
+result triggers `classify_rejection`, a read-only follow-up that
+surfaces the specific reason (or `Unknown` on DB error — a
+`tracing::warn` is emitted so operators can correlate transient
+infra errors with hostile cross-workspace probes, both of which
+report `Unknown`).
+
+**Updated `dispatch_tool` signature (`src/runtime/tools.rs`):**
+
+```rust
+pub async fn dispatch_tool(
+    tool_call: &ToolCallRequest,
+    mode: PermissionMode,
+    pool: &PgPool,
+    agent_id: Uuid,
+    workspace_id: Uuid,
+    wake_id: Uuid,
+    executor: &Arc<dyn ToolExecutor>,
+    vault: &Arc<Vault>,
+    nonce: &super::capability_nonce::CapabilityNonceTicket,  // NEW (9th param)
+) -> ToolResult
+```
+
+Order inside `dispatch_tool` (T-AC80-9): (1) AC-35
+`required_for` + `mode_allows` gate (unchanged body); (2) NEW AC-80
+`capability_nonce::consume` — on `Err(reason)` emits
+`capability_nonce_rejected` with `{wake_id, tool_name, reason}` and
+returns `ToolResult::Error("capability nonce rejected")`; (3)
+existing per-tool match arms, argument deserialization, executor
+dispatch.
+
+**Mint placement (`src/runtime/wake_loop.rs::run_wake_loop`):**
+
+For each `tool_call` element returned by `llm.chat`, AFTER the AC-79
+schema-shape validation and the AC-79 per-wake 32-call rate-limit
+check, immediately BEFORE `tools::dispatch_tool`:
+
+```rust
+let ticket = super::capability_nonce::mint(
+    pool, wake_id, current.workspace_id,
+    &tc.function.name, &tc.function.arguments,
+).await?;
+let result = tools::dispatch_tool(tc, mode, pool, agent_id,
+    current.workspace_id, wake_id, executor, vault, &ticket).await;
+```
+
+Placement rationale (R-AC80-7): mint downstream of AC-79 means
+schema-invalid replays and rate-limit-exceeded calls do not pollute
+`capability_nonces` with orphan rows, strengthening the storage-growth
+bound (T-AC80-12) without weakening any T-AC80-1..6 invariant.
+Readiness `C-AC80-1` pre-authorized either placement; BUILD chose
+the AFTER-validation form per `R-AC80-7`.
+
+**Schema (`migrations/20260501000003_create_capability_nonces.sql`):**
+
+```sql
+CREATE TABLE capability_nonces (
+    id                 uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    wake_id            uuid        NOT NULL,
+    tool_name          text        NOT NULL,
+    capability_shape   text        NOT NULL,
+    nonce              bytea       NOT NULL,
+    expires_at         timestamptz NOT NULL,
+    consumed_at        timestamptz,
+    workspace_id       uuid        NOT NULL,
+    created_at         timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX capability_nonces_lookup ON capability_nonces (workspace_id, nonce);
+CREATE INDEX        capability_nonces_expiry ON capability_nonces (expires_at);
+```
+
+Nine columns total (the readiness-spec eight + a `created_at`
+audit-friendly default). `created_at` is operator-facing only — no
+predicate references it.
+
+#### Event Catalog (additions)
+
+| Event type                  | Source    | Trust class | Payload                                                                | Notes                                                                                              |
+| --------------------------- | --------- | ----------- | ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `capability_nonce_rejected` | `runtime` | TRUSTED     | `{ wake_id: Uuid, tool_name: String, reason: "replay" \| "cross_wake" \| "expired" \| "shape_mismatch" \| "unknown" }` | Registered TRUSTED in `src/runtime/prompt.rs::is_untrusted_predicate_covers_all_known_event_types`. Chains transparently through the AC-78 hash trigger. |
+
+No `capability_nonce_minted` event — readiness `C-AC80-3` defaults
+to rejection-only emission to bound event-log volume and avoid
+leaking `capability_shape` (a SHA-256 of args, low-risk but still
+derived from potentially sensitive inputs).
+
+#### External Integrations & Test Strategy
+
+| Integration                    | Failure mode                                   | Test strategy                                                                                                  |
+| ------------------------------ | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `OsRng` (rand 0.9 — pre-existing dep) | RNG failure → `mint` panics with explicit T-AC80-1 message | Live (CI Postgres + real syscalls).                                                                            |
+| Postgres `UNIQUE (workspace_id, nonce)` | Collision in 16-byte random space treated as programming error; also blocks duplicate-mint regression | Live integration test inserts confirm uniqueness.                                                              |
+| AC-78 hash trigger             | New event type silently breaks chain           | `tests/capability_nonce_test.rs::capability_nonce_rejected_chains_through_audit_hash` walks the chain.         |
+| AC-35 mode gate                | AC-80 entangles with AC-35 and breaks T-AC35-* | `..::ac35_denied_call_does_not_consume_nonce` + full `tests/capability_gate_test.rs` regression.               |
+| AC-79 schema/rate-limit gate   | Mint placement mis-ordered → orphan rows on schema-invalid replays | Mint occurs AFTER `validate_tool_call_arguments` and the 32-call rate-limit per `R-AC80-7`.                    |
+
+#### Observability
+
+- `tracing::warn` on rejection: `tool`, `wake_id`, `reason` —
+  one record per `capability_nonce_rejected` emission.
+- `tracing::warn` on `classify_rejection` DB error so a transient
+  infra fault is distinguishable in the operator console from a
+  hostile cross-workspace probe (both surface as
+  `RejectionReason::Unknown` in the event payload — audit-honest).
+- No new Prometheus metric in v9.0; the event-log is system of
+  record. A counter `open_pincery_capability_nonce_rejected_total{reason}`
+  is a candidate for v9.1 once operational interest emerges.
+
+#### Test Strategy (one row per AC sub-claim)
+
+| Sub-claim                                       | Test                                                                                                                    |
+| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| T-AC80-1 / L-AC80-1: schema shape + indexes     | `tests/capability_nonce_test.rs::table_shape_matches_scope` (information_schema introspection)                          |
+| T-AC80-2 / L-AC80-2: valid-once mint at AuthorizeExecution | `..::valid_nonce_authorizes_once_then_rejects_on_replay`                                                                |
+| T-AC80-3 / L-AC80-3: atomic single-use consume  | `..::concurrent_consume_attempts_serialize` (REVIEW-fix-1: spawn N tokio tasks against same row; exactly one Ok)        |
+| T-AC80-3 / R-AC80-2: replay rejects             | `..::replay_emits_capability_nonce_rejected_with_reason_replay`                                                         |
+| T-AC80-4 / L-AC80-4: cross-wake rejects         | `..::cross_wake_replay_emits_reason_cross_wake`                                                                         |
+| T-AC80-5 / L-AC80-5: expired rejects            | `..::expired_nonce_rejects` (test-only mint-with-override helper)                                                       |
+| T-AC80-6 / R-AC80-3: workspace scoping          | `..::cross_workspace_consume_rejects` (reason = `unknown`)                                                              |
+| T-AC80-1 / R-AC80-4: shape-mismatch rejects     | `..::shape_mismatch_emits_reason_shape_mismatch`                                                                        |
+| T-AC80-7 / L-AC80-6: AC-78 chain transparency   | `..::capability_nonce_rejected_chains_through_audit_hash` (REVIEW-fix-1)                                                |
+| T-AC80-9 / L-AC80-7: AC-35 untouched            | `..::ac35_denied_call_does_not_consume_nonce` + full `tests/capability_gate_test.rs` regression                         |
+| T-AC80-1 / `capability_shape` determinism       | 7 unit tests in `src/runtime/capability_nonce.rs` (sorted-key insensitivity, shape distinguishes values, nested map binding, non-JSON fallback, TTL constant brake, reason-string contract) |
+
+#### Complexity Exceptions
+
+- `dispatch_tool` argument count: 9 (was 8). The function is
+  already annotated `#[allow(clippy::too_many_arguments)]` from the
+  v6 AC-36 introduction. Readiness `CE-AC80-1` accepted "keep the
+  allow and extend" or "refactor to `DispatchContext` struct";
+  BUILD chose the former for surface-area minimality. Acceptable.
+- `tests/capability_nonce_test.rs` ≈ 765 lines after REVIEW-fix-1
+  (12 integration tests). Above readiness `CE-AC80-2` flag-line
+  of 500. Justified by adversarial coverage breadth (workspace,
+  cross-wake, concurrency, shape, AC-78 chain walk, schema-shape
+  introspection); no further split planned in v9.0.
+- No external dependencies added. `rand 0.9` is pre-existing
+  (originally added for AC-58 session tokens / AC-79 prompt
+  nonces); `sha2`, `sqlx`, `uuid`, `serde_json`, `chrono` all
+  pre-existing.
+
+#### Open Questions
+
+None. All readiness clarifications `C-AC80-1..5` carried documented
+defaults that BUILD adopted; REVIEW round-2 ratified placement and
+test coverage at HEAD `6d5a092`.
+
+#### Storage Growth
+
+Lazy GC only in v9.0: rows accumulate; the consume predicate filters
+`expires_at > now()` so expired rows are unreachable. The
+`UNIQUE (workspace_id, nonce)` index keeps lookup O(log n) even at
+scale; the 16-byte random space is wide enough that the index never
+collides under realistic ship volume. Periodic background sweep
+(`DELETE WHERE expires_at < now() - INTERVAL '24 hours'`) is
+explicitly deferred to v9.1 and called out in DELIVERY.md "Known
+Limitations".

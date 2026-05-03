@@ -1,5 +1,23 @@
 # Open Pincery — Experiment Log
 
+## RECONCILE — AC-80 — 2026-05-03T(post-review)
+
+- **Trigger**: User-requested 7-axis reconcile after AC-80 REVIEW round 2 PASS at `3bc16a7` recorded in commit `6d5a092` (HEAD). Prior phases (ANALYZE `f31e0da`; BUILD G5a `5d86330`, G5b+G5c `43fb456`, G5d `3bc4593`, G5e `4416118`, clippy fix `1442390`; REVIEW round 1 FAIL; REVIEW-FIX-1 `3bc16a7`) had not been individually logged — log.md jumped from AC-79 VERIFY straight to AC-80 REVIEW round-2.
+- **Axes checked**: directory structure, interfaces, AC-* coverage, external integrations, stack/deploy, log accuracy, readiness/traceability.
+- **Cosmetic drift**: none.
+- **Structural drift fixed**:
+  - `scaffolding/design.md`: appended a new "v9 G5 DESIGN — AC-80 Capability Nonce / Freshness (2026-05-03)" section (~270 lines) covering directory structure (the new `capability_nonce.rs` module + the `20260501000003_create_capability_nonces.sql` migration + the 6 test-file edits), public interfaces (`CapabilityNonceTicket`, `RejectionReason`, `CAPABILITY_NONCE_TTL_SECS`, `CAPABILITY_NONCE_LEN`, `mint`, `consume`, `capability_shape`), the updated `dispatch_tool` 9-parameter signature, mint placement rationale per `R-AC80-7` (AFTER AC-79 schema validation + per-wake rate-limit), the schema, the `capability_nonce_rejected` event-catalog row with TRUSTED classification per `src/runtime/prompt.rs`, test strategy (one row per AC sub-claim), observability (`tracing::warn` sites), and complexity exceptions (9-arg dispatch_tool kept under existing `#[allow]`; integration test ~765 lines justified by adversarial breadth). Build commit `4416118` had explicitly deferred this addendum to RECONCILE; defer-debt now closed.
+  - `scaffolding/log.md`: backfilled the seven missing AC-80 phase entries (ANALYZE, BUILD G5a..G5e, REVIEW round 1 FAIL, REVIEW-FIX-1) so the log reflects the actual git history between `a998b31` (AC-79 deploy) and `6d5a092` (AC-80 REVIEW round 2 PASS).
+- **Spec-violating drift**: none.
+  - `scope.md` AC-80 acceptance text matches shipped behavior verbatim: 16-byte OsRng nonce, bound to `{wake_id, tool_name, capability_shape, expires_at = now()+60s}`, persisted to `capability_nonces` with `workspace_id`; consume rejects replays / cross-wake / expired / mismatched with `capability_nonce_rejected` event; the four named test sub-criteria all land in `tests/capability_nonce_test.rs`. Closes canonical TODO G7/G11.
+  - `scope.md` line 790 `capability_nonces` schema declaration is shipped as written plus the audit-friendly `created_at` default — no row-meaning change.
+  - `scope.md` line 802 `capability_nonce_rejected` event-type declaration shipped as written (TRUSTED, source = `runtime`).
+  - Mint-placement choice (AFTER AC-79 schema + rate-limit) is the alternative pre-authorized in readiness `C-AC80-1` and selected per `R-AC80-7`; not a scope deviation.
+  - `rand 0.9` is pre-existing in `Cargo.toml` (verified via `git log -S 'rand = "0.9"'` → first added in initial skeleton commit `bde32af`); not a new dependency.
+  - `readiness.md` Truths T-AC80-1..12 and Key Links L-AC80-1..7 each map to a real test or runtime-proof path in the shipped code (12 integration tests + 7 unit tests; AC-78 chain walk in `..::capability_nonce_rejected_chains_through_audit_hash`; concurrent race in `..::concurrent_consume_attempts_serialize`; schema introspection in `..::table_shape_matches_scope`).
+- **Confidence**: REPAIRED.
+- **Next**: AC-80 ready for VERIFY.
+
 ## REVIEW — AC-80 — 2026-05-03T(round-2)
 
 - **Gate**: post-review PASS (round 2; round 1 returned FAIL with 4 Required findings).
@@ -7,6 +25,76 @@
 - **Changes**: src/runtime/capability_nonce.rs (doc-comment cites R-AC80-7; classify_rejection logs tracing::warn on DB error). tests/capability_nonce_test.rs (+3 tests: concurrent_consume_attempts_serialize, capability_nonce_rejected_chains_through_audit_hash, table_shape_matches_scope).
 - **Retries**: 2 review rounds (1 fix cycle).
 - **Next**: RECONCILE on AC-80 scaffolding drift.
+
+## REVIEW-FIX-1 — AC-80 — 2026-05-03T(post-round-1)
+
+- **Gate**: post-build PASS (intermediate; closes round-1 Required findings; gates re-review).
+- **Commit**: `3bc16a7`.
+- **Evidence**: All four round-1 Required findings closed. (1) Doc-comment in `src/runtime/capability_nonce.rs` now cites `R-AC80-7` rationale for AFTER-validation mint placement. (2) `classify_rejection` now emits `tracing::warn!` on DB error so transient infra failures are distinguishable in operator logs from hostile cross-workspace probes (both still surface as `RejectionReason::Unknown` in the event payload — audit-honest). (3) `tests/capability_nonce_test.rs::concurrent_consume_attempts_serialize` added: spawns N tokio tasks racing the same nonce row, asserts exactly one Ok and the rest classified Replay. (4) `tests/capability_nonce_test.rs::capability_nonce_rejected_chains_through_audit_hash` walks the AC-78 hash chain across the new event type. Bonus: `..::table_shape_matches_scope` queries `information_schema` to assert the 9 columns + 2 indexes + workspace_id NOT NULL match scope.md verbatim.
+- **Changes**: `src/runtime/capability_nonce.rs`, `tests/capability_nonce_test.rs` (+3 tests, ~120 lines).
+- **Retries**: 0.
+- **Next**: REVIEW round-2.
+
+## REVIEW — AC-80 — 2026-05-03T(round-1)
+
+- **Gate**: post-review FAIL (4 Required findings).
+- **Evidence**: review agent verdict FAIL on `1442390`. Findings: (1) Required — doc-comment in `capability_nonce.rs` does not justify the mint-placement choice (AFTER schema validation) against `R-AC80-7`; risk of future drift. (2) Required — `classify_rejection` swallows DB errors silently, surfacing as `Unknown` indistinguishable from a real cross-workspace probe; needs structured warn. (3) Required — readiness `..::concurrent_consume_attempts_serialize` test was named in coverage but absent from `tests/capability_nonce_test.rs`. (4) Required — readiness `L-AC80-6` AC-78 chain-walk test missing; the schema-shape introspection test from `L-AC80-1` also missing.
+- **Retries**: 0.
+- **Next**: REVIEW-FIX-1 to close all four Required findings.
+
+## BUILD G5e — AC-80 CHANGELOG + DELIVERY entries — 2026-05-03T(G5e)
+
+- **Gate**: post-build PASS (slice-local; cargo deny + cargo audit clean).
+- **Commit**: `4416118`.
+- **Evidence**: CHANGELOG.md `[Unreleased]` Security gains a self-contained AC-80 entry covering schema, module surface, mint placement, consume placement (after AC-35, before per-tool match), the new `capability_nonce_rejected` event, and the AC-78 chain transparency. DELIVERY.md Phase 4 Wave 9 list gains an AC-80 entry parallel to AC-79 with T-AC80-* references and the full proof trail. Known Limitations gains an explicit deferral: periodic sweep of consumed/expired nonce rows is v9.1 work; the UNIQUE index keeps accumulated rows unreachable in the meantime; AC-79 per-wake tool-call rate limit bounds steady-state insert rate. Design.md G5 addendum explicitly deferred to RECONCILE (no AC-79 design section to anchor against).
+- **Changes**: `CHANGELOG.md`, `DELIVERY.md`.
+- **Retries**: 0.
+- **Next**: G5d clippy follow-up (type alias for `classify_rejection` row tuple).
+
+## BUILD G5d-fix — AC-80 clippy type-complexity — 2026-05-03T(post-G5d)
+
+- **Gate**: post-build PASS (clippy `-D warnings` clean).
+- **Commit**: `1442390`.
+- **Evidence**: `classify_rejection` row tuple `(Uuid, String, String, Option<chrono::DateTime<chrono::Utc>>, chrono::DateTime<chrono::Utc>)` exceeded clippy type-complexity threshold; introduced local `type ClassifyRow = …` alias. Module body unchanged otherwise.
+- **Changes**: `src/runtime/capability_nonce.rs`.
+- **Retries**: 0.
+- **Next**: REVIEW round-1.
+
+## BUILD G5d — AC-80 adversarial integration tests — 2026-05-03T(G5d)
+
+- **Gate**: post-build PASS (slice-local).
+- **Commit**: `3bc4593`.
+- **Evidence**: `tests/capability_nonce_test.rs` populated with 9 integration tests covering `valid_nonce_authorizes_once_then_rejects_on_replay`, `replay_emits_capability_nonce_rejected_with_reason_replay`, `cross_wake_replay_emits_reason_cross_wake`, `expired_nonce_rejects` (test-only mint-with-override), `cross_workspace_consume_rejects` (reason = `unknown`), `shape_mismatch_emits_reason_shape_mismatch`, `ac35_denied_call_does_not_consume_nonce`, plus full pre-existing-suite regression. T-AC80-3..6, T-AC80-9 covered.
+- **Changes**: `tests/capability_nonce_test.rs`, `tests/common/mod.rs` (capability_nonces added to per-test pool reset list).
+- **Retries**: 0.
+- **Next**: G5e — CHANGELOG + DELIVERY.
+
+## BUILD G5b+G5c — AC-80 mint at AuthorizeExecution + consume on IssueToolCall — 2026-05-03T(G5b+c)
+
+- **Gate**: post-build PASS (slice-local; full test suite green).
+- **Commit**: `43fb456`.
+- **Evidence**: Wired `capability_nonce::mint` into `src/runtime/wake_loop.rs::run_wake_loop` per tool call AFTER AC-79 schema validation + per-wake 32-call rate-limit, immediately BEFORE `tools::dispatch_tool` (placement per readiness `R-AC80-7`). Extended `dispatch_tool` signature with 9th parameter `nonce: &CapabilityNonceTicket`; existing `#[allow(clippy::too_many_arguments)]` covers the count. Inside `dispatch_tool`: AC-35 mode_allows gate (unchanged), then NEW `capability_nonce::consume` — on `Err(reason)` emits `capability_nonce_rejected` event with `{wake_id, tool_name, reason}` payload and returns `ToolResult::Error`; on `Ok` proceeds to per-tool match arms. 6 threaded test files (`capability_gate_test.rs`, `landlock_audit_test.rs`, `list_credentials_tool_test.rs`, `placeholder_dispatch_test.rs`, `sigsys_event_test.rs`, plus new `capability_nonce_test.rs` test-1) updated to mint a ticket inline at every dispatch call site. T-AC80-2, T-AC80-3, T-AC80-9 covered. canonical_action=AuthorizeExecution+IssueToolCall.
+- **Changes**: `src/runtime/wake_loop.rs`, `src/runtime/tools.rs`, `src/runtime/prompt.rs` (capability_nonce_rejected registered TRUSTED in is_untrusted_predicate_covers_all_known_event_types closed-set test), 5 threaded test files, `tests/capability_nonce_test.rs` (initial valid-once test).
+- **Retries**: 0.
+- **Next**: G5d — adversarial integration tests.
+
+## BUILD G5a — AC-80 capability_nonce module + migration + unit tests — 2026-05-03T(G5a)
+
+- **Gate**: post-build PASS (slice-local; cargo build, clippy `-D warnings`, unit tests all green).
+- **Commit**: `5d86330`.
+- **Evidence**: New `src/runtime/capability_nonce.rs` (~190 lines pre-REVIEW-fix-1) exporting `CAPABILITY_NONCE_TTL_SECS = 60`, `CAPABILITY_NONCE_LEN = 16`, `CapabilityNonceTicket { nonce: [u8; 16], capability_shape: String }`, `RejectionReason { Replay, CrossWake, Expired, ShapeMismatch, Unknown }` with `as_str()` mapping to event-payload literals, `capability_shape(args_json) -> String` (lowercase 64-char hex SHA-256 of canonical JSON; raw bytes hashed on parse failure), `mint(pool, wake_id, workspace_id, tool_name, args_json)` using `OsRng::try_fill_bytes` (rand 0.9), `consume(pool, nonce, wake_id, workspace_id, tool_name, capability_shape)` as a single atomic `UPDATE … RETURNING id` with zero-row classification follow-up. New migration `migrations/20260501000003_create_capability_nonces.sql` (39 lines): 9-column table (id, wake_id, tool_name, capability_shape, nonce, expires_at, consumed_at, workspace_id, created_at) + UNIQUE(workspace_id, nonce) + INDEX(expires_at). 7 unit tests for `capability_shape` determinism, key-order insensitivity, value distinguishment, nested-map binding, non-JSON fallback, TTL-constant brake, reason-string contract. T-AC80-1, T-AC80-5, T-AC80-6, T-AC80-7, T-AC80-11 covered. canonical_action=AuthorizeExecution.
+- **Changes**: `src/runtime/capability_nonce.rs`, `src/runtime/mod.rs`, `migrations/20260501000003_create_capability_nonces.sql`.
+- **Retries**: 0.
+- **Next**: G5b — wire mint at AuthorizeExecution boundary.
+
+## ANALYZE G5 — AC-80 Capability Nonce / Freshness admission — 2026-05-03T(G5-admission)
+
+- **Gate**: post-analyze PASS (Verdict = READY).
+- **Commit**: `f31e0da`.
+- **Evidence**: `scaffolding/readiness.md` appended with "AC-80 Readiness — Capability Nonce / Freshness — 2026-05-03". 12 non-negotiable truths (T-AC80-1..12) covering nonce shape + binding, mint site at AuthorizeExecution, atomic single-use consume on IssueToolCall, rejection-event payload, 60s TTL, workspace scoping + indexes, `event::append_event` signature unchanged, canonical-action binding for AC-81, parallel-not-replacing AC-35, no schema/rate-limit/canary regression, no panics + closed-by-default, lazy GC only in v9.0 (sweep deferred). 7 Key Links mapping each AC-80 sub-claim to design components + test files + runtime proof. Acceptance Criteria Coverage table with one row per sub-criterion. 8 Scope Reduction Risks (R-AC80-1..8) covering timestamp-instead-of-nonce, SELECT-FOR-UPDATE-then-UPDATE race, skip-workspace-id, skip-capability-shape, skip-cross-wake-test, wire-into-AC-35-gate, mint-after-AC-79 (R-AC80-7 documents the pre-authorized alternative; BUILD elected to follow it), skip-minted-event. 5 Clarifications Needed (C-AC80-1..5) all carrying documented defaults. Build Order G5a..G5e mapped to BUILD slices. Complexity Exceptions: dispatch_tool 9th argument under existing `#[allow]`; tests/capability_nonce_test.rs flagged at 500 lines (later landed at ~765 with adversarial coverage justification).
+- **Changes**: `scaffolding/readiness.md` (appended AC-80 admission).
+- **Retries**: 0.
+- **Next**: G5a — migration + module skeleton + unit tests.
 
 ## VERIFY — AC-79 — 2026-05-03T06:05Z
 
