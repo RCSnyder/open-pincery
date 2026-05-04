@@ -3673,3 +3673,131 @@ estimate of 2-3 days for Slice G5.
   session tokens), `sqlx` (existing), `uuid` (existing), and
   `serde_json` (existing). The Complexity Brake's "adding a
   dependency not in design.md" trigger does NOT fire.
+
+---
+
+# AC-81 — Binding Commitments (spec action names in commits + tests) — READY
+
+## Truths
+
+- **T-AC81-1 — `scaffolding/spec_coverage.md` exists** with one
+  row per AC in {AC-53..AC-88}, three columns: `AC-*` |
+  canonical TLA+ action name(s) | invariant reference (or `—`).
+  Every action name is a token that appears verbatim somewhere
+  in the disjunction body of `Next` in
+  `docs/input/OpenPinceryCanonical.tla` (line 1949+).
+- **T-AC81-2 — `tests/spec_coverage_lint.rs` is the single
+  source of mechanical truth.** Reads
+  `scaffolding/spec_coverage.md`, parses
+  `docs/input/OpenPinceryCanonical.tla` to extract the set of
+  action names from `Next`, and asserts every `canonical_action`
+  cell is a member of that set. Also asserts every AC-id from
+  AC-53..AC-88 is present (no AC silently dropped) and every
+  row uses the canonical pipe-separated table syntax.
+- **T-AC81-3 — Commit-msg hook
+  `.github/hooks/commit-msg-spec-ref` rejects** any commit
+  whose staged diff touches `src/runtime/**` or `src/api/**`
+  unless the message body contains at least one
+  `canonical_action=<Name>` trailer where `<Name>` appears in
+  `scaffolding/spec_coverage.md`. Commits that touch neither
+  path are accepted with no trailer requirement (scope/docs/CI
+  edits are not gated). Hook is bash, fails closed, prints a
+  clear human error referencing `scaffolding/spec_coverage.md`.
+- **T-AC81-4 — `scripts/devshell.sh` installs the hook
+  idempotently.** On first run it copies (or symlinks)
+  `.github/hooks/commit-msg-spec-ref` to
+  `.git/hooks/commit-msg` if and only if no commit-msg hook is
+  present, or if the present hook is the unmodified
+  `commit-msg.sample`. Re-running devshell does not duplicate
+  or overwrite a user's customized hook.
+- **T-AC81-5 — No regressions.** Pre-existing test suite stays
+  green. The hook does not block commits made before its
+  installation (no rewriting of history). `cargo test --test
+  spec_coverage_lint` is the new gate; full `cargo test`
+  remains green at 321+ passing.
+
+## Key Links
+
+- L-AC81-1 (spec_coverage table) → `scaffolding/spec_coverage.md`
+  → `tests/spec_coverage_lint.rs::all_acs_present_with_canonical_actions`
+  → CI green.
+- L-AC81-2 (every action exists in `Next`) →
+  `docs/input/OpenPinceryCanonical.tla` line 1949+ →
+  `tests/spec_coverage_lint.rs::every_cited_action_is_in_canonical_next`.
+- L-AC81-3 (hook enforces trailer) →
+  `.github/hooks/commit-msg-spec-ref` →
+  `tests/spec_hook_test.rs` (drives the script with synthetic
+  message + diff fixtures).
+- L-AC81-4 (devshell installs hook) → `scripts/devshell.sh`
+  installer block → `tests/spec_hook_test.rs::devshell_installs_hook_idempotently`.
+
+## Acceptance Criteria Coverage (AC-81)
+
+| AC-81 sub-claim | Slice | Test | Proof |
+| --- | --- | --- | --- |
+| spec_coverage.md present + parseable | G6a | `tests/spec_coverage_lint.rs::table_well_formed` | CI |
+| every cited action is in canonical Next | G6a + G6b | `tests/spec_coverage_lint.rs::every_cited_action_is_in_canonical_next` | CI |
+| every AC-53..AC-88 has a row | G6a + G6b | `tests/spec_coverage_lint.rs::all_acs_present_with_canonical_actions` | CI |
+| hook rejects runtime/api commit without trailer | G6c | `tests/spec_hook_test.rs::rejects_runtime_change_without_trailer` | CI |
+| hook accepts runtime commit with valid trailer | G6c | `tests/spec_hook_test.rs::accepts_runtime_change_with_valid_trailer` | CI |
+| hook accepts non-runtime commit without trailer | G6c | `tests/spec_hook_test.rs::accepts_docs_only_commit` | CI |
+| hook rejects trailer with unknown action | G6c | `tests/spec_hook_test.rs::rejects_unknown_canonical_action` | CI |
+| devshell installs hook idempotently | G6d | `tests/spec_hook_test.rs::devshell_installs_hook_idempotently` | CI |
+
+## Scope Reduction Risks
+
+- **R-AC81-1 — Tempting to ship spec_coverage.md without lint.**
+  Without `tests/spec_coverage_lint.rs` the table is just docs;
+  spec drift becomes invisible again. Lint MUST run in CI.
+- **R-AC81-2 — Tempting to make the hook advisory-only.** If
+  the hook prints a warning but exits 0, every PR will accumulate
+  trailerless runtime commits. Hook MUST exit non-zero on
+  violation.
+- **R-AC81-3 — Tempting to gate ALL commits.** Gating
+  scope/docs/CI commits on a canonical_action trailer creates
+  friction without value. Path-conditional gating (only
+  `src/runtime/**` and `src/api/**`) is the deliberate scope.
+
+## Clarifications
+
+- **C-AC81-1 — AC-83..AC-88 coverage.** Scope.md AC-81 main
+  line says "AC-53..AC-82" but the v9 sandbox-rework addendum
+  added AC-83..AC-88. spec_coverage.md covers AC-53..AC-88
+  (super-set; lint asserts AC-53..AC-88 exhaustively). No
+  scope expansion — the coverage file is just being correct.
+- **C-AC81-2 — Some ACs bind multiple actions.** AC-78 binds
+  `VerifyAuditChain`, `AuditChainBroken`, and the four commit-
+  chain actions; AC-79 binds `ClassifyInput`, `QuarantineInput`,
+  `ScanModelResponse`, `RouteModelResponse`. Pipe-separate
+  multiple actions in the canonical_action cell.
+  spec_coverage_lint splits on `|` and validates each token.
+- **C-AC81-3 — `AmendScope` precedent.** Existing commits use
+  `canonical_action=AmendScope` for scope edits; this token
+  is NOT in canonical Next. Since scope amendments don't
+  touch `src/runtime/**` or `src/api/**`, the hook never sees
+  them and they remain valid. spec_coverage.md does NOT list
+  `AmendScope`.
+
+## Build Order
+
+1. **G6a — `scaffolding/spec_coverage.md`** with rows for
+   AC-53..AC-88 mapping to canonical Next actions and (where
+   applicable) invariant names. (~½ day)
+2. **G6b — `tests/spec_coverage_lint.rs`** parses both files,
+   five assertions: table well-formed, every AC present, every
+   action exists in `Next`, no duplicate AC rows, no empty
+   action cell. (~½ day)
+3. **G6c — `.github/hooks/commit-msg-spec-ref`** bash hook +
+   `tests/spec_hook_test.rs` driving synthetic
+   `(message, staged-diff)` fixtures. (~½ day)
+4. **G6d — `scripts/devshell.sh` installer block** +
+   idempotency test. (~¼ day)
+5. **G6e — CHANGELOG + DELIVERY entries.** (~¼ day)
+
+Total: **~2 days** matching scope.md's "2 days" estimate.
+
+## Complexity Exceptions
+
+None. Bash hook is small; lint test is small.
+
+## Verdict: READY
