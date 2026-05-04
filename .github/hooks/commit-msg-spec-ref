@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# AC-81 — commit-msg hook: spec-ref trailer enforcement.
+#
+# Rejects any commit whose staged diff touches src/runtime/** or
+# src/api/** unless the commit message body contains at least one
+#
+#     canonical_action=<Name>
+#
+# trailer where <Name> appears verbatim in the canonical_action column
+# of scaffolding/spec_coverage.md. Commits that touch neither path are
+# accepted with no trailer requirement.
+#
+# Argument: $1 — path to the commit message file (Git default).
+#
+# Exit codes:
+#   0 — accept commit
+#   1 — reject commit (path-gated and trailer missing or invalid)
+
+set -u
+
+MSG_FILE="${1:-}"
+if [[ -z "$MSG_FILE" || ! -f "$MSG_FILE" ]]; then
+    echo "commit-msg-spec-ref: missing message file argument" >&2
+    exit 1
+fi
+
+# Path-conditional gate: only enforce on runtime / api edits.
+GATED_REGEX='^src/(runtime|api)/'
+STAGED="$(git diff --cached --name-only 2>/dev/null || true)"
+
+needs_trailer=0
+if [[ -n "$STAGED" ]]; then
+    while IFS= read -r path; do
+        if [[ "$path" =~ $GATED_REGEX ]]; then
+            needs_trailer=1
+            break
+        fi
+    done <<< "$STAGED"
+fi
+
+if [[ "$needs_trailer" -eq 0 ]]; then
+    exit 0
+fi
+
+# Locate scaffolding/spec_coverage.md (relative to repo root).
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
+COVERAGE="$REPO_ROOT/scaffolding/spec_coverage.md"
+if [[ ! -f "$COVERAGE" ]]; then
+    echo "commit-msg-spec-ref: $COVERAGE not found; cannot validate canonical_action trailer" >&2
+    exit 1
+fi
+
+# Build the set of valid canonical action names from spec_coverage.md.
+# Each table row looks like:
+#     | AC-80 | AuthorizeExecution \| IssueToolCall | ... |
+# The escaped `\|` characters belong inside cell 2 (canonical_action).
+# We extract cell 2 as everything between the first and second
+# *unescaped* `|` after the `AC-` token, then split that cell on `\|`
+# (the escaped pipe) to recover individual action names.
+mapfile -t VALID_ACTIONS < <(
+    python_helper() {
+        # Pure-bash, no python — do it with sed + while.
+        :
+    }
+    while IFS= read -r line; do
+        case "$line" in
+            "| AC-"*) ;;
+            *) continue ;;
+        esac
+        # Replace every escaped pipe `\|` with NUL placeholder, then
+        # split on `|`, then restore.
+        protected="${line//\\|/$'\x1f'}"
+        IFS='|' read -r -a cells <<< "$protected"
+        # cells[0]="" (before leading |), cells[1]=" AC-NN ", cells[2]=" actions "
+        if [[ "${#cells[@]}" -lt 4 ]]; then
+            continue
+        fi
+        cell="${cells[2]}"
+        # Restore escaped pipes back to literal `|` separators.
+        cell="${cell//$'\x1f'/|}"
+        # Trim outer whitespace.
+        cell="${cell#"${cell%%[![:space:]]*}"}"
+        cell="${cell%"${cell##*[![:space:]]}"}"
+        if [[ "$cell" == "—" || -z "$cell" ]]; then
+            continue
+        fi
+        # Split on `|` (unescaped — these are now real separators).
+        IFS='|' read -r -a parts <<< "$cell"
+        for p in "${parts[@]}"; do
+            p="${p#"${p%%[![:space:]]*}"}"
+            p="${p%"${p##*[![:space:]]}"}"
+            if [[ -n "$p" && "$p" != "—" ]]; then
+                printf '%s\n' "$p"
+            fi
+        done
+    done < "$COVERAGE" | sort -u
+)
+
+if [[ "${#VALID_ACTIONS[@]}" -eq 0 ]]; then
+    echo "commit-msg-spec-ref: no canonical actions found in $COVERAGE" >&2
+    exit 1
+fi
+
+# Extract canonical_action=<Name> trailers from the message.
+mapfile -t CITED < <(
+    grep -E '^canonical_action=[A-Za-z][A-Za-z0-9]+$' "$MSG_FILE" \
+        | sed -E 's/^canonical_action=//' \
+        | sort -u
+)
+
+if [[ "${#CITED[@]}" -eq 0 ]]; then
+    cat >&2 <<EOF
+commit-msg-spec-ref: REJECTED.
+
+This commit modifies src/runtime/** or src/api/** but the message body
+contains no \`canonical_action=<Name>\` trailer.
+
+Add at least one trailer line referencing the canonical TLA+ action(s)
+this change implements, e.g.:
+
+    canonical_action=AuthorizeExecution
+
+Valid action names are listed in scaffolding/spec_coverage.md.
+EOF
+    exit 1
+fi
+
+# Validate every cited action against the canonical set.
+unknown=()
+for c in "${CITED[@]}"; do
+    found=0
+    for v in "${VALID_ACTIONS[@]}"; do
+        if [[ "$c" == "$v" ]]; then
+            found=1
+            break
+        fi
+    done
+    if [[ "$found" -eq 0 ]]; then
+        unknown+=("$c")
+    fi
+done
+
+if [[ "${#unknown[@]}" -gt 0 ]]; then
+    {
+        echo "commit-msg-spec-ref: REJECTED."
+        echo
+        echo "The following canonical_action trailers reference names that"
+        echo "are NOT in scaffolding/spec_coverage.md:"
+        for u in "${unknown[@]}"; do
+            echo "  - $u"
+        done
+        echo
+        echo "Either fix the typo or add the action to the coverage table"
+        echo "(and confirm it appears in docs/input/OpenPinceryCanonical.tla"
+        echo "Next disjunction)."
+    } >&2
+    exit 1
+fi
+
+exit 0

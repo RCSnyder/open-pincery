@@ -20,6 +20,46 @@ set -euo pipefail
 
 IMAGE="${OPEN_PINCERY_DEVSHELL_IMAGE:-ghcr.io/open-pincery/devshell:v9}"
 
+# AC-81 — install the canonical_action commit-msg hook idempotently.
+# Copies .github/hooks/commit-msg-spec-ref to .git/hooks/commit-msg if
+# and only if no commit-msg hook is present, or the present hook is
+# byte-identical to the unmodified .sample. Never overwrites a user's
+# customized hook. Skipped silently when not in a git working tree.
+install_commit_msg_hook() {
+  local repo_root="${1:-}"
+  local source_hook="${repo_root}/.github/hooks/commit-msg-spec-ref"
+  local git_dir
+  git_dir="$(git -C "$repo_root" rev-parse --git-dir 2>/dev/null || true)"
+  if [[ -z "$git_dir" || ! -f "$source_hook" ]]; then
+    return 0
+  fi
+  # Resolve to absolute path (git --git-dir may be relative).
+  case "$git_dir" in
+    /*) ;;
+    *) git_dir="${repo_root}/${git_dir}" ;;
+  esac
+  local target="${git_dir}/hooks/commit-msg"
+  local sample="${git_dir}/hooks/commit-msg.sample"
+  mkdir -p "$(dirname "$target")"
+  if [[ -e "$target" ]]; then
+    if [[ -f "$sample" ]] && cmp -s "$target" "$sample"; then
+      :  # unmodified sample — replace it
+    elif cmp -s "$target" "$source_hook"; then
+      return 0  # already installed and current
+    else
+      return 0  # user-customized, do not touch
+    fi
+  fi
+  cp "$source_hook" "$target"
+  chmod +x "$target"
+}
+
+if [[ -z "${OPEN_PINCERY_DEVSHELL_SKIP_HOOK_INSTALL:-}" ]]; then
+  _devshell_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  install_commit_msg_hook "$_devshell_repo_root" || true
+  unset _devshell_repo_root
+fi
+
 if ! command -v docker >/dev/null 2>&1; then
   echo "error: docker not found on PATH. Install Docker 24+ and retry." >&2
   exit 127
