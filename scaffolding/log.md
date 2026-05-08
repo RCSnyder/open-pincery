@@ -2636,3 +2636,42 @@
   - new: `tests/lifecycle_transition_test.rs` — 3 tests pinning the CAS contract.
 - **Retries**: 0
 - **Next**: G7b — replace `acquire_wake` callsite in `src/background/listener.rs` + chain `attempt_wake_acquire → wake_acquire_succeeds → prompt_assembly_completes` in front of `run_wake_loop`; emit `lifecycle_transition` events for AttemptWakeAcquire / WakeAcquireSucceeds / PromptAssemblyCompletes with canonical_action JSON payload (AC-78 hash-chain transparency).
+
+## ITERATE v9.1 — Onboarding Gate proposed — 2026-05-08
+
+- **Phase**: ITERATE (post-v9.0 delivery)
+- **Trigger**: Post-v9 audit ([docs/input/post_v9_ideation/post-v9-audit-2026-05-08.md](../docs/input/post_v9_ideation/post-v9-audit-2026-05-08.md)) + founder onboarding gap surfaced in chat: secret store solid, but no `pcy init`, `pcy doctor`, `pcy backup`/`restore`, `pcy provider`, no onboarding doc; vault is operationally incomplete without a documented backup story.
+- **Inputs read**:
+  - `scaffolding/scope.md` v9.0 (AC-53..AC-88)
+  - `DELIVERY.md` (heading still v8.0 — flagged in honesty pass)
+  - `docs/input/post_v9_ideation/post-v9-audit-2026-05-08.md`
+  - `docs/input/post_v9_ideation/feature/v1-runtime/discover/wave-decisions.md` (founder-trap pattern + `[C3]` corrective)
+  - `docs/input/post_v9_ideation/feature/v1-runtime/discover/interview-log.md` (Round 5: "lost in the sauce")
+  - `src/cli/commands/credential.rs` (AC-40 hidden-prompt pattern reused for AC-89)
+  - `.env.example` (template that AC-89 generates programmatically)
+- **Proposed scope**: 6 ACs (AC-89..AC-94). Hard caps: 7.5 dev-days, 2-week wall-clock, zero new Rust crates, three new event types max (`backup_taken`, `backup_restored`, `llm_provider_env_fallback`).
+- **AC summary**:
+  - AC-89 `pcy init` (1d) — generates `.env` with strong random tokens
+  - AC-90 `pcy doctor` (2d) — 8-check self-diagnosis
+  - AC-91 `pcy backup` / `pcy restore` (1.5d) — pg_dump round-trip + vault-key-custody warning
+  - AC-92 `docs/onboarding.md` (0.5d) — one page, 7 sections, ≤250 lines
+  - AC-93 `pcy provider` (2d) — LLM providers as first-class resources, key in vault not env
+  - AC-94 honesty pass (0.5d) — README security section + DELIVERY.md heading bump to v9.0
+- **Deferred** (explicit, in scope.md): `pcy upgrade`, reference pincers, MCP, replay-from-cache, multi-tenant onboarding, UI surfaces.
+- **Re-entry point**: ANALYZE (after user confirms scope). Per harness: minor schema change (AC-93 adds `llm_providers` table) does not require full DESIGN — readiness.md will document interface.
+- **Gate**: ITERATE (proposal) — pending user confirmation before ANALYZE begins.
+- **Retries**: 0
+- **Next**: User reviews `## v9.1 — Onboarding Gate` block in `scaffolding/scope.md`. On confirm, run ANALYZE → readiness.md (AC-89..AC-94 coverage table, tarball format clarified, `pcy doctor` `--strict` semantics on macOS/Windows clarified). On reject or scope edit, update scope.md and re-log.
+
+## ITERATE v9.1 — clarifications resolved + committing — 2026-05-08
+
+- **Phase**: ITERATE (user confirmed)
+- **User directive**: "whatever makes sense, new crate is fine"
+- **Resolutions**:
+  - Tarball: `tar` + `flate2` crates (in-process, Windows-friendly)
+  - `pcy init` LLM URL: prompt with default `https://openrouter.ai/api/v1`, Enter accepts
+  - `pcy doctor --strict`: ignore kernel-floor WARN on macOS/Windows
+- **Cap softened**: zero-new-crate hard cap → soft cap (≤2 new crates per slice, named in readiness.md)
+- **Gate**: ITERATE PASS (attempt 1) — scope versioned, clarifications resolved
+- **Retries**: 0
+- **Next**: commit ITERATE checkpoint → ANALYZE → readiness.md
