@@ -7,10 +7,10 @@
 //! otherwise. This file is the regression suite that pins that shape:
 //!
 //!   * driving the full canonical chain
-//!         Resting → WakeAcquiring → PromptAssembling → Awake →
-//!         ToolDispatching → ToolExecuting → ToolResultProcessing →
-//!         MidWakeEventPolling → Awake → WakeEnding → Maintenance →
-//!         Resting
+//!     Resting → WakeAcquiring → PromptAssembling → Awake →
+//!     ToolDispatching → ToolExecuting → ToolResultProcessing →
+//!     MidWakeEventPolling → Awake → WakeEnding → Maintenance →
+//!     Resting
 //!     succeeds end-to-end with each helper returning `Some(agent)`,
 //!   * each helper returns `None` when the agent is in any other
 //!     state (no silent state jumps),
