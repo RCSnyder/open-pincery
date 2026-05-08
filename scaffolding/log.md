@@ -1,5 +1,52 @@
 # Open Pincery — Experiment Log
 
+## RECONCILE — AC-81 — 2026-05-07T (post-build, post-CI-green)
+
+- **Trigger**: User-requested 7-axis reconcile after AC-81 BUILD closed CI-green at `727a341` on `v6-01_implementation` (CI run 25532135576: rustfmt, clippy, cargo deny, cargo test, sandbox real-bwrap smoke all green). AC-81 phases (ANALYZE `85f7b39`, BUILD `e6364f6`, clippy fix `727a341`) had not been individually logged — log.md jumped from AC-80 VERIFY close straight to this reconcile.
+- **Axes checked**: directory structure, interfaces, AC-* coverage, external integrations, stack/deploy, log accuracy, readiness/traceability.
+- **Cosmetic drift**: none.
+- **Structural drift fixed**:
+  - `scaffolding/scope.md` AC-81 entry: stale numerical range "covering every AC-53..AC-82" → "covering every AC-53..AC-88 (the v9 sandbox-rework addendum extended the v9 AC range from AC-82 to AC-88; the coverage table tracks the full v9 range)". Shipped `scaffolding/spec_coverage.md` covers AC-53..AC-88 and `tests/spec_coverage_lint.rs` enforces `REQUIRED_AC_RANGE: 53..=88`. Readiness `C-AC81-1` already authorized the super-set ("no scope expansion — the coverage file is just being correct") so this is a numeric-range correction, not scope expansion.
+  - `scaffolding/design.md`: appended a new "v9 G6 DESIGN — AC-81 Binding Commitments (spec_coverage + commit-msg hook)" RECONCILE addendum (~85 lines) covering directory structure (the four new files and the `scripts/devshell.sh` installer block), human/tooling interfaces (table format + commit-msg trailer contract), test strategy (one row per AC-81 sub-claim), observability (stderr rejection only — no structured events; out-of-process), and explicit "no `src/` changes" note. AC-80 RECONCILE established the precedent of appending the design addendum at RECONCILE for build-time-deferred design surface; AC-81 follows it.
+  - `scaffolding/log.md`: backfilled the three missing AC-81 phase entries (ANALYZE `85f7b39`, BUILD `e6364f6`, clippy fix `727a341`) below this RECONCILE entry so the log reflects the actual git history between `d635698` (AC-80 VERIFY close) and `727a341` (HEAD).
+- **Spec-violating drift**: none. Readiness AC-81 truths/coverage table match the shipped artifacts verbatim. AC-81 acceptance text in scope.md remains structurally identical (only the numeric-range citation updated to match shipped scope, which readiness had already documented as the deliberate target). No code interface changes (AC-81 is process-tooling only); no integrations added; no new crates.
+- **Confidence**: REPAIRED.
+- **Next**: AC-81 ready for REVIEW → VERIFY agent → DEPLOY (close-marker commit).
+
+## BUILD G6-clippy-fix — AC-81 clippy `for_kv_map` — 2026-05-07T (post-G6)
+
+- **Gate**: PASS (post-build, attempt 1)
+- **Commit**: `727a341` on `v6-01_implementation`
+- **Evidence**: CI run 25532135576 — 5/5 jobs green (rustfmt, clippy `-D warnings`, cargo deny, cargo test, sandbox real-bwrap smoke). Clippy lint `for_kv_map` flagged a `for (k, _v) in map { … }` loop in `tests/spec_coverage_lint.rs` that only consumed the keys; replaced with `for k in map.keys() { … }`. No semantic change.
+- **Changes**: `tests/spec_coverage_lint.rs` (one loop rewrite).
+- **Retries**: 0
+- **Next**: RECONCILE.
+
+## BUILD G6 — AC-81 binding commitments — spec_coverage table + commit-msg hook + lint — 2026-05-07T (G6)
+
+- **Gate**: PASS (post-build, attempt 1 modulo the trailing clippy lint addressed in `727a341`)
+- **Commit**: `e6364f6` on `v6-01_implementation`
+- **Evidence**:
+  - `scaffolding/spec_coverage.md` shipped with one row per AC-53..AC-88 (36 rows). Pipe-separated multi-action cells for ACs that bind multiple canonical actions (AC-53, AC-78, AC-79, AC-82, AC-83). `—` for ACs that are documentation, UI, CLI, or read-only API surface (and therefore exempt from the trailer requirement). Notes section documents `AmendScope` as a process-only convention not in canonical Next.
+  - `tests/spec_coverage_lint.rs` (new, ~280 lines): parses the markdown table via an unescaped-pipe splitter, parses the canonical `Next` disjunction body from `docs/input/OpenPinceryCanonical.tla`, and runs five assertions: table well-formed; every AC-53..AC-88 present (no gaps, no duplicates); every cited action token exists verbatim in `Next`; no empty action cells; row count matches `REQUIRED_AC_RANGE.count()`.
+  - `.github/hooks/commit-msg-spec-ref` (new, bash): path-conditional gate `^src/(runtime|api)/` against `git diff --cached --name-only`; rejects with non-zero exit and a stderr message referencing `scaffolding/spec_coverage.md` when no `canonical_action=<Name>` trailer matches a token from the coverage table. Commits touching neither path accept with no trailer.
+  - `tests/spec_hook_test.rs` (new): drives the hook end-to-end via temporary git repos with synthetic `(commit-message, staged-diff)` fixtures: `rejects_runtime_change_without_trailer`, `accepts_runtime_change_with_valid_trailer`, `accepts_docs_only_commit`, `rejects_unknown_canonical_action`, `devshell_installs_hook_idempotently` (proves the installer block in `scripts/devshell.sh` copies the hook only when no commit-msg hook is present or when the present hook is the unmodified `commit-msg.sample`).
+  - `scripts/devshell.sh`: idempotent installer block that copies `.github/hooks/commit-msg-spec-ref` to `.git/hooks/commit-msg` on first use.
+  - Local: `cargo fmt --all -- --check` clean, `cargo test --test spec_coverage_lint` green, `cargo test --test spec_hook_test` green. Full suite green on the same commit pre-clippy-fix; the residual `for_kv_map` clippy lint addressed in `727a341` was a `-D warnings` failure only, not a logic regression.
+- **AC coverage**: T-AC81-1, T-AC81-2, T-AC81-3, T-AC81-4, T-AC81-5 (all five readiness truths).
+- **Changes**: `scaffolding/spec_coverage.md`, `tests/spec_coverage_lint.rs`, `tests/spec_hook_test.rs`, `.github/hooks/commit-msg-spec-ref`, `scripts/devshell.sh`.
+- **Retries**: 0 (clippy fix tracked separately).
+- **Next**: clippy fix `727a341`, then RECONCILE → REVIEW → VERIFY.
+
+## ANALYZE G6 — AC-81 Binding Commitments admission — 2026-05-07T (G6-admission)
+
+- **Gate**: PASS (post-analyze, attempt 1)
+- **Commit**: `85f7b39` on `v6-01_implementation`
+- **Evidence**: `scaffolding/readiness.md` appended with "AC-81 — Binding Commitments (spec action names in commits + tests) — READY". Five non-negotiable truths (T-AC81-1..5) covering spec_coverage table presence + AC-53..AC-88 coverage, lint as single source of mechanical truth, commit-msg hook path-gated trailer enforcement, idempotent devshell installer, and no regressions. Four Key Links mapping each AC-81 sub-claim to design components + test files + runtime proof. Acceptance Criteria Coverage table with one row per sub-criterion (eight rows). Three Scope Reduction Risks (R-AC81-1..3) covering ship-table-without-lint, advisory-only hook, and over-broad gating of all commits. Three Clarifications (C-AC81-1..3) carrying documented defaults: AC-83..AC-88 super-set is the deliberate target (scope says AC-82, but the coverage file extends to AC-88 to match the v9 sandbox-rework addendum); pipe-separated multi-action cells; `AmendScope` precedent excluded from spec_coverage.md because it is process-only and never touches gated paths. Build Order G6a..G6e (~2 days total) matching scope estimate. No complexity exceptions — bash hook + small lint test.
+- **Changes**: `scaffolding/readiness.md` (appended AC-81 admission).
+- **Retries**: 0
+- **Next**: BUILD G6.
+
 ## VERIFY — AC-80 — 2026-05-03 (close)
 
 - **Gate**: post-verify PASS (attempt 1 — verify of `718a499`).

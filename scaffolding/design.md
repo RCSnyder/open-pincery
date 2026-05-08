@@ -3059,3 +3059,92 @@ collides under realistic ship volume. Periodic background sweep
 (`DELETE WHERE expires_at < now() - INTERVAL '24 hours'`) is
 explicitly deferred to v9.1 and called out in DELIVERY.md "Known
 Limitations".
+
+---
+
+## v9 G6 DESIGN — AC-81 Binding Commitments (spec_coverage + commit-msg hook) (2026-05-07, RECONCILE addendum)
+
+This addendum is appended at RECONCILE per the AC-80 precedent:
+the BUILD slice for AC-81 was a process/scaffolding-tooling
+change with no `src/runtime/**` or `src/api/**` impact, so the
+shipped design surface lives entirely in scaffolding + git
+hooks. Documenting it here keeps the seven-axis reconcile clean.
+
+### Directory Structure (new files)
+
+```
+.github/hooks/
+  commit-msg-spec-ref            # bash commit-msg hook (path-gated trailer enforcement)
+scaffolding/
+  spec_coverage.md               # AC ↔ canonical TLA+ action ↔ invariant table (AC-53..AC-88)
+scripts/
+  devshell.sh                    # +installer block (idempotent commit-msg hook copy)
+tests/
+  spec_coverage_lint.rs          # lint: every cited action exists in canonical Next; every AC-53..AC-88 row present
+  spec_hook_test.rs              # synthetic (msg, staged-diff) fixtures; devshell installer idempotency
+```
+
+No `src/` files added or modified.
+
+### Public Interfaces
+
+None at the Rust API surface. Two human/tooling contracts:
+
+- **`scaffolding/spec_coverage.md` table format.** Pipe-delimited
+  Markdown table with three columns: `AC-<N>` | canonical action
+  token(s) (pipe-separated within the cell, or `—` for non-runtime
+  ACs) | invariant name (or `—`). Rows for AC-53..AC-88 are
+  required; gaps fail `tests/spec_coverage_lint.rs`. ACs marked
+  `—` in the canonical-action column are exempt from the
+  commit-msg trailer requirement (they do not modify
+  `src/runtime/**` or `src/api/**`).
+- **Commit-msg trailer contract.** Commits whose staged diff
+  matches `^src/(runtime|api)/` MUST contain at least one
+  `canonical_action=<Name>` trailer line in the message body
+  where `<Name>` is a token listed in the canonical-action
+  column of `scaffolding/spec_coverage.md`. Multiple trailers
+  are allowed. `AmendScope` remains a process-only convention
+  for scope/design/readiness edits and is intentionally not in
+  `spec_coverage.md` (those edits never touch `src/runtime/**`
+  or `src/api/**` and are unaffected by the hook).
+
+### External Integrations
+
+None. The hook is bash + `git diff --cached --name-only`; the
+lint reads two text files (`scaffolding/spec_coverage.md` and
+`docs/input/OpenPinceryCanonical.tla`); no network, DB, or new
+crate.
+
+### Test Strategy (one row per AC-81 sub-claim)
+
+| Sub-claim | Test |
+| --- | --- |
+| T-AC81-1: spec_coverage table well-formed | `tests/spec_coverage_lint.rs::table_well_formed` |
+| T-AC81-1 + T-AC81-2: every AC-53..AC-88 has a row, no duplicates | `tests/spec_coverage_lint.rs::all_acs_present_with_canonical_actions` |
+| T-AC81-2: every cited action exists in canonical `Next` | `tests/spec_coverage_lint.rs::every_cited_action_is_in_canonical_next` |
+| T-AC81-3: hook rejects runtime/api commit without trailer | `tests/spec_hook_test.rs::rejects_runtime_change_without_trailer` |
+| T-AC81-3: hook accepts runtime commit with valid trailer | `tests/spec_hook_test.rs::accepts_runtime_change_with_valid_trailer` |
+| T-AC81-3: hook accepts non-runtime commit without trailer | `tests/spec_hook_test.rs::accepts_docs_only_commit` |
+| T-AC81-3: hook rejects trailer with unknown action | `tests/spec_hook_test.rs::rejects_unknown_canonical_action` |
+| T-AC81-4: devshell installs hook idempotently | `tests/spec_hook_test.rs::devshell_installs_hook_idempotently` |
+| T-AC81-5: no regressions | full `cargo test` green; clippy clean |
+
+### Observability
+
+Out-of-process; the hook prints a human-readable rejection to
+stderr referencing `scaffolding/spec_coverage.md`. No structured
+events (the hook runs in the developer's local git environment,
+not in `pincery-server`).
+
+### Complexity Exceptions
+
+None. Hook is ~80 lines of bash; lint is one focused
+integration test file.
+
+### Closes
+
+Acceptance criterion AC-81 (scope.md). The coverage table covers
+the full v9 AC range AC-53..AC-88 (the v9 sandbox-rework addendum
+extended AC-82 → AC-88; readiness `C-AC81-1` already documented
+the super-set as "the coverage file is just being correct" with
+no scope expansion).
