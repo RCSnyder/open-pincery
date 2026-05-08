@@ -44,7 +44,7 @@ exempt from the commit-msg trailer requirement because they do not modify
 | AC-79   | ClassifyInput \| QuarantineInput \| ScanModelResponse \| RouteRejectedResponse                                                                   | —                                  |
 | AC-80   | AuthorizeExecution \| IssueToolCall                                                                                                              | Inv_ToolCallRequiresBinding        |
 | AC-81   | —                                                                                                                                                | —                                  |
-| AC-82   | AttemptWakeAcquire \| WakeAcquireSucceeds \| PromptAssemblyCompletes \| ToolDispatches \| ReceiveToolResult \| ToolResultProcessedToolLoop \| MidWakePollFindsNothing \| WakeEndTransitionsToMaintenance \| TerminalEndsWake | —                                  |
+| AC-82   | AttemptWakeAcquire \| WakeAcquireSucceeds \| PromptAssemblyCompletes \| ToolDispatches \| ReceiveToolResult \| ToolResultProcessedToolLoop \| MidWakePollFindsNothing \| WakeEndTransitionsToMaintenance \| TerminalEndsWake | Inv_TerminalSuccession             |
 | AC-83   | ProvisionSandbox \| BindShellPolicy \| AttestSandbox                                                                                             | —                                  |
 | AC-84   | AttestSandbox                                                                                                                                    | —                                  |
 | AC-85   | AttestSandbox                                                                                                                                    | —                                  |
@@ -72,5 +72,12 @@ exempt from the commit-msg trailer requirement because they do not modify
   spec action is `RouteRejectedResponse` (the model-response routing
   action that exists in `Next`). The lint validates the canonical name.
 - AC-82's lifecycle bindings cover the wake-loop CAS state machine end
-  to end. When AC-82 ships, an additional invariant
-  (`Inv_TerminalSuccession` or equivalent) is expected to be added here.
+  to end, with the canonical `Inv_TerminalSuccession` invariant pinning
+  the rule that every break out of the wake loop transitions through
+  `WakeEnding` exactly once before reaching `Maintenance`. The runtime
+  enforcement lives in `src/runtime/wake_loop.rs` (single
+  `enter_wake_ending` + `wake_end_transitions_to_maintenance` chain at
+  the loop terminal) and is statically pinned by
+  `tests/status_writes_lint_test.rs::assert_status_writes_are_cas_only`,
+  which forbids any `UPDATE agents SET status` outside
+  `src/models/agent.rs`.
