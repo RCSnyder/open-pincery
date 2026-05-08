@@ -2675,3 +2675,14 @@
 - **Gate**: ITERATE PASS (attempt 1) — scope versioned, clarifications resolved
 - **Retries**: 0
 - **Next**: commit ITERATE checkpoint → ANALYZE → readiness.md
+
+## ANALYZE v9.1 — readiness.md produced — 2026-05-08
+
+- **Phase**: ANALYZE → readiness.md
+- **Inputs**: scaffolding/scope.md v9.1 section (AC-89..AC-94); existing readiness.md (preserved as historical addenda); user clarification "whatever makes sense, new crate is fine"
+- **Output**: scaffolding/readiness.md — top pointer updated to v9.1; new v9.1 readiness block appended above v9.0 historical addenda
+- **Verdict**: READY
+- **Gate**: post-analyze PASS (attempt 1) — verdict READY; every AC has planned test + runtime proof; truths/clarifications separated; scope-reduction risks explicit; build order covers all 6 ACs; complexity exceptions = none
+- **Sanctioned new crates**: tar, flate2 (AC-91 only)
+- **Retries**: 0
+- **Next**: BUILD V91-S1 = AC-94 honesty pass (0.5d) — README five-row table + DELIVERY.md heading bump

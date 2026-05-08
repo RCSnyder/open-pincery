@@ -1,12 +1,86 @@
 # Readiness: Open Pincery — current slice pointer
 
-> Current admission gate: **Phase G Slice G7 / AC-82 (Fire Reserved
-> Lifecycle States — align `AgentStatus` with TLA+)**. AC-82 is the
-> final v9.0 ship blocker: AC-76, AC-77, AC-78, AC-79, AC-80, and
-> AC-81 are closed on `v6-01_implementation`. The AC-82 addendum is
-> appended directly below this pointer; previous addenda (AC-78, AC-77,
-> AC-76 G1a–G1d, AC-88 / G0f, AC-83 / G0a, etc.) are retained verbatim
-> as historical record.
+> Current admission gate: **v9.1 Onboarding Gate (AC-89..AC-94)**.
+> v9.0 shipped (AC-53..AC-88 closed). The v9.1 readiness block is
+> appended directly below this pointer; the v9.0 AC-82 addendum and
+> all prior addenda are retained verbatim as historical record.
+
+---
+
+# Readiness: Open Pincery — v9.1 Onboarding Gate (AC-89..AC-94)
+
+## Verdict
+
+**READY** for v9.1 BUILD in the order: AC-94 → AC-89 → AC-90 → AC-92 → AC-93 → AC-91. Every AC has a planned test, a planned runtime proof, and a named owning slice. The three clarifications surfaced at ITERATE were resolved by the user (`whatever makes sense, new crate is fine`) and are recorded as defaults below; they do not change the pass/fail meaning of any AC-89..AC-94 sub-claim.
+
+## Truths
+
+- **T-v91-1** v9.1 ships behind the same single binary `pcy` and the same Postgres-only deployment topology as v9.0. No new external service, no new daemon, no new container in the default `docker-compose.yml`.
+- **T-v91-2** v9.1 introduces exactly **one** new schema object: the table `llm_providers` (AC-93). No other migration is required for v9.1. AC-89/AC-90/AC-91/AC-92/AC-94 are CLI/docs/runtime-config changes only.
+- **T-v91-3** v9.1 introduces exactly **three** new event types: `backup_taken`, `backup_restored`, `llm_provider_env_fallback`. Every other event-emitting code path in v9.1 reuses an existing v9.0 event type. Each new event chains through the AC-78 hash chain like any other event.
+- **T-v91-4** No v9.1 AC closes by emitting a value of `OPEN_PINCERY_VAULT_KEY`, `OPEN_PINCERY_ADMIN_SEED`, or any vault-encrypted credential to stdout, stderr, the event log, the LLM call log, or any process-readable file other than `.env` (mode 0600 on Unix) and the optional `--include-vault-key` backup tarball.
+- **T-v91-5** v9.1 preserves AC-71 secret-proxy guarantees: after AC-93, the LLM API key reaches the LLM HTTP request via `secret_proxy` substitution, never via the agent process's environment, except in the explicit fallback path that emits `llm_provider_env_fallback`.
+- **T-v91-6** A non-author developer can complete the seven-section [docs/onboarding.md](docs/onboarding.md) walkthrough on Linux in under 15 minutes wall-clock against a freshly cloned repo, ending at `pcy events <agent_id>` showing a real LLM response. (Verified by hand-test against a fresh clone before the v9.1 ship gate.)
+- **T-v91-7** No v9.1 code path is closed by a placeholder. Each test listed in the coverage table runs real production code paths (no mock-replacing-impl, no `#[ignore]`, no skipped assertion).
+
+## New Crate Dependencies (per AC-91 clarification)
+
+| Crate | Purpose | AC | Justification |
+|---|---|---|---|
+| `tar` | In-process tarball read/write | AC-91 | Cross-platform without requiring system `tar` on Windows; no subprocess fragility |
+| `flate2` | gzip wrapper around `tar` | AC-91 | Standard companion to `tar` crate; small and well-audited |
+
+These are the **only** new top-level Rust crate additions sanctioned by v9.1 ITERATE. Any further additions during BUILD must trip-wire to scope.
+
+## Clarifications Resolved (mirrored from scope.md)
+
+- **CR-v91-1** Tarball format → `tar` + `flate2` Rust crates.
+- **CR-v91-2** `pcy init` LLM URL → prompt with default `https://openrouter.ai/api/v1`, Enter accepts.
+- **CR-v91-3** `pcy doctor --strict` on macOS/Windows → ignore the kernel-floor `WARN` row only.
+
+## Acceptance Criteria Coverage
+
+| AC | Slice | Planned test (file → key assertion) | Planned runtime proof |
+|---|---|---|---|
+| **AC-89** `pcy init` | V91-S2 | `tests/cli_init_test.rs` → (a) tmpdir gets a valid `.env`, (b) `OPEN_PINCERY_ADMIN_SEED` is 64 hex chars, (c) `OPEN_PINCERY_VAULT_KEY` is 44-char base64, (d) refuses overwrite without `--force`, (e) `0600` mode on Unix, (f) generated values are NOT printed to stdout (assert by capturing) | Run `pcy init` in a fresh tmpdir → `cat .env` shows the three required keys; `stat -c %a .env` = `600`; `pcy login --bootstrap-token "$(grep ADMIN_SEED .env | cut -d= -f2)"` succeeds against a fresh stack |
+| **AC-90** `pcy doctor` | V91-S3 | `tests/cli_doctor_test.rs` → (a) all-green path; (b) each of 8 checks individually FAILable by deliberate breakage; (c) `--strict` flips WARN→exit 1 except kernel-floor row on non-Linux per CR-v91-3; (d) `--output json` matches a frozen schema fixture | Run `pcy doctor` against a fresh fully-bootstrapped stack → all OK, exit 0; drop DB → check 4 FAIL exit 1; bring DB back → all OK |
+| **AC-91** `pcy backup` / `pcy restore` | V91-S6 | `tests/cli_backup_restore_test.rs` → (a) round-trip preserves agents/events/credentials decryptable with same key; (b) restore refuses newer manifest schema_version; (c) `--include-vault-key` round-trip lets fresh deploy decrypt; (d) backup without `--include-vault-key` has `includes_vault_key:false` and grep-no-key-bytes | Take backup of populated dev DB → wipe DB → restore → `pcy events <id>` returns the same hash-chained events; `backup_taken` and `backup_restored` events visible |
+| **AC-92** `docs/onboarding.md` | V91-S4 | `tests/onboarding_doc_test.rs` → (a) seven section regexes present; (b) every shown command matches a real clap `Command` in `src/cli/`; (c) ≤250 lines | Hand-walk the doc on a fresh clone → finishes ≤15 min ending at `pcy events` with real LLM output (T-v91-6) |
+| **AC-93** `pcy provider` | V91-S5 | `tests/cli_provider_test.rs` → (a) add/list/use/remove round-trip; (b) `add` refuses if credential missing; (c) wake against configured provider injects key via `secret_proxy` and key value not in process memory (reuses AC-71 helper); (d) workspace with no provider falls back to env var and emits `llm_provider_env_fallback` exactly once | `pcy credential add openai_api_key` → `pcy provider add openrouter --base-url ... --key-from-credential openai_api_key` → `pcy provider use openrouter` → `pcy message <agent> "hello"` → real LLM response, no `LLM_API_KEY` env at runtime |
+| **AC-94** Honesty pass | V91-S1 | `tests/honesty_pass_test.rs` → (a) README contains 5-row table with each AC anchor and NO `OneCLI`/`Greywall`/`Zerobox` outside `<!-- historical -->`; (b) `DELIVERY.md` heading regex `Open Pincery v9\.0`; (c) every AC referenced in the table is shipped per scope.md (cross-doc lint) | `git diff` shows README + DELIVERY.md changes; `cargo test honesty_pass` passes |
+
+Every AC-89..AC-94 row above is closed only by the named test passing AND the named runtime proof being demonstrated in the verify-phase report. None can be closed by `cargo check` alone.
+
+## Build Order (final)
+
+1. **V91-S1 = AC-94** Honesty pass (0.5d). README five-row table + DELIVERY.md heading bump. No code-path changes; lowest risk; removes credibility risk first.
+2. **V91-S2 = AC-89** `pcy init` (1d). Self-contained CLI verb. Unblocks every subsequent first-run hand-test.
+3. **V91-S3 = AC-90** `pcy doctor` (2d). Largest in LOC but mostly orchestration of existing checks (`assert_kernel_floor`, sqlx pool, migrations counter, reqwest probe). Refactor `assert_kernel_floor` from binary preflight into a re-exported library function.
+4. **V91-S4 = AC-92** `docs/onboarding.md` (0.5d). Author with AC-89/AC-90 already testable so commands are real.
+5. **V91-S5 = AC-93** `pcy provider` (2d). New migration + CLI noun + runtime LLM-client wiring. Last code-bearing slice before AC-91 because AC-91's round-trip test should cover the new `llm_providers` table.
+6. **V91-S6 = AC-91** `pcy backup` / `pcy restore` (1.5d). Round-trip closes the operational story. Last so the round-trip exercises every other v9.1 surface.
+
+Total: 7.5 dev-days inside a 2-week wall-clock cap.
+
+## Scope Reduction Risks (where BUILD must NOT cut corners)
+
+- **R-v91-1** Tempting cut: `pcy init` skipping the hidden `LLM_API_KEY` prompt because "the user can edit `.env` manually." Refuse — the whole point is that the user does NOT edit `.env` manually.
+- **R-v91-2** Tempting cut: `pcy doctor` reporting `OK` for the LLM-reachability check on a connection error rather than `FAIL` (silent network failure). Must be `FAIL` with one-line remediation hint.
+- **R-v91-3** Tempting cut: AC-91 backup tarball that does NOT include the manifest, treating the dump file as self-describing. Refuse — restore needs the manifest's `schema_version` to refuse forward-incompatible restores (T-v91 implicit safety property).
+- **R-v91-4** Tempting cut: AC-93 letting `pcy provider add` accept a raw `--key` argument "as a convenience." Refuse — that re-introduces the v8 anti-pattern of plaintext keys outside the vault. Always go through `pcy credential add` first.
+- **R-v91-5** Tempting cut: AC-92 onboarding doc growing to 400+ lines because every edge case "is important." Refuse per the 250-line tripwire — sections shrink before the budget grows.
+- **R-v91-6** Tempting cut: AC-94 keeping the six-layer list "for marketing reasons." Refuse — the honesty pass is non-negotiable; design vocabulary that does not match shipped code is a credibility liability.
+
+## Complexity Exceptions
+
+None. v9.1 is deliberately small. Every AC fits within standard slice/file-size limits. If BUILD encounters a slice that wants to exceed limits, that is signal to defer the slice, not to grant an exception.
+
+## Build Discipline (for the BUILD agent reading this)
+
+- Re-read `scaffolding/scope.md` v9.1 section, `scaffolding/design.md` (no v9.1 changes — no major architecture impact), and this readiness section before each slice.
+- One slice = one AC = one PR-shaped checkpoint. Test-first within the slice.
+- Each slice: Changed / Not touched / Concerns log entry in `scaffolding/log.md` after gate pass.
+- Tripwires (from scope hard caps): `cargo test` runtime growth >30s; onboarding.md >250 lines; new event types beyond the three named; new crate beyond `tar`/`flate2`.
 
 ---
 
