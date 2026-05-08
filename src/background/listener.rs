@@ -176,12 +176,14 @@ async fn handle_wake(
     .await?;
 
     // Run wake loop
+    //
+    // AC-82 (T-AC82-5 / G7d): `run_wake_loop` now owns the WakeEnding
+    // → Maintenance terminal CAS internally; the listener no longer
+    // calls `transition_to_maintenance` here. The agent is guaranteed
+    // to be in `Maintenance` on success.
     let _reason =
         wake_loop::run_wake_loop(&pool, &llm, &config, agent_id, wake_id, &executor, &vault)
             .await?;
-
-    // Transition to maintenance
-    agent::transition_to_maintenance(&pool, agent_id).await?;
 
     // Run maintenance
     maintenance::run_maintenance(&pool, &llm, agent_id, wake_id).await?;
@@ -196,6 +198,9 @@ async fn handle_wake(
         if let (Some(new_wake_id), Some(_new_wake_started)) =
             (new_agent.wake_id, new_agent.wake_started_at)
         {
+            // AC-82 (T-AC82-5 / G7d): same as primary call —
+            // `run_wake_loop` owns its own WakeEnding → Maintenance
+            // CAS for the drain re-entry too.
             let _reason = wake_loop::run_wake_loop(
                 &pool,
                 &llm,
@@ -206,7 +211,6 @@ async fn handle_wake(
                 &vault,
             )
             .await?;
-            agent::transition_to_maintenance(&pool, agent_id).await?;
             maintenance::run_maintenance(&pool, &llm, agent_id, new_wake_id).await?;
             // Final release — no further drain for simplicity in v1
             agent::release_to_asleep(&pool, agent_id).await?;

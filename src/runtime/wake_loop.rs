@@ -375,6 +375,30 @@ pub async fn run_wake_loop(
         // Handle tool calls
         if let Some(tool_calls) = &choice.message.tool_calls {
             for tc in tool_calls {
+                // AC-82 (T-AC82-2 / G7c): Awake → ToolDispatching.
+                // Fires for every tool the model claims to call,
+                // BEFORE the rate-limit check, so a rate-exceeded
+                // wake leaves a `ToolDispatches` event in its
+                // audit trail (the multi-source `enter_wake_ending`
+                // CAS at the bottom of the loop accepts
+                // ToolDispatching as an admissible source).
+                agent::enter_tool_dispatching(pool, agent_id)
+                    .await?
+                    .ok_or_else(|| {
+                        AppError::NotFound(format!(
+                            "AC-82 G7c: agent {agent_id} not in awake at tool dispatch"
+                        ))
+                    })?;
+                super::lifecycle::emit(
+                    pool,
+                    agent_id,
+                    wake_id,
+                    AgentStatus::DB_AWAKE,
+                    AgentStatus::DB_TOOL_DISPATCHING,
+                    "ToolDispatches",
+                )
+                .await?;
+
                 // AC-79 (T-AC79-10 / G4e): per-wake tool-call rate
                 // limit. Evaluated BEFORE any dispatch and BEFORE the
                 // `tool_call` event append so a wake that hits the
@@ -449,6 +473,29 @@ pub async fn run_wake_loop(
                 )
                 .await?;
 
+                // AC-82 (T-AC82-2 / G7c): ToolDispatching →
+                // ToolExecuting. Fires AFTER the rate-limit gate and
+                // capability-nonce mint and IMMEDIATELY BEFORE
+                // `dispatch_tool`, so the `AuthorizeExecution` event
+                // is the durable record that the runtime authorized
+                // this specific (tool_name, arguments, ticket) to run.
+                agent::enter_tool_executing(pool, agent_id)
+                    .await?
+                    .ok_or_else(|| {
+                        AppError::NotFound(format!(
+                            "AC-82 G7c: agent {agent_id} not in tool_dispatching at authorize"
+                        ))
+                    })?;
+                super::lifecycle::emit(
+                    pool,
+                    agent_id,
+                    wake_id,
+                    AgentStatus::DB_TOOL_DISPATCHING,
+                    AgentStatus::DB_TOOL_EXECUTING,
+                    "AuthorizeExecution",
+                )
+                .await?;
+
                 let result = tools::dispatch_tool(
                     tc,
                     mode,
@@ -461,6 +508,30 @@ pub async fn run_wake_loop(
                     &ticket,
                 )
                 .await;
+
+                // AC-82 (T-AC82-2 / G7c): ToolExecuting →
+                // ToolResultProcessing. Fires AFTER `dispatch_tool`
+                // returns and BEFORE the `tool_result` event so the
+                // runtime is observably in `tool_result_processing`
+                // for the entire tool_result + post-processing
+                // window. Applies uniformly to Sleep / Output /
+                // Error arms.
+                agent::enter_tool_result_processing(pool, agent_id)
+                    .await?
+                    .ok_or_else(|| {
+                        AppError::NotFound(format!(
+                            "AC-82 G7c: agent {agent_id} not in tool_executing after dispatch"
+                        ))
+                    })?;
+                super::lifecycle::emit(
+                    pool,
+                    agent_id,
+                    wake_id,
+                    AgentStatus::DB_TOOL_EXECUTING,
+                    AgentStatus::DB_TOOL_RESULT_PROCESSING,
+                    "ReceiveToolResult",
+                )
+                .await?;
 
                 match result {
                     ToolResult::Sleep => {
@@ -478,6 +549,28 @@ pub async fn run_wake_loop(
                         )
                         .await?;
                         termination_reason = "sleep".to_string();
+
+                        // AC-82 (T-AC82-4 / G7d): ToolResultProcessing
+                        // → WakeEnding for the Sleep early-return
+                        // terminal path. The multi-source
+                        // `enter_wake_ending` admits this transition.
+                        agent::enter_wake_ending(pool, agent_id)
+                            .await?
+                            .ok_or_else(|| {
+                                AppError::NotFound(format!(
+                                    "AC-82 G7d: agent {agent_id} not in admissible state at sleep terminal"
+                                ))
+                            })?;
+                        super::lifecycle::emit(
+                            pool,
+                            agent_id,
+                            wake_id,
+                            AgentStatus::DB_TOOL_RESULT_PROCESSING,
+                            AgentStatus::DB_WAKE_ENDING,
+                            "TerminalEndsWake",
+                        )
+                        .await?;
+
                         // Record wake end
                         event::append_event(
                             pool,
@@ -492,6 +585,27 @@ pub async fn run_wake_loop(
                             Some(&termination_reason),
                         )
                         .await?;
+
+                        // AC-82 (T-AC82-5 / G7d): WakeEnding →
+                        // Maintenance. Replaces the listener-side
+                        // legacy `transition_to_maintenance` call.
+                        agent::wake_end_transitions_to_maintenance(pool, agent_id)
+                            .await?
+                            .ok_or_else(|| {
+                                AppError::NotFound(format!(
+                                    "AC-82 G7d: agent {agent_id} not in wake_ending at maintenance entry"
+                                ))
+                            })?;
+                        super::lifecycle::emit(
+                            pool,
+                            agent_id,
+                            wake_id,
+                            AgentStatus::DB_WAKE_ENDING,
+                            AgentStatus::DB_MAINTENANCE,
+                            "WakeEndTransitionsToMaintenance",
+                        )
+                        .await?;
+
                         metrics::counter!(m::WAKE_COMPLETED, "reason" => termination_reason.clone()).increment(1);
                         return Ok(termination_reason);
                     }
@@ -533,6 +647,51 @@ pub async fn run_wake_loop(
                 // actually dispatched. Schema-invalid retries
                 // (T-AC79-4) bypass this branch entirely.
                 tool_calls_this_wake = tool_calls_this_wake.saturating_add(1);
+
+                // AC-82 (T-AC82-2 / G7c): ToolResultProcessing →
+                // MidWakeEventPolling. Marks the moment the runtime
+                // is done with the tool result and is about to look
+                // for any newly-arrived events before re-iterating.
+                agent::enter_mid_wake_event_polling(pool, agent_id)
+                    .await?
+                    .ok_or_else(|| {
+                        AppError::NotFound(format!(
+                            "AC-82 G7c: agent {agent_id} not in tool_result_processing at mid-wake poll"
+                        ))
+                    })?;
+                super::lifecycle::emit(
+                    pool,
+                    agent_id,
+                    wake_id,
+                    AgentStatus::DB_TOOL_RESULT_PROCESSING,
+                    AgentStatus::DB_MID_WAKE_EVENT_POLLING,
+                    "ToolResultProcessedToolLoop",
+                )
+                .await?;
+
+                // AC-82 (T-AC82-2 / G7c): MidWakeEventPolling →
+                // Awake. v9 has no inline mid-wake event-polling
+                // logic — the next loop iteration re-reads agent
+                // state and assembles a fresh prompt that
+                // automatically incorporates any new events. The
+                // canonical action label still fires so TLA+
+                // refinement holds.
+                agent::mid_wake_poll_finds_nothing(pool, agent_id)
+                    .await?
+                    .ok_or_else(|| {
+                        AppError::NotFound(format!(
+                            "AC-82 G7c: agent {agent_id} not in mid_wake_event_polling at return-to-awake"
+                        ))
+                    })?;
+                super::lifecycle::emit(
+                    pool,
+                    agent_id,
+                    wake_id,
+                    AgentStatus::DB_MID_WAKE_EVENT_POLLING,
+                    AgentStatus::DB_AWAKE,
+                    "MidWakePollFindsNothing",
+                )
+                .await?;
             }
         } else if choice.finish_reason == "stop" {
             // No tool calls and stop — agent is done
@@ -540,6 +699,46 @@ pub async fn run_wake_loop(
             break;
         }
     }
+
+    // AC-82 (T-AC82-4 / G7d): every break out of the `'wake` loop
+    // converges here. The agent's status is one of {Awake,
+    // ToolDispatching, ToolExecuting, ToolResultProcessing,
+    // MidWakeEventPolling} depending on which break path fired:
+    //
+    // - Awake: iteration_cap, llm_error, prompt_injection_suspected,
+    //   empty_response, schema-invalid FailureAuditPending, completed.
+    // - ToolDispatching: rate-limit FailureAuditPending (rate gate is
+    //   evaluated AFTER `enter_tool_dispatching` so the audit log
+    //   carries a `ToolDispatches` event for the offending attempt).
+    //
+    // The multi-source `enter_wake_ending` CAS admits all five live
+    // states. The Sleep early-return path emits its own terminal
+    // chain inline above and never reaches this block.
+    agent::enter_wake_ending(pool, agent_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "AC-82 G7d: agent {agent_id} not in admissible state at wake terminal"
+            ))
+        })?;
+    super::lifecycle::emit(
+        pool,
+        agent_id,
+        wake_id,
+        // The `from` here is best-effort: the multi-source CAS
+        // accepts five sources, but the canonical-JSON event is a
+        // single row so we record `awake` as the canonical label
+        // covering the dominant break path. T-AC82-4 only requires
+        // one `lifecycle_transition(*, wake_ending, TerminalEndsWake)`
+        // per terminal; the prior step's event chain (one of
+        // ToolDispatches / AuthorizeExecution / ReceiveToolResult /
+        // ToolResultProcessedToolLoop / MidWakePollFindsNothing)
+        // already pinpoints the actual prior state.
+        AgentStatus::DB_AWAKE,
+        AgentStatus::DB_WAKE_ENDING,
+        "TerminalEndsWake",
+    )
+    .await?;
 
     // Record wake end event
     event::append_event(
@@ -553,6 +752,26 @@ pub async fn run_wake_loop(
         None,
         None,
         Some(&termination_reason),
+    )
+    .await?;
+
+    // AC-82 (T-AC82-5 / G7d): WakeEnding → Maintenance. Replaces the
+    // listener-side legacy `transition_to_maintenance` call so the
+    // wake loop owns its own terminal transition.
+    agent::wake_end_transitions_to_maintenance(pool, agent_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "AC-82 G7d: agent {agent_id} not in wake_ending at maintenance entry"
+            ))
+        })?;
+    super::lifecycle::emit(
+        pool,
+        agent_id,
+        wake_id,
+        AgentStatus::DB_WAKE_ENDING,
+        AgentStatus::DB_MAINTENANCE,
+        "WakeEndTransitionsToMaintenance",
     )
     .await?;
 
