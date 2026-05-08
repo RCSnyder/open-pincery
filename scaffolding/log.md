@@ -1,5 +1,21 @@
 # Open Pincery — Experiment Log
 
+## BUILD G7c+G7d+G7e+G7f+G7g — AC-82 BUILD COMPLETE — 2026-05-08T
+
+- **Gate**: PASS (post-build, attempt 1 across all three commits)
+- **Commits**:
+  - `fa3d243` — G7c+G7d (tool-loop transitions + terminal CAS chain). CI run 25534469991 GREEN.
+  - `d7dad7c` — G7f+G7g (status-write CAS lint + spec_coverage Inv_TerminalSuccession). CI run 25534620682 GREEN.
+  - G7e is subsumed by G7b: drain re-entry already gets full per-step lifecycle event coverage via the shared `run_wake_loop` entry chain (`drain_attempt_wake_acquire` emits `AttemptWakeAcquire(maintenance→wake_acquiring)`; `wake_acquire_succeeds` and `prompt_assembly_completes` then fire transparently inside the wake loop).
+- **G7c**: tool-loop transitions inside the `for tc in tool_calls` body — five new lifecycle_transition events per tool call. Awake → ToolDispatching (`ToolDispatches`, BEFORE rate-limit check so the offending attempt leaves an audit trail), ToolDispatching → ToolExecuting (`AuthorizeExecution`, AFTER capability-nonce mint and IMMEDIATELY before `dispatch_tool`), ToolExecuting → ToolResultProcessing (`ReceiveToolResult`, after dispatch returns; uniform across Sleep/Output/Error arms), ToolResultProcessing → MidWakeEventPolling (`ToolResultProcessedToolLoop`), MidWakeEventPolling → Awake (`MidWakePollFindsNothing`).
+- **G7d**: terminal CAS chain. Single `enter_wake_ending` (multi-source IN clause: Awake | ToolDispatching | ToolExecuting | ToolResultProcessing | MidWakeEventPolling) + emit `TerminalEndsWake` immediately before the bottom `wake_end` event; `wake_end_transitions_to_maintenance` + emit `WakeEndTransitionsToMaintenance` immediately after. Sleep early-return arm runs the same chain inline. `src/background/listener.rs` no longer calls `transition_to_maintenance` — `run_wake_loop` owns the WakeEnding → Maintenance transition for both fresh-wake and drain re-entry paths.
+- **G7f**: NEW `tests/status_writes_lint_test.rs::assert_status_writes_are_cas_only` — walks `src/`, asserts `UPDATE agents SET status` (case-insensitive, whitespace-normalized) appears only in `src/models/agent.rs`. Pins T-AC82-7 as a static lint: every status write MUST go through a CAS helper, every CAS pairs with a `lifecycle_transition` event.
+- **G7g**: `scaffolding/spec_coverage.md` AC-82 row Invariant cell promoted from `—` to `Inv_TerminalSuccession`. The canonical TLA+ invariant already exists in `docs/input/OpenPinceryCanonical.tla:2081`; accompanying explanation note expanded to cite the runtime enforcement chain and the static lint.
+- **AC-82 truths covered**: T-AC82-1 (10 fine-grained variants live in CAS) ✓ via G7a; T-AC82-2 (full canonical chain wired through wake_loop + drain) ✓ via G7b+G7c+G7d; T-AC82-3 (every CAS emits canonical-JSON `lifecycle_transition`) ✓; T-AC82-4 (terminal succession via multi-source `enter_wake_ending`) ✓ via G7d; T-AC82-5 (`WakeEnding → Maintenance` owned by wake_loop, listener no longer transitions) ✓; T-AC82-6 (drain wired through fine-grained pipeline) ✓ via G7b; T-AC82-7 (static CAS-only lint) ✓ via G7f; T-AC82-8 (spec_coverage cites `Inv_TerminalSuccession`) ✓ via G7g.
+- **Verification**: cargo build --tests clean against `/e/open-pincery-target`; full test suite zero failures across 30+ binaries (status_writes_lint_test 1/1, spec_coverage_lint 5/5, lifecycle_transition_test 3/3, agent_status_test 4/4, wake_loop_test 2/2, drain_test 2/2, prompt_injection_test 6/6, lifecycle_test 2/2, maintenance_test 1/1, stale_test 1/1, plus all others). CI green at HEAD `d7dad7c`.
+- **Retries**: 0 across all G7c..G7g sub-slices.
+- **Next**: AC-82 close pipeline — REVIEW → RECONCILE → VERIFY → DELIVERY.md update → DEPLOY (PR #4 merge — destructive shared action, requires user confirmation per Lights-Out operationalSafety).
+
 ## BUILD G7b — AC-82 wake-loop entry chain — 2026-05-08T
 
 - **Gate**: PASS (post-build, attempt 1)
