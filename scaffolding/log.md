@@ -1,5 +1,24 @@
 # Open Pincery — Experiment Log
 
+## BUILD G7b — AC-82 wake-loop entry chain — 2026-05-08T
+
+- **Gate**: PASS (post-build, attempt 1)
+- **Commit**: `ba9f9f8` on `v6-01_implementation` (CI run 25533921555 GREEN: rustfmt, clippy, cargo deny, cargo test, sandbox real-bwrap smoke)
+- **Slice**: G7b of AC-82 readiness build order — wake-loop entry chain.
+- **What changed**:
+  - `src/runtime/lifecycle.rs` (NEW, 121 lines): `EVENT_TYPE = "lifecycle_transition"`, `EVENT_SOURCE = "runtime"`, hand-built canonical-JSON payload (alphabetical keys: `canonical_action`, `from`, `to`, `wake_id`) using `serde_json::Value::String` for proper escaping. `emit()` thin wrapper around `event::append_event`. 3 unit tests pin canonical key order, JSON round-trip, byte-stability.
+  - `src/models/agent.rs`: added `attempt_wake_acquire` (Resting → WakeAcquiring, mints wake_id, asserts `is_enabled = TRUE`) and `drain_attempt_wake_acquire` (Maintenance → WakeAcquiring, same minting). Legacy `acquire_wake` and `drain_reacquire` retained during migration.
+  - `src/runtime/mod.rs`: registered `pub mod lifecycle;`.
+  - `src/background/listener.rs:146`: replaced `acquire_wake` callsite with `attempt_wake_acquire`; emits `lifecycle_transition(asleep → wake_acquiring, AttemptWakeAcquire)` immediately after the CAS.
+  - `src/runtime/wake_loop.rs:run_wake_loop`: at top, immediately after `WakeMetricsGuard::new()`, runs `wake_acquire_succeeds` CAS + emit `WakeAcquireSucceeds` event, then `prompt_assembly_completes` CAS + emit `PromptAssemblyCompletes` event. Both CAS hops propagate `None` as `AppError::NotFound` (invariant break).
+  - `src/runtime/drain.rs`: `check_drain` now calls `drain_attempt_wake_acquire` (Maintenance → WakeAcquiring) instead of legacy `drain_reacquire` (which jumped to Awake). Emits one `lifecycle_transition(maintenance → wake_acquiring, AttemptWakeAcquire)` event for the drain entry; remaining hops fire at the top of the next `run_wake_loop` call (shared with fresh-wake path).
+  - `tests/drain_test.rs`: post-`check_drain` assertion updated from `awake` → `wake_acquiring` to reflect new contract.
+  - `tests/wake_loop_test.rs` and `tests/prompt_injection_test.rs`: setup migrated from `acquire_wake` → `attempt_wake_acquire` so the wake_loop entry chain runs end-to-end in tests.
+- **Verification**: `cargo build --tests` clean against `/e/open-pincery-target`. Full local test sweep zero failures (lifecycle_transition_test 3/3, agent_status_test 4/4, wake_loop_test 2/2, drain_test 2/2, prompt_injection_test 6/6, lifecycle_test 2/2, maintenance_test 1/1, stale_test 1/1, webhook_test 3/3, plus all other test binaries). CI green on commit `ba9f9f8`.
+- **AC-82 truths covered**: T-AC82-2 (CAS chain wired through wake-loop entry), T-AC82-3 (every CAS paired with a `lifecycle_transition` event with canonical-JSON content), T-AC82-6 partial (drain re-entry uses fine-grained pipeline; full per-step drain emission deferred to G7e per readiness).
+- **Retries**: 0
+- **Next**: G7c (tool-loop transitions inside `'wake: loop` body — Awake → ToolDispatching → ToolExecuting → ToolResultProcessing → MidWakeEventPolling → Awake).
+
 ## DEPLOY — AC-81 closed — 2026-05-07T
 
 - **Gate**: PASS (post-deploy, attempt 1)
