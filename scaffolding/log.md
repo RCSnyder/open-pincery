@@ -1,5 +1,43 @@
 # Open Pincery — Experiment Log
 
+## RECONCILE — AC-82 — 2026-05-08T (post-REVIEW, pre-VERIFY)
+
+- **Trigger**: User-requested 7-axis reconcile after AC-82 REVIEW pass at HEAD `56c8209` on `v6-01_implementation`. CI run 25535326298 GREEN. AC-82 REVIEW (round 1 FAIL → fixes in `56c8209` → round 2 PASS) had not been individually logged — log.md jumped from BUILD-complete (`d7dad7c`) straight to this reconcile.
+- **Axes checked**: directory structure, interfaces, AC-* coverage, external integrations, stack/deploy, log accuracy, readiness/traceability.
+- **Cosmetic drift**: none.
+- **Structural drift fixed**:
+  - `scaffolding/scope.md` AC-82 entry + Build Order line 32: stale `src/runtime/wake.rs` reference (file does not exist) corrected to `src/runtime/wake_loop.rs`. Readiness `C-AC82-2` had already documented this default ("`AmendScope` in the same commit") before BUILD ran; this RECONCILE applies the documented amendment to scope.md verbatim. No semantic change to AC-82's pass/fail meaning.
+  - `scaffolding/design.md`: appended a new "v9 G7 DESIGN — AC-82 Fire Reserved Lifecycle States" RECONCILE addendum (~150 lines) covering directory structure (the new `src/runtime/lifecycle.rs`, the migration `20260507000001_agent_status_fine_grained.sql`, the two new test files), the extended `AgentStatus` interface and ten CAS helpers, the `lifecycle_transition` event payload contract (canonical JSON, AC-78 chain compatibility), the stale-recovery widening rationale (review-fix Required #3 — soundness fix for AC-82's own pipeline, not scope expansion beyond AC-1/AC-8), test strategy mapping each T-AC82-* truth to a real test, observability, and explicit "no new external integrations" note. Build commits `ba9f9f8`, `fa3d243`, `d7dad7c`, and review-fix `56c8209` had deferred this addendum to RECONCILE; precedent set by AC-80 / AC-81 reconciles. Defer-debt now closed.
+  - `scaffolding/log.md`: backfilled the missing AC-82 REVIEW + REVIEW-FIX entry below this RECONCILE so the log reflects the actual git history between `d7dad7c` (G7f+G7g) and `56c8209` (HEAD).
+- **Spec-violating drift**: none.
+  - `scope.md` AC-82 acceptance text matches shipped behavior: ten fine-grained variants written via single-row CAS helpers in `src/models/agent.rs`, every transition emits a canonical-JSON `lifecycle_transition` event with `source = "runtime"`, terminal succession (`Inv_TerminalSuccession`) is asserted by the integration tests, drain re-entry uses the same fine-grained chain, the static lint pins CAS-only writes.
+  - `find_stale_agents` / `force_release` widening (review-fix Required #3) is **not** a behavior change beyond AC-82 scope. It is a direct soundness consequence of AC-82's introduction of seven additional live-wake states: without it, a transient DB failure between two fine-grained CAS hops could leave an agent permanently invisible to the AC-8 stale-recovery job. The widening preserves AC-1/AC-8 semantics for `awake`/`maintenance` (still covered) and additively admits the seven new states AC-82 introduced. Annotated under AC-82 truth coverage in the design addendum, NOT flagged as spec-violating.
+  - `spec_coverage.md` AC-82 row Invariant cell (`Inv_TerminalSuccession`) and pipe-list (now includes `AuthorizeExecution` per review-fix Consider #1) match the shipped runtime emissions.
+  - `readiness.md` Truths T-AC82-1..8 all have shipped tests/runtime-proof paths in the codebase. C-AC82-1 (five missing variants) and C-AC82-2 (`wake.rs` → `wake_loop.rs`) carried documented defaults that were applied; no scope expansion. C-AC82-3 (`AuthorizeExecution` for `ToolExecuting` entry) was applied and the spec_coverage AC-82 row now lists it explicitly.
+  - No new crates, no new external integrations, no schema changes beyond the additive CHECK-constraint widening migration.
+- **Confidence**: REPAIRED.
+- **Next**: AC-82 ready for VERIFY agent → DELIVERY.md update → DEPLOY (PR #4 merge — destructive shared action, requires user confirmation per Lights-Out operationalSafety).
+
+## REVIEW + REVIEW-FIX — AC-82 — 2026-05-07T..2026-05-08T (backfilled at RECONCILE)
+
+- **Gate**: PASS (post-review, attempt 2 — round 1 FAIL with 1 Critical + 3 Required + 1 Consider; round 2 PASS at `56c8209`)
+- **REVIEW round 1 (against `d7dad7c`)** — findings:
+  - **Critical**: T-AC82-5 end-to-end coverage gap. Existing scenarios were unit-shaped (`cas_helpers_round_trip`, `lifecycle_event_payload_is_canonical_json`); no DB-integration scenario actually drove `run_wake_loop` end-to-end and asserted the five canonical invariants on a real `lifecycle_transition` row stream.
+  - **Required #1**: `src/runtime/wake_loop.rs` bottom-block `enter_wake_ending` hard-coded `from = DB_AWAKE`, but the wake could legitimately terminate from any of the five live states (Awake | ToolDispatching | ToolExecuting | ToolResultProcessing | MidWakeEventPolling). The emitted `lifecycle_transition.from` was therefore a falsehood for any non-Awake terminal path.
+  - **Required #2**: `tests/status_writes_lint_test.rs` line-scoped normalization missed the multi-line CAS idiom (`UPDATE agents\n    SET status = ...`) that every existing helper uses. R-AC82-3 was only defended for single-line shapes — a future drive-by caller copying the multi-line idiom into another module would slip past.
+  - **Required #3**: `find_stale_agents` and `force_release` `WHERE status IN ('awake', 'maintenance')` clauses were not widened to admit the seven new fine-grained states. A transient DB failure between two CAS hops would leave the agent invisible to AC-8 stale recovery indefinitely.
+  - **Consider #1**: `scaffolding/spec_coverage.md` AC-82 pipe-list omitted `AuthorizeExecution` even though the runtime emits `canonical_action = "AuthorizeExecution"` for the `ToolDispatching → ToolExecuting` CAS (per readiness C-AC82-3 default).
+- **REVIEW-FIX commit `56c8209`** addressed all five findings:
+  - Added two end-to-end DB scenarios (sleep terminal via `tool_call`; iteration_cap terminal via bottom block) in `tests/lifecycle_transition_test.rs`. Order rows by `(created_at, ctid)` for physical insertion order; assert all five T-AC82-5 invariants per wake.
+  - `src/runtime/wake_loop.rs` bottom-block now reads `agent::get_agent` immediately before the `enter_wake_ending` CAS to capture the actual prior status, then uses that as the lifecycle event's `from` field. Documented benign SELECT-then-CAS window (no racing writer for these states inside this code path). Sleep arm was already correct (records `tool_result_processing → wake_ending`).
+  - `tests/status_writes_lint_test.rs` now whitespace-normalizes the WHOLE file (collapse all whitespace including newlines to single spaces, lowercase) before searching for `update agents set status`.
+  - `src/models/agent.rs` `find_stale_agents` and `force_release` `WHERE` clauses widened to `IN ('wake_acquiring', 'prompt_assembling', 'awake', 'tool_dispatching', 'tool_executing', 'tool_result_processing', 'mid_wake_event_polling', 'wake_ending', 'maintenance')`.
+  - `scaffolding/spec_coverage.md` AC-82 row pipe-list updated to include `AuthorizeExecution` alongside the other transitions.
+- **REVIEW round 2 (against `56c8209`)**: PASS. CI run 25535326298 GREEN; full local `cargo test` sweep zero failures across all 30+ binaries (`lifecycle_transition_test` 5/5, `status_writes_lint_test` 1/1, `stale_test` 1/1, plus all others).
+- **Changes**: `scaffolding/spec_coverage.md`, `src/models/agent.rs`, `src/runtime/wake_loop.rs`, `tests/lifecycle_transition_test.rs` (+319 lines), `tests/status_writes_lint_test.rs`. Trailer: `canonical_action: TerminalEndsWake`.
+- **Retries**: 1 (one REVIEW round failed; one fix-up commit landed it green).
+- **Next**: RECONCILE (this entry → entry above), then VERIFY → DEPLOY.
+
 ## BUILD G7c+G7d+G7e+G7f+G7g — AC-82 BUILD COMPLETE — 2026-05-08T
 
 - **Gate**: PASS (post-build, attempt 1 across all three commits)

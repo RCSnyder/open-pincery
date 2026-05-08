@@ -3148,3 +3148,166 @@ the full v9 AC range AC-53..AC-88 (the v9 sandbox-rework addendum
 extended AC-82 → AC-88; readiness `C-AC81-1` already documented
 the super-set as "the coverage file is just being correct" with
 no scope expansion).
+
+---
+
+## v9 G7 DESIGN — AC-82 Fire Reserved Lifecycle States (2026-05-08, RECONCILE addendum)
+
+This addendum captures the design surface that AC-82 BUILD (G7a..G7g
++ review-fix `56c8209`) materialized. It is appended at RECONCILE per
+the precedent established by AC-80 / AC-81 reconciles: build-time
+slice docs were authorized to defer the design-side write-up to
+RECONCILE so the addendum reflects shipped reality, not pre-build
+intent.
+
+### Directory Structure (delta only)
+
+```
+src/
+├── runtime/
+│   └── lifecycle.rs             # NEW (G7b): canonical-JSON `lifecycle_transition`
+│                                #   event emitter; `EVENT_TYPE`/`EVENT_SOURCE`
+│                                #   constants; hand-built JSON for byte-stable AC-78
+│                                #   chain reproducibility.
+└── models/
+    └── agent.rs                 # MODIFIED: 10 new fine-grained CAS helpers
+                                 #   (attempt_wake_acquire, drain_attempt_wake_acquire,
+                                 #   wake_acquire_succeeds, prompt_assembly_completes,
+                                 #   enter_tool_dispatching, enter_tool_executing,
+                                 #   enter_tool_result_processing,
+                                 #   enter_mid_wake_event_polling,
+                                 #   mid_wake_poll_finds_nothing, enter_wake_ending,
+                                 #   wake_end_transitions_to_maintenance) PLUS
+                                 #   widened find_stale_agents / force_release
+                                 #   (review-fix Required #3) to admit the full
+                                 #   live-wake set, not just (awake | maintenance).
+
+migrations/
+└── 20260507000001_agent_status_fine_grained.sql   # NEW (G7a): widens
+                                                    #   `agents.status` CHECK
+                                                    #   constraint to admit the
+                                                    #   five new fine-grained
+                                                    #   variants. Forward-only;
+                                                    #   no row mutation.
+
+tests/
+├── lifecycle_transition_test.rs # NEW (G7a + review-fix Critical #1):
+│                                #   5 cases — `cas_helpers_round_trip` (G7a),
+│                                #   `lifecycle_event_payload_is_canonical_json`
+│                                #   (G7f), plus two end-to-end DB scenarios
+│                                #   added at review-fix `56c8209` driving
+│                                #   `run_wake_loop` against a stub LLM and
+│                                #   asserting all five T-AC82-5 invariants
+│                                #   (canonical sequence, timeline coverage,
+│                                #   chain agreement, one-event-per-CAS,
+│                                #   Inv_TerminalSuccession).
+└── status_writes_lint_test.rs   # NEW (G7f, hardened at review-fix Required #2):
+                                 #   whole-file whitespace-normalized grep for
+                                 #   `update agents set status` outside
+                                 #   `src/models/agent.rs`. Catches both
+                                 #   single-line and multi-line CAS idioms.
+```
+
+### Interfaces
+
+**`AgentStatus` enum (extended to ten variants):** `Resting`,
+`WakeAcquiring`, `PromptAssembling`, `Awake`, `ToolDispatching`,
+`ToolExecuting`, `ToolResultProcessing`, `MidWakeEventPolling`,
+`WakeEnding`, `Maintenance`. Each variant has a `DB_*` `&'static str`
+constant; `as_db_str` / `from_db_str` are the single boundary
+conversion. The `Agent` struct's `status: String` field is unchanged
+on the wire.
+
+**Fine-grained CAS helpers (`src/models/agent.rs`):** Each helper is
+a single `UPDATE agents SET status = '<next>' WHERE id = $1 AND
+status = '<prev>' RETURNING *` round trip and returns
+`Result<Option<Agent>, AppError>`. `Some(_)` means this caller won
+the race; `None` is a benign CAS miss the caller propagates as
+`AppError::Conflict` (per readiness T-AC82-2). Helpers do NOT emit
+the paired `lifecycle_transition` event — that lives in the call
+sites under `src/runtime/` so the AC-78 hash-chain ordering
+guarantee (DB row update happens-before event append on the same
+connection) is preserved.
+
+The terminal helper `enter_wake_ending` is the only CAS whose
+`WHERE` clause names multiple admissible source states (Awake |
+ToolDispatching | ToolExecuting | ToolResultProcessing |
+MidWakeEventPolling) — a wake can decide to terminate from any
+live state.
+
+**Stale recovery widening (review-fix Required #3, AC-1 / AC-8
+behavior preserved):** `find_stale_agents` and `force_release` now
+recognize the full live-wake set (`wake_acquiring`,
+`prompt_assembling`, `awake`, `tool_dispatching`, `tool_executing`,
+`tool_result_processing`, `mid_wake_event_polling`, `wake_ending`,
+`maintenance`). This is **not a behavior change beyond AC-82's
+scope** — it is a soundness fix for AC-82's own pipeline. Without
+it, a transient DB failure between two fine-grained CAS hops would
+leave an agent permanently invisible to the AC-8 stale-recovery
+job. The original AC-1/AC-8 acceptance criteria ("awake or
+maintenance after 2h") remain satisfied for those two states; the
+widening adds the seven new states AC-82 introduced.
+
+**Lifecycle event payload (`src/runtime/lifecycle.rs`):**
+
+```rust
+pub const EVENT_TYPE: &str = "lifecycle_transition";
+pub const EVENT_SOURCE: &str = "runtime";
+
+pub async fn emit(
+    pool: &PgPool, agent_id: Uuid, wake_id: Uuid,
+    from: &str, to: &str, canonical_action: &str,
+) -> Result<(), AppError>;
+```
+
+`emit` writes a canonical-JSON content payload — keys in
+alphabetical order (`canonical_action`, `from`, `to`, `wake_id`),
+no whitespace, no trailing newline — so the AC-78 hash chain stays
+reproducible across deployments. The encoder is hand-built to avoid
+`serde_json::Value` map-ordering drift.
+
+### External Integrations
+
+None. AC-82 is a pure runtime + DB schema slice — no new crates,
+no new HTTP surface, no new external callers.
+
+### Test Strategy (one row per AC-82 sub-claim)
+
+| Sub-claim | Test |
+| --- | --- |
+| T-AC82-1: 10 variants live in CAS, CHECK widened | `tests/lifecycle_transition_test.rs::cas_helpers_round_trip`, migration `20260507000001` applied during test setup |
+| T-AC82-2: every CAS is single-row CAS with explicit prev state | `tests/status_writes_lint_test.rs::assert_status_writes_are_cas_only` (whole-file lint) |
+| T-AC82-3: every CAS pairs with a canonical-JSON `lifecycle_transition` | `tests/lifecycle_transition_test.rs::lifecycle_event_payload_is_canonical_json` + `src/runtime/lifecycle.rs` unit tests (`payload_has_canonical_key_order`, `payload_round_trips_as_json`, `payload_is_byte_stable`) |
+| T-AC82-4: terminal succession via multi-source `enter_wake_ending` | `tests/lifecycle_transition_test.rs` end-to-end scenarios (sleep arm + iteration_cap arm); review-fix Required #1 fixed the bottom-block `from` to read the actual prior status |
+| T-AC82-5: five end-to-end invariants per wake | Two scenarios in `tests/lifecycle_transition_test.rs` driving `run_wake_loop` with stub LLM, ordering rows by `(created_at, ctid)` for physical insertion order |
+| T-AC82-6: drain re-entry uses fine-grained pipeline | `src/runtime/drain.rs` calls `drain_attempt_wake_acquire`; remaining hops fire at top of next `run_wake_loop`; covered by drain scenario |
+| T-AC82-7: status-write CAS-only static lint | `tests/status_writes_lint_test.rs::assert_status_writes_are_cas_only` |
+| T-AC82-8: `spec_coverage.md` AC-82 cites `Inv_TerminalSuccession` | `tests/spec_coverage_lint.rs` (unchanged; accepts any non-empty invariant token) |
+| Stale recovery widening (Required #3) | `tests/stale_test.rs` continues to pass; widening is additive — `awake`/`maintenance` remain covered |
+
+### Observability
+
+- `events.event_type = 'lifecycle_transition'` rows are the
+  primary observability surface. Operators tail them with `pcy
+  events tail --type lifecycle_transition --limit 20` to see the
+  canonical action chain on a freshly woken agent.
+- The new CAS helpers do not add `tracing` spans (the existing
+  `run_wake_loop` instrumentation in `src/runtime/wake_loop.rs`
+  covers the wake lifecycle at trace level).
+- AC-78 hash chain: `lifecycle_transition` rows participate in the
+  same `prev_hash` / `entry_hash` chain as every other event
+  (canonical-JSON payload guarantees byte-stable pre-image).
+
+### Complexity Exceptions
+
+None — AC-82 stays inside slice/file-size limits. `src/models/agent.rs`
+grows by ≈ 10 small CAS helpers (≈ 15 lines each); `src/runtime/wake_loop.rs`
+gains ≈ 9 single-line CAS calls plus mechanical event-emit wrappers;
+`tests/lifecycle_transition_test.rs` is well under 300 lines.
+
+### Closes
+
+Acceptance criterion AC-82 (scope.md). Final v9.0 ship blocker for
+the lifecycle-state slice. Listener no longer owns the `WakeEnding
+→ Maintenance` transition — `run_wake_loop` does, on every fresh
+and drain-reacquired wake.
