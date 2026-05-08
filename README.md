@@ -86,6 +86,8 @@ Six defense layers, from innermost to outermost:
 5. **Database security** — Postgres RLS, compile-time checked queries, append-only audit
 6. **Webhook/API security** — HMAC-SHA256 verification, SHA-256 dedup, rate limiting, TLS
 
+See [docs/SECURITY.md](docs/SECURITY.md) for the v9 threat model — adversary capabilities, in-scope vs out-of-scope attacks, and the vulnerability disclosure process.
+
 ## Deployment Modes
 
 Open Pincery is designed for four deployment modes. Self-hosting is first-class — the runtime functions without any proprietary control plane.
@@ -146,6 +148,74 @@ Start with:
 - [docs/input/security-architecture.md](docs/input/security-architecture.md) — six-layer security model
 - [docs/input/best-practices.md](docs/input/best-practices.md) — practices mapped to academic research
 
+## Development
+
+Open Pincery v9 introduces a Linux-only agent sandbox (AC-53 **Zerobox**,
+AC-71 secret injection proxy, AC-72 per-agent egress allowlist) that
+relies on kernel primitives unavailable on macOS or Windows hosts
+(bubblewrap, slirp4netns, landlock LSM, cgroup v2). AC-75 ships a
+pinned Ubuntu 24.04 Docker "devshell" so every contributor runs the
+identical toolchain against the identical kernel surface.
+
+> **Terminology.** _Zerobox_ is the Linux sandbox architecture that
+> isolates each tool invocation. [`zeroize`](https://docs.rs/zeroize)
+> is an unrelated Rust crate used under AC-74 for memory hygiene inside
+> the secret-handling path. They coexist; neither replaces the other.
+
+### On Linux
+
+Native toolchain is supported directly:
+
+```bash
+cargo test
+cargo clippy --all-targets -- -D warnings
+```
+
+### On macOS or Windows
+
+Use the devshell wrapper to run the same commands inside the pinned
+container. See the full walkthroughs in
+[docs/runbooks/dev_setup_macos.md](docs/runbooks/dev_setup_macos.md) and
+[docs/runbooks/dev_setup_windows.md](docs/runbooks/dev_setup_windows.md).
+
+```bash
+# macOS / Linux
+./scripts/devshell.sh cargo test
+
+# Windows (PowerShell)
+.\scripts\devshell.ps1 cargo test
+```
+
+The wrapper invokes
+`docker run --privileged --cgroupns=host ghcr.io/open-pincery/devshell:v9`
+with the repo bind-mounted at `/work`, so edits on the host flow through
+to the container immediately. Build artifacts are written to
+`target/devshell/` to avoid colliding with any host Rust toolchain used
+for editor integration.
+
+If your shell inherited an old target directory, pin native Rust
+artifacts to this checkout before you build:
+
+```powershell
+$env:CARGO_TARGET_DIR = Join-Path (Get-Location) 'target\local-check'
+cargo test
+```
+
+The devshell wrappers also support a separate host-side cache directory.
+On Windows, this keeps the container-backed cargo cache under the repo
+checkout while leaving native host artifacts separate:
+
+```powershell
+$env:OPEN_PINCERY_DEVSHELL_HOST_TARGET_DIR = Join-Path (Get-Location) 'target\devshell'
+.\scripts\devshell.ps1 cargo test
+```
+
+You can still replace either value with another absolute path if you
+intentionally want build artifacts on a different drive.
+
+CI runs `tests/devshell_parity_test.rs` to confirm the wrapper,
+`Dockerfile.devshell`, and runbooks stay in sync.
+
 ## References
 
 The Continuous Agent Architecture that Open Pincery implements is described in detail in an upcoming publication by the original author, to be released under MIT license.
@@ -199,20 +269,23 @@ Then add it to your PATH:
 
 ```bash
 # Linux / macOS / Git Bash
-export PATH="$PWD/target/release:$PATH"
+RELEASE_DIR="${CARGO_TARGET_DIR:-$PWD/target}/release"
+export PATH="$RELEASE_DIR:$PATH"
 
 # Windows PowerShell
-$env:PATH = "$PWD\target\release;$env:PATH"
+$releaseDir = if ($env:CARGO_TARGET_DIR) { Join-Path $env:CARGO_TARGET_DIR 'release' } else { Join-Path $PWD 'target\release' }
+$env:PATH = "$releaseDir;$env:PATH"
 ```
 
 Or copy the binary to a directory already on your PATH:
 
 ```bash
 # Linux / macOS
-sudo cp target/release/pcy /usr/local/bin/
+sudo cp "${CARGO_TARGET_DIR:-target}/release/pcy" /usr/local/bin/
 
 # Windows PowerShell (admin)
-Copy-Item target\release\pcy.exe C:\Windows\System32\
+$releaseDir = if ($env:CARGO_TARGET_DIR) { Join-Path $env:CARGO_TARGET_DIR 'release' } else { Join-Path $PWD 'target\release' }
+Copy-Item (Join-Path $releaseDir 'pcy.exe') C:\Windows\System32\
 ```
 
 ### Web UI (fastest path)
@@ -265,7 +338,7 @@ If `OPEN_PINCERY_URL=http://localhost:8080` is exported, the shortest command
 forms are:
 
 ```bash
-pcy bootstrap --bootstrap-token "$OPEN_PINCERY_BOOTSTRAP_TOKEN"
+pcy login --bootstrap-token "$OPEN_PINCERY_BOOTSTRAP_TOKEN"
 pcy agent create "my-agent"
 pcy message AGENT_ID "hello from cli"
 pcy events AGENT_ID
@@ -298,6 +371,10 @@ On Windows PowerShell:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke.ps1
 ```
+
+Both smoke scripts check `CARGO_TARGET_DIR` before falling back to the
+repo-local `target/` directory, so they keep working if you relocate the
+native build cache to another drive.
 
 ### curl/HTTP appendix
 
@@ -350,7 +427,7 @@ Anchor index:
 
 #### bootstrap-401
 
-- Confirm `.env` has the same `OPEN_PINCERY_BOOTSTRAP_TOKEN` you pass to `pcy bootstrap`.
+- Confirm `.env` has the same `OPEN_PINCERY_BOOTSTRAP_TOKEN` you pass to `pcy login --bootstrap-token`.
 - Verify the compose stack loaded your env: `docker compose config | grep OPEN_PINCERY_BOOTSTRAP_TOKEN`.
 
 #### rate-limit-429

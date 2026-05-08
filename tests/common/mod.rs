@@ -1,5 +1,11 @@
 use sqlx::PgPool;
 
+/// AC-38 (v7): deterministic base64-encoded 32-byte key for tests that
+/// construct a `Config` literal. Real deployments must set a random value
+/// via `OPEN_PINCERY_VAULT_KEY`; this constant is only for tests.
+#[allow(dead_code)]
+pub const TEST_VAULT_KEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
 /// Create a test database pool. Requires TEST_DATABASE_URL env var.
 pub async fn test_pool() -> PgPool {
     let url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
@@ -24,7 +30,7 @@ pub async fn test_pool() -> PgPool {
     // Clean all tables for a fresh test
     sqlx::query(
         "TRUNCATE webhook_dedup, auth_audit, tool_audit, llm_call_prompts, llm_calls, wake_summaries, 
-         agent_projections, events, agents, workspace_memberships, organization_memberships,
+         agent_projections, events, capability_nonces, agents, workspace_memberships, organization_memberships,
          workspaces, organizations, user_sessions, users, prompt_templates CASCADE"
     )
     .execute(&pool)

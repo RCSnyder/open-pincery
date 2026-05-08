@@ -1,0 +1,63 @@
+# AC-75 — Cross-Platform Developer Environment for Open Pincery v9.
+#
+# v9 introduces Linux-only kernel primitives (landlock LSM, bubblewrap,
+# slirp4netns, cgroup v2) under AC-53 (Zerobox), AC-71 (secret injection
+# proxy), and AC-72 (per-agent network egress allowlist).  Mac and
+# Windows contributors cannot exercise these primitives on the host, so
+# this image is the supported sandbox-capable development shell.  See
+# scripts/devshell.sh / scripts/devshell.ps1 for the wrapper command.
+#
+# Published to: ghcr.io/open-pincery/devshell:v9 (tag-triggered).
+
+FROM ubuntu:24.04
+
+# Non-interactive apt and fixed locale so every contributor sees
+# identical build output.
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:${PATH}
+
+# System toolchain + sandbox userland required by AC-53 / AC-71 / AC-72.
+# Pinned to Ubuntu 24.04's repository to match the kernel-header set the
+# sandbox tests rely on.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        bubblewrap \
+        slirp4netns \
+        uidmap \
+        libseccomp-dev \
+        libseccomp2 \
+        seccomp \
+        pkg-config \
+        build-essential \
+        ca-certificates \
+        curl \
+        git \
+        libssl-dev \
+        libpq-dev \
+        postgresql-client \
+ && rm -rf /var/lib/apt/lists/*
+
+# Rust toolchain pinned to match Cargo.toml's rust-version.  Installed
+# via rustup so `devshell cargo test` uses the exact same compiler
+# version everywhere.
+ARG RUST_VERSION=1.88.0
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --default-toolchain ${RUST_VERSION} --profile minimal --component clippy --component rustfmt \
+ && rustup --version \
+ && cargo --version \
+ && rustc --version
+
+# sqlx-cli so contributors can create/apply migrations from inside the
+# shell without installing anything on the host.
+RUN cargo install sqlx-cli --version ^0.8 --no-default-features --features rustls,postgres
+
+WORKDIR /work
+
+# Default entrypoint forwards argv so `./scripts/devshell.sh cargo test`
+# → `docker run ... ghcr.io/open-pincery/devshell:v9 cargo test`.
+ENTRYPOINT ["/bin/bash", "-lc", "exec \"$@\"", "--"]
+CMD ["bash"]

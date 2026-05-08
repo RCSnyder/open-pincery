@@ -5,43 +5,47 @@ use axum::{
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::{scoped_agent, AppState, AuthUser};
 use crate::error::AppError;
 use crate::models::{agent, event, projection};
 
-#[derive(Deserialize)]
-struct CreateAgent {
-    name: String,
+#[derive(Deserialize, ToSchema)]
+pub struct CreateAgent {
+    pub name: String,
 }
 
-#[derive(Deserialize)]
-struct UpdateAgent {
-    name: Option<String>,
-    is_enabled: Option<bool>,
-    budget_limit_usd: Option<Decimal>,
+#[derive(Deserialize, ToSchema)]
+pub struct UpdateAgent {
+    pub name: Option<String>,
+    pub is_enabled: Option<bool>,
+    #[schema(value_type = String, format = "decimal")]
+    pub budget_limit_usd: Option<Decimal>,
 }
 
-#[derive(Serialize)]
-struct AgentResponse {
-    id: Uuid,
-    name: String,
-    status: String,
-    is_enabled: bool,
-    disabled_reason: Option<String>,
+#[derive(Serialize, ToSchema)]
+pub struct AgentResponse {
+    pub id: Uuid,
+    pub name: String,
+    pub status: String,
+    pub is_enabled: bool,
+    pub disabled_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    webhook_secret: Option<String>,
-    identity: Option<String>,
-    work_list: Option<String>,
-    budget_limit_usd: Decimal,
-    budget_used_usd: Decimal,
-    created_at: chrono::DateTime<chrono::Utc>,
+    pub webhook_secret: Option<String>,
+    pub identity: Option<String>,
+    pub work_list: Option<String>,
+    #[schema(value_type = String, format = "decimal")]
+    pub budget_limit_usd: Decimal,
+    #[schema(value_type = String, format = "decimal")]
+    pub budget_used_usd: Decimal,
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Serialize)]
-struct RotateWebhookSecretResponse {
-    webhook_secret: String,
+#[derive(Serialize, ToSchema)]
+pub struct RotateWebhookSecretResponse {
+    pub webhook_secret: String,
 }
 
 impl AgentResponse {
@@ -85,7 +89,19 @@ pub fn router() -> Router<AppState> {
         )
 }
 
-async fn create_agent(
+/// Create a new agent within the caller's workspace.
+#[utoipa::path(
+    post,
+    path = "/api/agents",
+    tag = "agents",
+    request_body = CreateAgent,
+    responses(
+        (status = 201, description = "Agent created", body = AgentResponse),
+        (status = 401, description = "Missing or invalid session"),
+    ),
+    security(("bearerAuth" = [])),
+)]
+pub async fn create_agent(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthUser>,
     Json(body): Json<CreateAgent>,
@@ -97,7 +113,18 @@ async fn create_agent(
     ))
 }
 
-async fn list_agents(
+/// List all agents in the caller's workspace.
+#[utoipa::path(
+    get,
+    path = "/api/agents",
+    tag = "agents",
+    responses(
+        (status = 200, description = "Agents in workspace", body = [AgentResponse]),
+        (status = 401, description = "Missing or invalid session"),
+    ),
+    security(("bearerAuth" = [])),
+)]
+pub async fn list_agents(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthUser>,
 ) -> Result<Json<Vec<AgentResponse>>, AppError> {
@@ -110,7 +137,19 @@ async fn list_agents(
     ))
 }
 
-async fn get_agent_handler(
+/// Fetch a single agent by ID.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}",
+    tag = "agents",
+    params(("id" = Uuid, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "Agent", body = AgentResponse),
+        (status = 404, description = "Agent not found"),
+    ),
+    security(("bearerAuth" = [])),
+)]
+pub async fn get_agent_handler(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthUser>,
     Path(id): Path<Uuid>,
@@ -120,7 +159,20 @@ async fn get_agent_handler(
     Ok(Json(AgentResponse::from_agent(a, proj, false)))
 }
 
-async fn update_agent_handler(
+/// Update mutable fields on an agent.
+#[utoipa::path(
+    patch,
+    path = "/api/agents/{id}",
+    tag = "agents",
+    params(("id" = Uuid, Path, description = "Agent ID")),
+    request_body = UpdateAgent,
+    responses(
+        (status = 200, description = "Agent updated", body = AgentResponse),
+        (status = 404, description = "Agent not found"),
+    ),
+    security(("bearerAuth" = [])),
+)]
+pub async fn update_agent_handler(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthUser>,
     Path(id): Path<Uuid>,
@@ -144,7 +196,19 @@ async fn update_agent_handler(
     Ok(Json(AgentResponse::from_agent(a, None, false)))
 }
 
-async fn delete_agent_handler(
+/// Soft-delete an agent.
+#[utoipa::path(
+    delete,
+    path = "/api/agents/{id}",
+    tag = "agents",
+    params(("id" = Uuid, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "Agent soft-deleted", body = AgentResponse),
+        (status = 404, description = "Agent not found"),
+    ),
+    security(("bearerAuth" = [])),
+)]
+pub async fn delete_agent_handler(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthUser>,
     Path(id): Path<Uuid>,
@@ -155,7 +219,20 @@ async fn delete_agent_handler(
     Ok(Json(AgentResponse::from_agent(a, None, false)))
 }
 
-async fn rotate_webhook_secret_handler(
+/// Rotate an agent's webhook HMAC secret. Returns the new secret
+/// exactly once; it cannot be retrieved afterwards.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/webhook/rotate",
+    tag = "agents",
+    params(("id" = Uuid, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "New webhook secret", body = RotateWebhookSecretResponse),
+        (status = 404, description = "Agent not found"),
+    ),
+    security(("bearerAuth" = [])),
+)]
+pub async fn rotate_webhook_secret_handler(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthUser>,
     Path(id): Path<Uuid>,

@@ -24,7 +24,7 @@ fn ac_31_readme_contains_required_quickstart_sections_and_steps() {
     for step in [
         "docker compose up -d --wait",
         "curl -fsS http://localhost:8080/ready",
-        "pcy bootstrap",
+        "pcy login",
         "pcy agent create",
         "pcy message",
         "pcy events",

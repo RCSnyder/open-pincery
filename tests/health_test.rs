@@ -29,9 +29,13 @@ fn test_config() -> Config {
         llm_maintenance_model: "test".into(),
         max_prompt_chars: 100000,
         iteration_cap: 50,
+        schema_invalid_retry_cap: 3,
+        tool_call_rate_limit_per_wake: 32,
         stale_wake_hours: 2,
         wake_summary_limit: 20,
         event_window_limit: 200,
+        vault_key_b64: common::TEST_VAULT_KEY_B64.into(),
+        sandbox: open_pincery::config::ResolvedSandboxMode::default(),
     }
 }
 

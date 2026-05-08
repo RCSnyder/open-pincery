@@ -16,9 +16,13 @@ fn test_config() -> Config {
         llm_maintenance_model: "test".into(),
         max_prompt_chars: 100000,
         iteration_cap: 50,
+        schema_invalid_retry_cap: 3,
+        tool_call_rate_limit_per_wake: 32,
         stale_wake_hours: 2,
         wake_summary_limit: 20,
         event_window_limit: 200,
+        vault_key_b64: common::TEST_VAULT_KEY_B64.into(),
+        sandbox: open_pincery::config::ResolvedSandboxMode::default(),
     }
 }
 
@@ -34,7 +38,7 @@ async fn test_pcy_cli_e2e_core_flow() {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let base_url = format!("http://{}", addr);
+    let base_url = format!("http://{addr}");
 
     let server = tokio::spawn(async move {
         let _ = axum::serve(
@@ -51,7 +55,7 @@ async fn test_pcy_cli_e2e_core_flow() {
         .unwrap();
     let mut ready = false;
     for _ in 0..40 {
-        if let Ok(resp) = probe.get(format!("{}/health", base_url)).send().await {
+        if let Ok(resp) = probe.get(format!("{base_url}/health")).send().await {
             if resp.status().is_success() {
                 ready = true;
                 break;
@@ -101,20 +105,20 @@ async fn test_pcy_cli_e2e_core_flow() {
     .await;
     assert_ok("preflight status", &out);
 
-    // bootstrap
+    // login (idempotent: handles bootstrap-or-login internally)
     let out = run_pcy(
         pcy_bin.clone(),
         cfg_path.clone(),
         vec![
             "--url".into(),
             base_url.clone(),
-            "bootstrap".into(),
+            "login".into(),
             "--bootstrap-token".into(),
             "test-token".into(),
         ],
     )
     .await;
-    assert_ok("bootstrap", &out);
+    assert_ok("login", &out);
 
     // create agent
     let out = run_pcy(

@@ -53,8 +53,7 @@ pub async fn run_maintenance(
         ChatMessage {
             role: "user".into(),
             content: Some(format!(
-                "Current identity:\n{}\n\nCurrent work list:\n{}\n\nRecent events:\n{}",
-                current_identity, current_work_list, event_summary
+                "Current identity:\n{current_identity}\n\nCurrent work list:\n{current_work_list}\n\nRecent events:\n{event_summary}"
             )),
             tool_calls: None,
             tool_call_id: None,

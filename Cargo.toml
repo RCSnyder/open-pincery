@@ -36,8 +36,63 @@ governor = "0.8"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.16", default-features = false }
 clap = { version = "4.5", features = ["derive"] }
+clap_complete = "4.5"
 dirs = "6"
 toml = "0.8"
+async-trait = "0.1"
+tempfile = "3"
+aes-gcm = "0.10"
+rpassword = "7"
+# AC-44 (v8): OpenAPI 3.1 spec generation via derive macros.
+# `axum_extras` unlocks type-driven path-param extraction; `yaml` is
+# used by the /openapi.yaml handler.
+utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid", "yaml"] }
+# AC-47 (v8): universal `--output` flag. serde_yaml handles the
+# `yaml` format; `jsonpath-rust` handles the kubectl-compatible
+# `jsonpath='...'` subset. tabled drives the TTY-default `table`
+# renderer with NO_COLOR honouring.
+serde_yaml = "0.9"
+jsonpath-rust = "0.7"
+tabled = "0.15"
+# AC-79 (v9 Phase G): JSON Schema validation of LLM tool-call arguments
+# before dispatch. Compiled validators are cached per tool from the
+# canonical `tool_definitions()` `parameters` schemas.
+jsonschema = "0.28"
+
+# AC-53 / Slice A2b.1: Linux-only sandbox crates.
+#
+# These crates provide the six-layer fail-closed sandbox (bwrap
+# namespaces + cgroup v2 + landlock + seccomp-bpf + uid/cap drop +
+# slirp4netns egress) described in scaffolding/design.md. They are
+# Linux-only because the kernel surface they bind to (LSM landlock,
+# seccomp-bpf, cgroup v2, user+pid+net namespaces) does not exist on
+# Windows or macOS. Gating them behind `cfg(target_os = "linux")`
+# keeps Windows/macOS `cargo build` green for contributors while
+# production workloads run under a Linux devshell or container.
+#
+# Version pins are concrete (no wildcards) and enforced by
+# `tests/sandbox_deps_test.rs`. Licenses (MIT / Apache-2.0) are
+# already covered by `deny.toml`'s [licenses].allow list.
+[target.'cfg(target_os = "linux")'.dependencies]
+# AWS Firecracker's seccomp-bpf filter compiler. Used to build the
+# default-deny syscall allowlist that wraps every agent tool invocation.
+seccompiler = "0.5"
+# Safe Rust bindings to the landlock LSM (kernel >= 5.13). Used to
+# restrict filesystem reads/writes to the workspace scratch directory.
+landlock = "0.4"
+# cgroup v2 interface for CPU/memory/pids caps. Used to bound tool
+# runtime resource consumption (AC-65 budget enforcement layer).
+cgroups-rs = "0.3"
+# Direct syscall bindings for unshare/clone/setns/mount. Used by the
+# bwrap wrapper for namespace composition.
+nix = { version = "0.29", features = ["sched", "mount", "user", "fs", "process"] }
+# Raw libc bindings — we use `libc::memfd_create` + `libc::SYS_*`
+# constants when serializing the seccomp BPF program into a memfd
+# for bwrap's `--seccomp <fd>` flag (A2b.4b). Already a transitive
+# dep via seccompiler/nix; pinning it explicitly documents the
+# intentional direct use and keeps `tests/sandbox_deps_test.rs`
+# happy.
+libc = "0.2"
 
 [dev-dependencies]
 wiremock = "0.6"
@@ -47,10 +102,22 @@ hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
 tempfile = "3"
+walkdir = "2"
 
 [[bin]]
 name = "pcy"
 path = "src/bin/pcy.rs"
+
+# AC-83 / Slice G0a.2: in-sandbox exec wrapper. Runs inside the bwrap
+# mount namespace after setup completes, reads a SandboxInitPolicy from
+# an inherited memfd (fd 3), and execvps the user argv. G0a.3 adds the
+# fail-closed policy-application pipeline (prctl/seccomp/landlock).
+# Main body is `cfg(target_os = "linux")`-gated; on other platforms the
+# binary compiles as a stub that exits with a clear message so Windows/
+# macOS `cargo build` stays green for contributors.
+[[bin]]
+name = "pincery-init"
+path = "src/bin/pincery_init.rs"
 
 # AC-20: Release profile — small, stripped, single codegen unit for reproducibility.
 # Leaves panic = "unwind" (default) so a panic in one background task does not

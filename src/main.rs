@@ -20,7 +20,21 @@ async fn main() {
     // Init tracing (human-readable by default; LOG_FORMAT=json for structured output)
     open_pincery::observability::logging::init_logging();
 
+    #[cfg(target_os = "linux")]
+    if let Err(code) = runtime::sandbox::preflight::enforce_kernel_floor_at_startup() {
+        std::process::exit(code);
+    }
+
     let config = config::Config::from_env().expect("Failed to load configuration");
+
+    #[cfg(target_os = "linux")]
+    if let Err(code) = runtime::sandbox::preflight::enforce_memory_cap_at_startup(
+        config.sandbox.mode,
+        config.sandbox.allow_unsafe,
+    ) {
+        std::process::exit(code);
+    }
+
     let pool = db::create_pool(&config.database_url)
         .await
         .expect("Failed to create database pool");
@@ -30,6 +44,31 @@ async fn main() {
         .expect("Failed to run migrations");
 
     info!("Migrations complete");
+
+    // AC-78 G3d: refuse to boot the listener if any agent's audit
+    // chain is broken. Override is `OPEN_PINCERY_AUDIT_CHAIN_FLOOR=relaxed`
+    // + `OPEN_PINCERY_ALLOW_UNSAFE=true` (same shape as the
+    // sandbox-floor pattern). Reads env directly here rather than
+    // threading two new fields through `Config` — these are
+    // emergency-only toggles.
+    {
+        let relaxed = std::env::var("OPEN_PINCERY_AUDIT_CHAIN_FLOOR")
+            .map(|v| v.trim().eq_ignore_ascii_case("relaxed"))
+            .unwrap_or(false);
+        let allow_unsafe = std::env::var("OPEN_PINCERY_ALLOW_UNSAFE")
+            .map(|v| v.trim().eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if let Err(code) =
+            open_pincery::background::audit_chain::enforce_audit_chain_floor_at_startup(
+                &pool,
+                relaxed,
+                allow_unsafe,
+            )
+            .await
+        {
+            std::process::exit(code);
+        }
+    }
 
     // AC-23: pricing used to compute `cost_usd` for every recorded LLM call.
     // Defaults chosen for a reasonable Claude-Sonnet-class model; operators
@@ -56,8 +95,19 @@ async fn main() {
     let config = Arc::new(config);
     let shutdown = CancellationToken::new();
 
+    // AC-36 / AC-53 (Slice A2b.3): single sandboxed executor shared by
+    // every wake loop. This is the ONLY place in the binary that mints
+    // a `ToolExecutor`; everything else receives `Arc<dyn ToolExecutor>`
+    // via AppState. The factory chooses `RealSandbox` (bwrap-wrapped)
+    // on Linux when `sandbox.mode` is `enforce` or `audit`, and falls
+    // back to `ProcessExecutor` on non-Linux hosts or when the mode is
+    // `disabled` (paired with `ALLOW_UNSAFE=true`, enforced at
+    // Config::from_env time per AC-73).
+    let executor = runtime::sandbox::build_executor(&config.sandbox);
+
     // Build API (holds the per-task alive flags used by /ready).
-    let state = api::AppState::new(pool.clone(), (*config).clone());
+    // Share the single executor instance with the wake loop via AppState.
+    let state = api::AppState::new_with_executor(pool.clone(), (*config).clone(), executor.clone());
 
     // AC-18: optional Prometheus metrics server.
     // If METRICS_ADDR is set (e.g. "127.0.0.1:9090"), install a recorder and
@@ -97,11 +147,21 @@ async fn main() {
     let bg_pool = pool.clone();
     let bg_config = config.clone();
     let bg_llm = llm.clone();
+    let bg_executor = executor.clone();
+    let bg_vault = state.vault.clone();
     let bg_shutdown = shutdown.clone();
     let bg_alive = state.listener_alive.clone();
     let listener_handle = tokio::spawn(async move {
-        background::listener::start_listener(bg_pool, bg_config, bg_llm, bg_shutdown, bg_alive)
-            .await;
+        background::listener::start_listener(
+            bg_pool,
+            bg_config,
+            bg_llm,
+            bg_executor,
+            bg_vault,
+            bg_shutdown,
+            bg_alive,
+        )
+        .await;
     });
 
     let stale_pool = pool.clone();

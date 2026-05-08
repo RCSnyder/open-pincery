@@ -20,6 +20,24 @@ const INTERNAL_ONLY: &[&str] = &[
     "COMPOSE_AVAILABLE",
     // HOME is stdlib/cli convenience, not a product config.
     "HOME",
+    // AC-47 (v8): CLI-side only. NO_COLOR is the cross-ecosystem
+    // convention (https://no-color.org); we set it from --no-color
+    // and honour it in output::render_table. PCY_NO_TTY is a test-harness
+    // override that forces the non-TTY path in integration tests that
+    // spawn pcy as a subprocess without a real terminal. Neither is a
+    // server-side config knob and so neither belongs in .env.example.
+    "NO_COLOR",
+    "PCY_NO_TTY",
+    // AC-48 (v8): test-only override for the CLI config path. Real
+    // operators use XDG defaults; integration tests use this to point
+    // at a tempfile.
+    "PCY_CONFIG_PATH",
+    // AC-83 (G0a.3e): test-only knob read by pincery-init to simulate a
+    // PartiallyEnforced landlock status after a real successful install,
+    // so the require_fully_enforced rejection path can be exercised in
+    // integration tests. Only honoured when OPEN_PINCERY_ALLOW_UNSAFE=true;
+    // never set by operators.
+    "OPEN_PINCERY_INIT_FORCE_PARTIAL",
 ];
 
 fn scan_source_for_env_vars() -> HashSet<String> {
@@ -127,6 +145,10 @@ fn ac_29_env_example_has_no_orphan_entries() {
         "OPEN_PINCERY_HOST",
         "OPEN_PINCERY_PORT",
         "OPEN_PINCERY_BOOTSTRAP_TOKEN",
+        // Read via require_env("OPEN_PINCERY_VAULT_KEY") in config.rs,
+        // not via a literal env::var() call, so the static scanner
+        // misses it.
+        "OPEN_PINCERY_VAULT_KEY",
         "LLM_API_BASE_URL",
         "LLM_API_KEY",
         "LLM_MODEL",
@@ -140,6 +162,11 @@ fn ac_29_env_example_has_no_orphan_entries() {
         "STALE_WAKE_HOURS",
         "WAKE_SUMMARY_LIMIT",
         "EVENT_WINDOW_LIMIT",
+        // AC-79 (v9 Phase G G4d/G4e): both read via `env_or(...)` in
+        // config.rs (not literal `env::var()` call sites), so the static
+        // scanner misses them.
+        "OPEN_PINCERY_SCHEMA_INVALID_RETRY_CAP",
+        "OPEN_PINCERY_TOOL_CALL_RATE_LIMIT_PER_WAKE",
         "RUST_LOG",
     ];
     let known: HashSet<String> = source_keys

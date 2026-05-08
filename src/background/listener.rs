@@ -9,6 +9,8 @@ use tracing::{error, info, warn};
 use crate::config::Config;
 use crate::error::AppError;
 use crate::models::{agent, event};
+use crate::runtime::sandbox::ToolExecutor;
+use crate::runtime::vault::Vault;
 use crate::runtime::{drain, llm::LlmClient, maintenance, wake_loop};
 
 /// Spawn the LISTEN/NOTIFY handler that triggers wakes.
@@ -20,6 +22,8 @@ pub async fn start_listener(
     pool: PgPool,
     config: Arc<Config>,
     llm: Arc<LlmClient>,
+    executor: Arc<dyn ToolExecutor>,
+    vault: Arc<Vault>,
     shutdown: CancellationToken,
     alive: Arc<AtomicBool>,
 ) {
@@ -74,9 +78,11 @@ pub async fn start_listener(
                         let pool = pool.clone();
                         let config = config.clone();
                         let llm = llm.clone();
+                        let executor = executor.clone();
+                        let vault = vault.clone();
 
                         tokio::spawn(async move {
-                            if let Err(e) = handle_wake(pool, config, llm, agent_id).await {
+                            if let Err(e) = handle_wake(pool, config, llm, executor, vault, agent_id).await {
                                 error!(agent_id = %agent_id, error = %e, "Wake handler failed");
                             }
                         });
@@ -95,6 +101,8 @@ async fn handle_wake(
     pool: PgPool,
     config: Arc<Config>,
     llm: Arc<LlmClient>,
+    executor: Arc<dyn ToolExecutor>,
+    vault: Arc<Vault>,
     agent_id: uuid::Uuid,
 ) -> Result<(), AppError> {
     // AC-23: Enforce hard budget caps before CAS wake acquisition.
@@ -134,8 +142,15 @@ async fn handle_wake(
         return Ok(());
     }
 
-    // Attempt CAS acquisition
-    let acquired = agent::acquire_wake(&pool, agent_id).await?;
+    // AC-82 (T-AC82-2 / G7b): Attempt CAS acquisition into the
+    // fine-grained `WakeAcquiring` state. The legacy single-step
+    // `acquire_wake` (Resting → Awake) is replaced by the canonical
+    // chain `attempt_wake_acquire → wake_acquire_succeeds →
+    // prompt_assembly_completes`. The first hop fires here; the
+    // remaining two fire at the top of `run_wake_loop` so the wake_id
+    // and prompt context are minted in the same task that actually
+    // runs the loop body.
+    let acquired = agent::attempt_wake_acquire(&pool, agent_id).await?;
     let agent_data = match acquired {
         Some(a) => a,
         None => {
@@ -147,11 +162,28 @@ async fn handle_wake(
     let wake_id = agent_data.wake_id.unwrap();
     let wake_started_at = agent_data.wake_started_at.unwrap();
 
-    // Run wake loop
-    let _reason = wake_loop::run_wake_loop(&pool, &llm, &config, agent_id, wake_id).await?;
+    // AC-82 (T-AC82-3 / G7b): emit `lifecycle_transition` for the
+    // `AttemptWakeAcquire` canonical action. Pairs 1:1 with the CAS
+    // write above. Source = "runtime".
+    crate::runtime::lifecycle::emit(
+        &pool,
+        agent_id,
+        wake_id,
+        crate::models::agent::AgentStatus::DB_ASLEEP,
+        crate::models::agent::AgentStatus::DB_WAKE_ACQUIRING,
+        "AttemptWakeAcquire",
+    )
+    .await?;
 
-    // Transition to maintenance
-    agent::transition_to_maintenance(&pool, agent_id).await?;
+    // Run wake loop
+    //
+    // AC-82 (T-AC82-5 / G7d): `run_wake_loop` now owns the WakeEnding
+    // → Maintenance terminal CAS internally; the listener no longer
+    // calls `transition_to_maintenance` here. The agent is guaranteed
+    // to be in `Maintenance` on success.
+    let _reason =
+        wake_loop::run_wake_loop(&pool, &llm, &config, agent_id, wake_id, &executor, &vault)
+            .await?;
 
     // Run maintenance
     maintenance::run_maintenance(&pool, &llm, agent_id, wake_id).await?;
@@ -166,9 +198,19 @@ async fn handle_wake(
         if let (Some(new_wake_id), Some(_new_wake_started)) =
             (new_agent.wake_id, new_agent.wake_started_at)
         {
-            let _reason =
-                wake_loop::run_wake_loop(&pool, &llm, &config, agent_id, new_wake_id).await?;
-            agent::transition_to_maintenance(&pool, agent_id).await?;
+            // AC-82 (T-AC82-5 / G7d): same as primary call —
+            // `run_wake_loop` owns its own WakeEnding → Maintenance
+            // CAS for the drain re-entry too.
+            let _reason = wake_loop::run_wake_loop(
+                &pool,
+                &llm,
+                &config,
+                agent_id,
+                new_wake_id,
+                &executor,
+                &vault,
+            )
+            .await?;
             maintenance::run_maintenance(&pool, &llm, agent_id, new_wake_id).await?;
             // Final release — no further drain for simplicity in v1
             agent::release_to_asleep(&pool, agent_id).await?;

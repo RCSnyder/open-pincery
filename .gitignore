@@ -15,6 +15,19 @@ __pycache__/
 .env
 .DS_Store
 *.log
+*.stackdump
+
+# Local smoke-test session state (never commit — contains session tokens)
+.op-login.json
+.op-me.json
 
 # sqlx offline query data
 .sqlx/
+
+# TLC model-checker artifacts
+docs/input/states/
+**/*.toolbox/
+**/MC.tla
+**/MC.cfg
+**/MC.out
+tla2tools.jar

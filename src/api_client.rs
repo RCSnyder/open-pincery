@@ -154,4 +154,97 @@ impl ApiClient {
             .map_err(|e| AppError::Internal(format!("request failed: {e:?}")))?;
         Ok(resp.status())
     }
+
+    // --- AC-40 (v7): credential vault CLI support ---------------------
+
+    /// `GET /api/me` — returns `{user_id, workspace_id}` so the CLI can
+    /// discover the caller's workspace without a fresh bootstrap.
+    pub async fn me(&self) -> Result<Value, AppError> {
+        let req = self.http.get(format!("{}/api/me", self.base_url));
+        self.send_json(req, None).await
+    }
+
+    /// `POST /api/workspaces/{id}/credentials`
+    pub async fn create_credential(
+        &self,
+        workspace_id: &str,
+        name: &str,
+        value: &str,
+    ) -> Result<Value, AppError> {
+        let req = self.http.post(format!(
+            "{}/api/workspaces/{}/credentials",
+            self.base_url, workspace_id
+        ));
+        self.send_json(
+            req,
+            Some(serde_json::json!({ "name": name, "value": value })),
+        )
+        .await
+    }
+
+    /// `GET /api/workspaces/{id}/credentials`
+    pub async fn list_credentials(&self, workspace_id: &str) -> Result<Value, AppError> {
+        let req = self.http.get(format!(
+            "{}/api/workspaces/{}/credentials",
+            self.base_url, workspace_id
+        ));
+        self.send_json(req, None).await
+    }
+
+    /// `DELETE /api/workspaces/{id}/credentials/{name}` — returns 204
+    /// with no body; we return `Ok(())` on success and surface HTTP
+    /// errors as [`AppError::BadRequest`] / [`AppError::NotFound`].
+    pub async fn revoke_credential(&self, workspace_id: &str, name: &str) -> Result<(), AppError> {
+        let url = format!(
+            "{}/api/workspaces/{}/credentials/{}",
+            self.base_url, workspace_id, name
+        );
+        let req = self.http.delete(url);
+        let req = if let Some(token) = self.token.as_ref() {
+            req.bearer_auth(token)
+        } else {
+            req
+        };
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| AppError::Internal(format!("request failed: {e:?}")))?;
+        let status = resp.status();
+        if status == StatusCode::NO_CONTENT {
+            return Ok(());
+        }
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| AppError::Internal(format!("response read failed: {e}")))?;
+        if status == StatusCode::NOT_FOUND {
+            Err(AppError::NotFound(format!("credential '{name}' not found")))
+        } else {
+            Err(AppError::BadRequest(format!(
+                "HTTP {}: {}",
+                status.as_u16(),
+                text
+            )))
+        }
+    }
+
+    /// AC-78: `POST /api/audit/chain/verify` — verifies the chain for
+    /// every agent in the caller's workspace. Returns the full
+    /// response payload (`{ agents: [...], all_verified: bool }`).
+    pub async fn verify_chain_workspace(&self) -> Result<Value, AppError> {
+        let req = self
+            .http
+            .post(format!("{}/api/audit/chain/verify", self.base_url));
+        self.send_json(req, None).await
+    }
+
+    /// AC-78: `POST /api/audit/chain/verify/agents/{id}` — verifies a
+    /// single agent's chain in the caller's workspace.
+    pub async fn verify_chain_agent(&self, agent_id: &str) -> Result<Value, AppError> {
+        let req = self.http.post(format!(
+            "{}/api/audit/chain/verify/agents/{}",
+            self.base_url, agent_id
+        ));
+        self.send_json(req, None).await
+    }
 }

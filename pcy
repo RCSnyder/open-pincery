@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Thin wrapper around the pcy CLI that ships inside the app container.
+# Runs `pcy` in the running compose stack so you don't need a local
+# Rust/MSVC toolchain on Windows. Session config persists in the
+# `pcyconfig` named volume.
+#
+# Usage: ./pcy <subcommand> [args...]
+#   ./pcy login --bootstrap-token "$OPEN_PINCERY_BOOTSTRAP_TOKEN"
+#   ./pcy agent create scout
+#   ./pcy message <agent> "hello"
+#   ./pcy events <agent> --tail
+set -euo pipefail
+
+# Detect TTY: allocate one only when stdin+stdout are terminals so piping works.
+tty_flags="-T"
+if [ -t 0 ] && [ -t 1 ]; then
+  tty_flags=""
+fi
+
+exec docker compose exec $tty_flags app pcy "$@"
