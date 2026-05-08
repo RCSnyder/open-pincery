@@ -2547,3 +2547,19 @@
 - **AC coverage**: T-AC78-3, T-AC78-4, T-AC78-5, T-AC78-10 (full), T-AC78-11
 - **Retries**: 3
 - **Next**: G3c — pcy audit verify CLI (src/cli/audit.rs) + POST /api/audit/chain/verify (src/api/audit.rs, workspace-admin gated). Then G3d (startup verify hook, exit 5 on broken, OPEN_PINCERY_AUDIT_CHAIN_FLOOR escape hatch), G3e (docs + event-type lint + .env.example), then AC-78 close via REVIEW → RECONCILE → VERIFY.
+
+## BUILD AC-82 G7a — 2026-05-08 (slice: schema + enum + CAS helpers)
+
+- **Gate**: PASS (attempt 1)
+- **Evidence**:
+  - `cargo build --tests` clean against `CARGO_TARGET_DIR=/e/open-pincery-target` (3m11s cold; only pre-existing dead_code warnings).
+  - `cargo test --test agent_status_test`: 4/4 green (pure unit, no DB).
+  - `cargo test --test lifecycle_transition_test`: 3/3 green (DB-backed) — `cas_helpers_round_trip` drives the full 11-step canonical chain Resting→WakeAcquiring→PromptAssembling→Awake→ToolDispatching→ToolExecuting→ToolResultProcessing→MidWakeEventPolling→Awake→WakeEnding→Maintenance→Resting; `cas_helpers_refuse_wrong_state` pins the negative path; `enter_wake_ending_admissible_sources` pins the multi-source WHERE IN clause.
+  - Migration 20260507000001_agent_status_fine_grained.sql applies via `sqlx::migrate!()` in `tests/common::test_pool` — `force_status` succeeds against the widened CHECK constraint, proving the constraint admits all 10 values.
+- **Changes**:
+  - new: `migrations/20260507000001_agent_status_fine_grained.sql` (widen CHECK to 10 values).
+  - edit: `src/models/agent.rs` — 5 new variants (PromptAssembling, ToolDispatching, ToolExecuting, ToolResultProcessing, MidWakeEventPolling), 5 new DB_* constants, 9 new CAS helpers (attempt_wake_acquire, wake_acquire_succeeds, prompt_assembly_completes, enter_tool_dispatching, enter_tool_executing, enter_tool_result_processing, enter_mid_wake_event_polling, mid_wake_poll_finds_nothing, enter_wake_ending, wake_end_transitions_to_maintenance). Legacy `acquire_wake` / `drain_reacquire` / `transition_to_maintenance` retained — wake_loop callsite untouched this slice.
+  - edit: `tests/agent_status_test.rs` — round-trip and DB-string bijection asserts widened from 5 to 10 variants.
+  - new: `tests/lifecycle_transition_test.rs` — 3 tests pinning the CAS contract.
+- **Retries**: 0
+- **Next**: G7b — replace `acquire_wake` callsite in `src/background/listener.rs` + chain `attempt_wake_acquire → wake_acquire_succeeds → prompt_assembly_completes` in front of `run_wake_loop`; emit `lifecycle_transition` events for AttemptWakeAcquire / WakeAcquireSucceeds / PromptAssemblyCompletes with canonical_action JSON payload (AC-78 hash-chain transparency).
