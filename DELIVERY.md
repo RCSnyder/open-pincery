@@ -1,8 +1,12 @@
-# DELIVERY.md — Open Pincery v8.0
+# DELIVERY.md — Open Pincery v9.0
+
+## v9.0 Summary
+
+v9.0 is the security-and-correctness wave. It closes thirteen acceptance criteria identified by the v9 TLA+ + security audit: AC-53 (process sandbox — bubblewrap + seccomp + landlock + `pincery-init`), AC-76 (12-payload sandbox-escape suite live in CI), AC-77 (default-deny seccomp allowlist + `sandbox_blocked` SIGSYS event), AC-78 (per-agent SHA-256 event-log hash chain with `BEFORE INSERT` trigger, `pcy audit verify`, and startup verify gate that exits 5 on chain breakage), AC-79 (prompt-injection floor: untrusted-content delimiters, per-wake canary, JSON-Schema tool-call gate, per-wake tool-call rate limit), AC-80 (single-use TTL-bounded workspace-scoped capability nonces), AC-81 (TLA+ spec-coverage manifest + commit-msg hook), AC-82 (fine-grained ten-state wake lifecycle with CAS-only DB transitions and canonical-JSON `lifecycle_transition` events — the final v9.0 ship blocker), AC-83 (kernel-floor preflight at startup), AC-84 (kernel-floor library helper), AC-85/AC-86/AC-87 (sandbox hardening follow-ups), and AC-88 (devshell pin + parity tests). v8.0 agentic-harness CLI polish, v7 credential vault, v5 operator onramp, v4 self-host hardening, and the v1–v3 feature set carry forward unchanged. v9.0 ship gate **CLEAR** as of merge of PR #4 to `main` (2026-05-08).
 
 ## What Was Built
 
-A multi-agent platform runtime implementing the Open Pincery architecture: event-sourced agents with CAS lifecycle management, LLM-powered wake/sleep cycles, maintenance projections, HTTP API, graceful shutdown, Docker Compose deployment, API rate limiting, webhook ingress, agent management, structured JSON logging, Prometheus metrics, health/readiness split, CI pipeline, signed release artifacts with SBOMs, and operator runbooks. v4 adds self-host hardening: non-root container user, runtime budget-cap enforcement with transactional cost accounting, authenticated webhook-secret rotation, a `pcy` CLI binary, a vanilla-JS control plane UI, and a published v4 API stability contract. v7 adds an AES-256-GCM credential vault with reasoner-cooperative PLACEHOLDER dispatch. **v8.0 lands the agentic-harness CLI polish**: auto-generated OpenAPI, named connection contexts with `pcy whoami`, idempotent `pcy login`/`bootstrap`, JSON-by-default piped output (`--output`), shell completions (`pcy completion`), and a clap-tree naming lint that forced every subcommand to carry a real `about` description. Single-binary Rust server backed by PostgreSQL.
+A multi-agent platform runtime implementing the Open Pincery architecture: event-sourced agents with CAS lifecycle management, LLM-powered wake/sleep cycles, maintenance projections, HTTP API, graceful shutdown, Docker Compose deployment, API rate limiting, webhook ingress, agent management, structured JSON logging, Prometheus metrics, health/readiness split, CI pipeline, signed release artifacts with SBOMs, and operator runbooks. v4 adds self-host hardening: non-root container user, runtime budget-cap enforcement with transactional cost accounting, authenticated webhook-secret rotation, a `pcy` CLI binary, a vanilla-JS control plane UI, and a published v4 API stability contract. v7 adds an AES-256-GCM credential vault with reasoner-cooperative PLACEHOLDER dispatch. **v8.0 lands the agentic-harness CLI polish**: auto-generated OpenAPI, named connection contexts with `pcy whoami`, idempotent `pcy login`/`bootstrap`, JSON-by-default piped output (`--output`), shell completions (`pcy completion`), and a clap-tree naming lint that forced every subcommand to carry a real `about` description. **v9.0 lands the security-and-correctness wave** described in the v9.0 Summary above. Single-binary Rust server backed by PostgreSQL.
 
 ## How to Use It
 
@@ -106,7 +110,9 @@ At startup the server performs a fail-closed preflight for these requirements. I
 - **New required env var**: `OPEN_PINCERY_VAULT_KEY` — 32 random bytes, base64-encoded. Generate once with `openssl rand -base64 32`; store alongside `OPEN_PINCERY_BOOTSTRAP_TOKEN`; losing it means losing access to every stored credential. Rotation requires re-sealing — deferred to v8.
 - **New CLI verbs**: `pcy credential add|list|revoke`. The `add` path prompts for the value via rpassword and never touches argv/history.
 - **New tool available to agents**: `list_credentials` (names only). The reasoner is prompted to use `PLACEHOLDER:<name>` in `env` on any shell call instead of ever pasting a secret value.
+<!-- historical -->
 - **Zero runtime substitution outside dispatch**: There is no network-level redaction or proxy. If an agent names a credential and also echoes the raw value in its own text, the harness cannot prevent that — the v2 prompt makes this refusal contract explicit. Cryptographic isolation of secrets from the reasoner (Zerobox-style) is the v8/v9 step.
+<!-- /historical -->
 - **Additive migrations**: Three new migration files; no v6 row is mutated.
 
 ## v8.0 Changes (from v7) — Agentic-Harness CLI Polish
@@ -201,7 +207,9 @@ This wave adds the seven P0 acceptance criteria identified by the v9 TLA+ + secu
 
 ## Known Limitations
 
+<!-- historical -->
 - **Host-level sandbox only**: v6 ships env-clear + tempdir + 30s timeout + sudo-token rejection via `ProcessExecutor`. This is defense-in-depth, not isolation — a process running as the `pcy` user can still read any file that user can read. True container-level isolation (Zerobox) is on the roadmap.
+<!-- /historical -->
 - **Sudo reject is token-based, not path-based**: commands containing a `sudo` token are rejected pre-spawn; commands invoking `/usr/bin/sudo` by absolute path are not caught by the tokeniser and rely on `env_clear` + tempdir + no-tty for defense. Documented in `src/runtime/sandbox.rs`.
 - **Credential substitution is reasoner-cooperative**: v7 protects against _accidental_ leakage through event/log/argv paths and against unauthorised dispatch spawns, but a malicious or confused reasoner that types a PLACEHOLDER value into plaintext content will still produce plaintext. Cryptographic isolation (v8/v9) is the structural fix.
 - **Vault master-key rotation not yet implemented**: `OPEN_PINCERY_VAULT_KEY` is single-valued; re-sealing on rotation is a v8 item.

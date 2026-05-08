@@ -2686,3 +2686,18 @@
 - **Sanctioned new crates**: tar, flate2 (AC-91 only)
 - **Retries**: 0
 - **Next**: BUILD V91-S1 = AC-94 honesty pass (0.5d) — README five-row table + DELIVERY.md heading bump
+
+## BUILD V91-S1 / AC-94 — honesty pass — 2026-05-08
+
+- **Phase**: BUILD slice 1 of 6 (v9.1)
+- **AC**: AC-94 (README five-row security table + DELIVERY.md heading bump to v9.0)
+- **Gate**: post-build PASS (attempt 1)
+- **Evidence**: `cargo test --test honesty_pass_test` → 4/4 passed (delivery_heading_is_v9_0, readme_contains_five_row_security_table, no_aspirational_vocabulary_outside_historical_markers, security_table_acs_are_shipped_per_scope); clippy --tests --no-deps shows no new warnings (2 pre-existing dead_code/unused warnings unchanged).
+- **Changed**:
+  - `README.md` — replaced six-layer numbered list with five-row Security Model table mapping mechanism → status → AC; updated security-architecture.md description; wrapped Zerobox-terminology aside in `<!-- historical -->` markers
+  - `DELIVERY.md` — heading bumped to `# DELIVERY.md — Open Pincery v9.0`; new `## v9.0 Summary` lead paragraph above `## What Was Built` listing AC-53/76..88; two legacy Zerobox-mentioning bullets wrapped in `<!-- historical -->` markers
+  - `tests/honesty_pass_test.rs` (new) — 4 tests with `strip_historical_blocks` helper that requires full-line `<!-- historical -->` fences (debugged once: an in-body backtick mention of the marker string was triggering an over-eager strip, fixed by tightening fence detection to whole-line marker matches)
+- **Not touched**: any source under `src/`, any migration, any other test, no event types, no Cargo.toml deps.
+- **Concerns**: `security_table_acs_are_shipped_per_scope` is a coarse cross-doc lint (substring match against scope.md). It cannot detect a typo where the same wrong AC appears in both files; it can only detect a typo unique to README. Acceptable for v9.1 — RECONCILE will catch deeper drift.
+- **Retries**: 0 (build), 1 (test fence-detection bug, fixed in same slice)
+- **Next**: BUILD V91-S2 = AC-89 `pcy init` (1d budget). Implements clap subcommand `Init { out: PathBuf, force: bool }` in `src/cli/commands/init.rs`; uses `rand_core::OsRng` for 32-byte admin seed (hex) and 32-byte vault key (base64); reuses `rpassword` for hidden LLM key prompt; writes `.env` with `0600` on Unix; refuses overwrite without `--force`; never echoes secrets to stdout. Test: `tests/cli_init_test.rs`.
