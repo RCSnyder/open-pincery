@@ -156,7 +156,7 @@ fn table_well_formed() {
         !rows.is_empty(),
         "spec_coverage.md produced zero parseable rows"
     );
-    for (ac, _actions) in &rows {
+    for ac in rows.keys() {
         assert!(ac.starts_with("AC-"), "row id {ac} does not start with AC-");
         let n: u32 = ac
             .trim_start_matches("AC-")
