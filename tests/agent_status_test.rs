@@ -1,8 +1,12 @@
-//! AC-34 (v6): round-trip tests for `AgentStatus` <-> DB string conversion.
+//! AC-34 (v6) + AC-82 (v9): round-trip tests for `AgentStatus` <-> DB
+//! string conversion.
 //!
 //! These are pure unit tests — no DB required. They pin the invariant that
-//! `from_db_str` / `as_db_str` form a bijection for the five valid values
-//! and that the DB strings match the TLA+ specification names exactly.
+//! `from_db_str` / `as_db_str` form a bijection for every valid value and
+//! that the DB strings match the TLA+ specification names exactly.
+//! AC-82 widened the enum from 5 to 10 variants; this file is the
+//! canonical compile-time witness that every variant has a stable
+//! string and is a reachable round-trip.
 
 use open_pincery::models::agent::AgentStatus;
 
@@ -11,7 +15,12 @@ fn round_trip_all_variants() {
     for s in [
         AgentStatus::Resting,
         AgentStatus::WakeAcquiring,
+        AgentStatus::PromptAssembling,
         AgentStatus::Awake,
+        AgentStatus::ToolDispatching,
+        AgentStatus::ToolExecuting,
+        AgentStatus::ToolResultProcessing,
+        AgentStatus::MidWakeEventPolling,
         AgentStatus::WakeEnding,
         AgentStatus::Maintenance,
     ] {
@@ -24,12 +33,24 @@ fn round_trip_all_variants() {
 
 #[test]
 fn db_strings_match_tla_spec_names() {
-    // If these strings change, migration 20260420000001 and the agents
-    // CHECK constraint must change with them. Pin them here so drift is
-    // a compile/test failure, not a runtime corruption.
+    // If these strings change, migrations 20260420000001 and
+    // 20260507000001 plus the agents CHECK constraint must change with
+    // them. Pin them here so drift is a compile/test failure, not a
+    // runtime corruption.
     assert_eq!(AgentStatus::DB_ASLEEP, "asleep");
     assert_eq!(AgentStatus::DB_WAKE_ACQUIRING, "wake_acquiring");
+    assert_eq!(AgentStatus::DB_PROMPT_ASSEMBLING, "prompt_assembling");
     assert_eq!(AgentStatus::DB_AWAKE, "awake");
+    assert_eq!(AgentStatus::DB_TOOL_DISPATCHING, "tool_dispatching");
+    assert_eq!(AgentStatus::DB_TOOL_EXECUTING, "tool_executing");
+    assert_eq!(
+        AgentStatus::DB_TOOL_RESULT_PROCESSING,
+        "tool_result_processing"
+    );
+    assert_eq!(
+        AgentStatus::DB_MID_WAKE_EVENT_POLLING,
+        "mid_wake_event_polling"
+    );
     assert_eq!(AgentStatus::DB_WAKE_ENDING, "wake_ending");
     assert_eq!(AgentStatus::DB_MAINTENANCE, "maintenance");
 }
