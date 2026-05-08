@@ -245,3 +245,322 @@ async fn enter_wake_ending_admissible_sources() {
         assert!(r.is_none(), "enter_wake_ending must refuse {src:?}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// AC-82 review-fix (Critical): T-AC82-5 end-to-end DB scenarios.
+//
+// Drives the real `run_wake_loop` against a wiremock LLM endpoint and
+// reads `events.event_type = 'lifecycle_transition'` rows for the
+// driven wake_id, asserting the five invariants from readiness.md
+// T-AC82-5:
+//
+//   1. The emitted canonical_action sequence matches a static chain
+//      drawn from AC-82's pipe-list in spec_coverage.md.
+//   2. The chain covers the agent's entire timeline (no missing CAS
+//      sites — exactly one event per fine-grained CAS).
+//   3. Successive (prev_to, next_from) pairs agree byte-for-byte —
+//      no scope-reduction by hard-coding `from = 'awake'` (this is
+//      what catches Required #1 mechanically).
+//   4. Exactly one row per CAS — no dup-emits, no missed CASes.
+//   5. Exactly one TerminalEndsWake event per wake (this is the
+//      runtime witness for Inv_TerminalSuccession).
+//
+// We additionally read back the `content` column and parse it as
+// canonical JSON to confirm byte-stable shape and key ordering as
+// pinned by `src/runtime/lifecycle.rs`.
+// ---------------------------------------------------------------------------
+
+use open_pincery::config::Config;
+use open_pincery::models::event;
+use open_pincery::runtime::{
+    llm::LlmClient,
+    sandbox::{ProcessExecutor, ToolExecutor},
+    vault::Vault,
+    wake_loop,
+};
+use std::sync::Arc;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+fn lifecycle_test_config() -> Config {
+    Config {
+        database_url: String::new(),
+        host: "127.0.0.1".into(),
+        port: 0,
+        bootstrap_token: "test".into(),
+        llm_api_base_url: String::new(),
+        llm_api_key: "fake".into(),
+        llm_model: "test-model".into(),
+        llm_maintenance_model: "test-model".into(),
+        max_prompt_chars: 100_000,
+        iteration_cap: 50,
+        schema_invalid_retry_cap: 3,
+        tool_call_rate_limit_per_wake: 32,
+        stale_wake_hours: 2,
+        wake_summary_limit: 20,
+        event_window_limit: 200,
+        vault_key_b64: common::TEST_VAULT_KEY_B64.into(),
+        sandbox: open_pincery::config::ResolvedSandboxMode::default(),
+    }
+}
+
+/// Read all `lifecycle_transition` events for one wake, ordered by
+/// id (insertion order). Returns (canonical_action, from, to) tuples
+/// extracted from the canonical-JSON `content` column.
+async fn read_transitions(pool: &PgPool, wake_id: uuid::Uuid) -> Vec<(String, String, String)> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT content FROM events
+         WHERE wake_id = $1 AND event_type = 'lifecycle_transition'
+         ORDER BY created_at, ctid",
+    )
+    .bind(wake_id)
+    .fetch_all(pool)
+    .await
+    .expect("read lifecycle_transition rows");
+    rows.into_iter()
+        .map(|(content,)| {
+            let v: serde_json::Value =
+                serde_json::from_str(&content).expect("content is canonical JSON");
+            let action = v["canonical_action"].as_str().unwrap().to_string();
+            let from = v["from"].as_str().unwrap().to_string();
+            let to = v["to"].as_str().unwrap().to_string();
+            (action, from, to)
+        })
+        .collect()
+}
+
+/// T-AC82-5 scenario: one-tool-call wake terminating via `sleep`.
+/// Exercises the entry chain, one iteration of the tool loop, and
+/// the Sleep early-return terminal arm. Asserts the canonical
+/// transition chain matches AC-82's pipe-list and that
+/// Inv_TerminalSuccession holds (exactly one TerminalEndsWake).
+#[tokio::test]
+async fn wake_loop_emits_canonical_lifecycle_chain_for_sleep_terminal() {
+    let pool = common::test_pool().await;
+    let a = make_agent(&pool, "lifecycle-sleep").await;
+
+    event::append_event(
+        &pool,
+        a.id,
+        "message_received",
+        "human",
+        None,
+        None,
+        None,
+        None,
+        Some("hello"),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Drive the listener-side entry CAS so we have a wake_id.
+    // run_wake_loop expects status = wake_acquiring and emits
+    // WakeAcquireSucceeds + PromptAssemblyCompletes itself.
+    let acquired = agent::attempt_wake_acquire(&pool, a.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let wake_id = acquired.wake_id.unwrap();
+
+    // LLM returns a single `sleep` tool_call.
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "test-1",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": { "name": "sleep", "arguments": "{}" }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 }
+        })))
+        .mount(&mock)
+        .await;
+
+    let config = lifecycle_test_config();
+    let llm = LlmClient::new(
+        mock.uri(),
+        "fake-key".into(),
+        "test-model".into(),
+        "test-model".into(),
+    );
+    let executor: Arc<dyn ToolExecutor> = Arc::new(ProcessExecutor);
+    let vault = Arc::new(Vault::from_base64(common::TEST_VAULT_KEY_B64).unwrap());
+    let reason = wake_loop::run_wake_loop(&pool, &llm, &config, a.id, wake_id, &executor, &vault)
+        .await
+        .unwrap();
+    assert_eq!(reason, "sleep");
+
+    let chain = read_transitions(&pool, wake_id).await;
+
+    // --- Invariant #1 + #4: exact canonical chain, one event per CAS.
+    let expected: Vec<(&str, &str, &str)> = vec![
+        // Entry chain (run_wake_loop top): wake_acquiring -> prompt_assembling -> awake
+        ("WakeAcquireSucceeds", "wake_acquiring", "prompt_assembling"),
+        ("PromptAssemblyCompletes", "prompt_assembling", "awake"),
+        // Tool loop iteration #1: awake -> tool_dispatching -> tool_executing -> tool_result_processing
+        ("ToolDispatches", "awake", "tool_dispatching"),
+        ("AuthorizeExecution", "tool_dispatching", "tool_executing"),
+        (
+            "ReceiveToolResult",
+            "tool_executing",
+            "tool_result_processing",
+        ),
+        // Sleep early-return terminal: tool_result_processing -> wake_ending -> maintenance
+        ("TerminalEndsWake", "tool_result_processing", "wake_ending"),
+        (
+            "WakeEndTransitionsToMaintenance",
+            "wake_ending",
+            "maintenance",
+        ),
+    ];
+    assert_eq!(
+        chain.len(),
+        expected.len(),
+        "AC-82 T-AC82-5 invariant #4: exactly one lifecycle_transition per CAS. Got chain: {chain:?}"
+    );
+    for (i, ((a_act, a_from, a_to), (e_act, e_from, e_to))) in
+        chain.iter().zip(expected.iter()).enumerate()
+    {
+        assert_eq!(
+            a_act, e_act,
+            "step {i} canonical_action mismatch: chain={chain:?}"
+        );
+        assert_eq!(a_from, e_from, "step {i} from mismatch: chain={chain:?}");
+        assert_eq!(a_to, e_to, "step {i} to mismatch: chain={chain:?}");
+    }
+
+    // --- Invariant #3: (prev.to == next.from) chain agreement.
+    for i in 1..chain.len() {
+        assert_eq!(
+            chain[i - 1].2,
+            chain[i].1,
+            "AC-82 T-AC82-5 invariant #3 (prev.to == next.from) violated at step {i}: chain={chain:?}"
+        );
+    }
+
+    // --- Invariant #5 (Inv_TerminalSuccession): exactly one TerminalEndsWake.
+    let terminal_count = chain
+        .iter()
+        .filter(|(act, _, _)| act == "TerminalEndsWake")
+        .count();
+    assert_eq!(
+        terminal_count, 1,
+        "AC-82 Inv_TerminalSuccession violated: expected exactly one TerminalEndsWake, got {terminal_count}: chain={chain:?}"
+    );
+    let term_to_maint = chain
+        .iter()
+        .filter(|(act, _, _)| act == "WakeEndTransitionsToMaintenance")
+        .count();
+    assert_eq!(
+        term_to_maint, 1,
+        "AC-82 Inv_TerminalSuccession violated: expected exactly one WakeEndTransitionsToMaintenance, got {term_to_maint}"
+    );
+}
+
+/// T-AC82-5 scenario: iteration-cap termination through the bottom
+/// terminal block (NOT the Sleep early-return arm). This is the
+/// scenario that surfaces Required #1 (false-`from` regression):
+/// the bottom block must record the actual prior status (`awake`
+/// for the iteration_cap path), not a hard-coded label. Combined
+/// with invariant #3 above, any future regression of the bottom
+/// block's `from` field will fail the chain-agreement assertion.
+#[tokio::test]
+async fn wake_loop_iteration_cap_terminal_records_actual_prior_status() {
+    let pool = common::test_pool().await;
+    let a = make_agent(&pool, "lifecycle-iter-cap").await;
+
+    event::append_event(
+        &pool,
+        a.id,
+        "message_received",
+        "human",
+        None,
+        None,
+        None,
+        None,
+        Some("hello"),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let acquired = agent::attempt_wake_acquire(&pool, a.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let wake_id = acquired.wake_id.unwrap();
+
+    // Pre-set the iteration count to the cap so the loop terminates
+    // at the top of its first iteration (after entry chain) without
+    // calling the LLM. The break path lands the agent in `awake`,
+    // and the bottom-block `enter_wake_ending` must record `from =
+    // 'awake'` (NOT a hard-coded label).
+    for _ in 0..3 {
+        agent::increment_iteration(&pool, a.id).await.unwrap();
+    }
+
+    let mock = MockServer::start().await;
+    let config = Config {
+        iteration_cap: 3,
+        ..lifecycle_test_config()
+    };
+    let llm = LlmClient::new(
+        mock.uri(),
+        "fake-key".into(),
+        "test-model".into(),
+        "test-model".into(),
+    );
+    let executor: Arc<dyn ToolExecutor> = Arc::new(ProcessExecutor);
+    let vault = Arc::new(Vault::from_base64(common::TEST_VAULT_KEY_B64).unwrap());
+    let reason = wake_loop::run_wake_loop(&pool, &llm, &config, a.id, wake_id, &executor, &vault)
+        .await
+        .unwrap();
+    assert_eq!(reason, "iteration_cap");
+
+    let chain = read_transitions(&pool, wake_id).await;
+
+    // Entry chain + bottom terminal chain. No tool-loop events
+    // because iteration cap hits before the tool loop runs.
+    let expected: Vec<(&str, &str, &str)> = vec![
+        ("WakeAcquireSucceeds", "wake_acquiring", "prompt_assembling"),
+        ("PromptAssemblyCompletes", "prompt_assembling", "awake"),
+        ("TerminalEndsWake", "awake", "wake_ending"),
+        (
+            "WakeEndTransitionsToMaintenance",
+            "wake_ending",
+            "maintenance",
+        ),
+    ];
+    assert_eq!(
+        chain.len(),
+        expected.len(),
+        "iteration_cap chain length mismatch: chain={chain:?}"
+    );
+    for (i, ((a_act, a_from, a_to), (e_act, e_from, e_to))) in
+        chain.iter().zip(expected.iter()).enumerate()
+    {
+        assert_eq!(a_act, e_act, "step {i} action: chain={chain:?}");
+        assert_eq!(a_from, e_from, "step {i} from (Required #1 regression check — bottom block must record actual prior status): chain={chain:?}");
+        assert_eq!(a_to, e_to, "step {i} to: chain={chain:?}");
+    }
+
+    // (prev.to == next.from) — would catch any false `from`
+    // hard-code.
+    for i in 1..chain.len() {
+        assert_eq!(
+            chain[i - 1].2,
+            chain[i].1,
+            "chain agreement violated at step {i}: chain={chain:?}"
+        );
+    }
+}

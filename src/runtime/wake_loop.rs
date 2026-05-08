@@ -714,6 +714,21 @@ pub async fn run_wake_loop(
     // The multi-source `enter_wake_ending` CAS admits all five live
     // states. The Sleep early-return path emits its own terminal
     // chain inline above and never reaches this block.
+    //
+    // AC-82 review-fix (Required #1): Read the actual prior status
+    // before the CAS so the emitted `lifecycle_transition` records
+    // the real `from` (one of awake | tool_dispatching |
+    // tool_executing | tool_result_processing |
+    // mid_wake_event_polling), not a hard-coded label. There is no
+    // racing writer for these five states inside this code path —
+    // only run_wake_loop transitions out of them, and we own the
+    // wake — so the SELECT-then-UPDATE window is benign.
+    let prior_status = agent::get_agent(pool, agent_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!("AC-82: agent {agent_id} missing at wake terminal"))
+        })?
+        .status;
     agent::enter_wake_ending(pool, agent_id)
         .await?
         .ok_or_else(|| {
@@ -725,16 +740,7 @@ pub async fn run_wake_loop(
         pool,
         agent_id,
         wake_id,
-        // The `from` here is best-effort: the multi-source CAS
-        // accepts five sources, but the canonical-JSON event is a
-        // single row so we record `awake` as the canonical label
-        // covering the dominant break path. T-AC82-4 only requires
-        // one `lifecycle_transition(*, wake_ending, TerminalEndsWake)`
-        // per terminal; the prior step's event chain (one of
-        // ToolDispatches / AuthorizeExecution / ReceiveToolResult /
-        // ToolResultProcessedToolLoop / MidWakePollFindsNothing)
-        // already pinpoints the actual prior state.
-        AgentStatus::DB_AWAKE,
+        &prior_status,
         AgentStatus::DB_WAKE_ENDING,
         "TerminalEndsWake",
     )

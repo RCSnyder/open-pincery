@@ -552,14 +552,31 @@ pub async fn increment_iteration(pool: &PgPool, agent_id: Uuid) -> Result<i32, A
     Ok(row)
 }
 
-/// Find agents stuck in Awake/Maintenance past the stale threshold.
+/// Find agents stuck in any non-terminal wake state past the stale
+/// threshold. AC-82 review-fix (Required #3): widened from
+/// `(awake|maintenance)` to the full live-wake set so a transient
+/// DB failure between fine-grained CASes (e.g., between
+/// `attempt_wake_acquire` and `wake_acquire_succeeds`) cannot leave
+/// an agent permanently wedged invisible to stale recovery.
 pub async fn find_stale_agents(pool: &PgPool, stale_hours: i64) -> Result<Vec<Agent>, AppError> {
     let sql = format!(
         "SELECT * FROM agents
-         WHERE status IN ('{awake}', '{maintenance}')
+         WHERE status IN (
+             '{wake_acquiring}', '{prompt_assembling}', '{awake}',
+             '{tool_dispatching}', '{tool_executing}',
+             '{tool_result_processing}', '{mid_wake_event_polling}',
+             '{wake_ending}', '{maintenance}'
+         )
            AND wake_started_at < NOW() - make_interval(hours => $1::int)
         ",
+        wake_acquiring = AgentStatus::DB_WAKE_ACQUIRING,
+        prompt_assembling = AgentStatus::DB_PROMPT_ASSEMBLING,
         awake = AgentStatus::DB_AWAKE,
+        tool_dispatching = AgentStatus::DB_TOOL_DISPATCHING,
+        tool_executing = AgentStatus::DB_TOOL_EXECUTING,
+        tool_result_processing = AgentStatus::DB_TOOL_RESULT_PROCESSING,
+        mid_wake_event_polling = AgentStatus::DB_MID_WAKE_EVENT_POLLING,
+        wake_ending = AgentStatus::DB_WAKE_ENDING,
         maintenance = AgentStatus::DB_MAINTENANCE,
     );
     let agents = sqlx::query_as::<_, Agent>(&sql)
@@ -569,7 +586,10 @@ pub async fn find_stale_agents(pool: &PgPool, stale_hours: i64) -> Result<Vec<Ag
     Ok(agents)
 }
 
-/// Force-release a stale agent back to Resting.
+/// Force-release a stale agent back to Resting from any non-terminal
+/// wake state. AC-82 review-fix (Required #3): widened to admit the
+/// full fine-grained live-wake set so stale recovery can unwedge any
+/// of the seven states a wake can transiently inhabit.
 pub async fn force_release(pool: &PgPool, agent_id: Uuid) -> Result<(), AppError> {
     let sql = format!(
         "UPDATE agents
@@ -578,9 +598,21 @@ pub async fn force_release(pool: &PgPool, agent_id: Uuid) -> Result<(), AppError
              wake_started_at = NULL,
              wake_iteration_count = 0
          WHERE id = $1
-           AND status IN ('{awake}', '{maintenance}')",
+           AND status IN (
+             '{wake_acquiring}', '{prompt_assembling}', '{awake}',
+             '{tool_dispatching}', '{tool_executing}',
+             '{tool_result_processing}', '{mid_wake_event_polling}',
+             '{wake_ending}', '{maintenance}'
+           )",
         asleep = AgentStatus::DB_ASLEEP,
+        wake_acquiring = AgentStatus::DB_WAKE_ACQUIRING,
+        prompt_assembling = AgentStatus::DB_PROMPT_ASSEMBLING,
         awake = AgentStatus::DB_AWAKE,
+        tool_dispatching = AgentStatus::DB_TOOL_DISPATCHING,
+        tool_executing = AgentStatus::DB_TOOL_EXECUTING,
+        tool_result_processing = AgentStatus::DB_TOOL_RESULT_PROCESSING,
+        mid_wake_event_polling = AgentStatus::DB_MID_WAKE_EVENT_POLLING,
+        wake_ending = AgentStatus::DB_WAKE_ENDING,
         maintenance = AgentStatus::DB_MAINTENANCE,
     );
     sqlx::query(&sql).bind(agent_id).execute(pool).await?;

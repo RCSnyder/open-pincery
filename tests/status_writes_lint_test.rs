@@ -35,7 +35,7 @@ const FORBIDDEN_NEEDLE: &str = "update agents set status";
 #[test]
 fn assert_status_writes_are_cas_only() {
     let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut offenders: Vec<(PathBuf, usize, String)> = Vec::new();
+    let mut offenders: Vec<String> = Vec::new();
 
     walk(&src_root, &mut |path| {
         let rel = path
@@ -53,17 +53,20 @@ fn assert_status_writes_are_cas_only() {
             Ok(b) => b,
             Err(_) => return,
         };
-        // Whitespace-normalize each line so "UPDATE agents\n  SET status"
-        // and "UPDATE  agents  SET  status" both match.
-        for (idx, line) in body.lines().enumerate() {
-            let normalized = line
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .to_lowercase();
-            if normalized.contains(FORBIDDEN_NEEDLE) {
-                offenders.push((path.to_path_buf(), idx + 1, line.trim().to_string()));
-            }
+        // AC-82 review-fix (Required #2): normalize the WHOLE file
+        // (collapse all whitespace including newlines to single
+        // spaces, lowercase) before searching, so the multi-line
+        // shape `UPDATE agents\n    SET status = ...` (used by
+        // every CAS helper in agent.rs) is also caught. A line-scoped
+        // lint would miss any future drive-by caller copying that
+        // idiom into another module, defeating R-AC82-3.
+        let normalized = body
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        if normalized.contains(FORBIDDEN_NEEDLE) {
+            offenders.push(rel.clone());
         }
     });
 
