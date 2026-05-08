@@ -1,5 +1,16 @@
 # Open Pincery — Experiment Log
 
+## DEPLOY — AC-81 closed — 2026-05-07T
+
+- **Gate**: PASS (post-deploy, attempt 1)
+- **VERIFY**: PASS @ f8da9f2 (independent verify agent — 10/10 AC-81 tests green; 4 manual end-to-end hook scenarios behave correctly; lint catches injected typo `AuthorizeExcution`; devshell installer proven idempotent and customization-preserving)
+- **CI evidence**: run 25532135576 GREEN on commit 727a341 (rustfmt, clippy, cargo deny, cargo test, sandbox real-bwrap smoke). HEAD f8da9f2 diff vs 727a341 is scaffolding-doc-only.
+- **AC coverage**: T-AC81-1..5 all verified
+- **DELIVERY.md**: entry already present from BUILD commit e6364f6 (G6a..G6e summary). No further edit required.
+- **v9 ship-gate status**: AC-76, AC-77, AC-78, AC-79, AC-80, AC-81 closed; AC-82 (fine-grained AgentStatus lifecycle) is the only remaining v9.0 ship blocker.
+- **Retries**: 0
+- **Next**: AC-82 ANALYZE → BUILD → REVIEW → RECONCILE → VERIFY → DEPLOY → final PR #4 integration.
+
 ## RECONCILE — AC-81 — 2026-05-07T (post-build, post-CI-green)
 
 - **Trigger**: User-requested 7-axis reconcile after AC-81 BUILD closed CI-green at `727a341` on `v6-01_implementation` (CI run 25532135576: rustfmt, clippy, cargo deny, cargo test, sandbox real-bwrap smoke all green). AC-81 phases (ANALYZE `85f7b39`, BUILD `e6364f6`, clippy fix `727a341`) had not been individually logged — log.md jumped from AC-80 VERIFY close straight to this reconcile.
