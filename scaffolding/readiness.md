@@ -1,15 +1,349 @@
 # Readiness: Open Pincery — current slice pointer
 
-> Current admission gate: **Phase G Slice G3 / AC-78 (Event-Log Hash
-> Chain — make `Inv_AuditChainBeforeExecution` real)**. The AC-78
-> addendum is appended below the AC-77 / G2 addendum that preceded it.
-> AC-77 admission landed at `1743aa7` on `v6-01_implementation`; AC-76
-> closed at 12/12 on 2026-04-30 (CI run `25197562247`) — all four
-> payload categories (FS, privesc, resource, network) runtime-verified.
-> G1b (privesc) closed CI-green at `8935fd7` on 2026-04-29; its
-> addendum is retained verbatim further down. G1a (FS), G1c (resource),
-> G1d (network), and G0f / AC-88 addenda are all retained as historical
-> record.
+> Current admission gate: **Phase G Slice G7 / AC-82 (Fire Reserved
+> Lifecycle States — align `AgentStatus` with TLA+)**. AC-82 is the
+> final v9.0 ship blocker: AC-76, AC-77, AC-78, AC-79, AC-80, and
+> AC-81 are closed on `v6-01_implementation`. The AC-82 addendum is
+> appended directly below this pointer; previous addenda (AC-78, AC-77,
+> AC-76 G1a–G1d, AC-88 / G0f, AC-83 / G0a, etc.) are retained verbatim
+> as historical record.
+
+---
+
+# Readiness: Open Pincery — v9 Phase G Slice G7 (AC-82 Fire Reserved Lifecycle States)
+
+> Final v9.0 ship blocker. v6 AC-34 shipped a typed `AgentStatus` enum
+> with two of the seven TLA+-named reserved variants
+> (`WakeAcquiring`, `WakeEnding`); the other five
+> (`PromptAssembling`, `ToolDispatching`, `ToolExecuting`,
+> `ToolResultProcessing`, `MidWakeEventPolling`) named in scope.md
+> AC-82 are NOT in the Rust enum or the DB CHECK constraint today —
+> see C-AC82-1. The runtime jumps directly `Resting → Awake →
+> Maintenance → Resting`, so `Inv_ToolCallRequiresBinding` and
+> `Inv_TerminalSuccession` are model-proved but product-untested.
+> AC-82 wires every fine-grained state into real CAS transitions in
+> `src/runtime/wake_loop.rs` (the production wake-loop module — scope
+> says `wake.rs`; see C-AC82-2), persists each transition to
+> `agents.status`, emits one `lifecycle_transition` event per CAS
+> write, and adds `tests/lifecycle_transition_test.rs` asserting every
+> observed DB-timeline transition matches a canonical TLA+ action from
+> `scaffolding/spec_coverage.md` AC-82's pipe-list.
+
+## Verdict
+
+READY for Slice G7 / AC-82. Every sub-claim has a planned test and
+runtime proof; the two clarifications (C-AC82-1, C-AC82-2) carry
+documented defaults that BUILD may execute without further user
+input and do not change the pass/fail meaning of any AC-82 sub-claim.
+
+## Truths
+
+- **T-AC82-1** The full set of `AgentStatus` variants written by the
+  runtime after AC-82 is exactly:
+  `Resting`, `WakeAcquiring`, `PromptAssembling`, `Awake`,
+  `ToolDispatching`, `ToolExecuting`, `ToolResultProcessing`,
+  `MidWakeEventPolling`, `WakeEnding`, `Maintenance`. Each variant has
+  a stable `DB_*` string constant in `src/models/agent.rs` matching
+  the spec name in snake_case (`prompt_assembling`, `tool_dispatching`,
+  `tool_executing`, `tool_result_processing`, `mid_wake_event_polling`).
+  The DB CHECK constraint on `agents.status` is widened in a new
+  forward-only migration (`migrations/20260507000001_agent_status_fine_grained.sql`)
+  to admit the five additional values; existing rows are not mutated.
+- **T-AC82-2** Each AC-82 transition is a single CAS UPDATE in
+  `src/models/agent.rs` whose `WHERE` clause names the previous
+  variant explicitly (mirroring the existing `acquire_wake` /
+  `transition_to_maintenance` / `release_to_asleep` /
+  `drain_reacquire` pattern). A failed CAS (zero rows updated)
+  surfaces as `Ok(None)` and the wake loop terminates the iteration
+  with an `AppError::Conflict` — never a silent fall-through. No
+  status field is mutated outside one of these named CAS helpers
+  (verified by a grep-style lint in
+  `tests/lifecycle_transition_test.rs::assert_status_writes_are_cas_only`).
+- **T-AC82-3** Each successful CAS append-emits exactly one
+  `lifecycle_transition` event in the same async function before
+  returning. Event payload (in `events.content`) is canonical JSON:
+  `{"from":<prev_db_str>,"to":<next_db_str>,"canonical_action":<TLA+ action name>,"wake_id":<uuid|null>}`.
+  `event_type = "lifecycle_transition"`, `source = "runtime"`,
+  `tool_name` and `result` are `NULL`. The event is registered in
+  `src/models/event.rs` event-type registry (Definition-of-Done #4)
+  and added to `scaffolding/scope.md`'s "New event types" list under
+  the AC-82 line where it already appears (no scope expansion).
+- **T-AC82-4** Mapping from `AgentStatus` variant to canonical TLA+
+  action (the action whose firing causes the variant to be entered),
+  derived from `docs/input/OpenPinceryCanonical.tla` and
+  `scaffolding/spec_coverage.md` AC-82:
+  - `WakeAcquiring` ← `AttemptWakeAcquire` (entered from Resting on
+    pending events)
+  - `PromptAssembling` ← `WakeAcquireSucceeds`
+  - `Awake` ← `PromptAssemblyCompletes` on first entry, and ←
+    `MidWakePollFindsNothing` on every subsequent return from the
+    tool loop
+  - `ToolDispatching` ← `ToolDispatches` (entered from Awake when the
+    LLM response carries one or more validated tool calls; AgentCallsTool
+    is the spec-side decision step that PRECEDES this CAS, but the
+    canonical action that names the entry into `ToolDispatching` per
+    `spec_coverage.md` AC-82 is `ToolDispatches`)
+  - `ToolExecuting` ← entered per dispatched tool call after the
+    AC-79 schema gate, AC-79 rate-limit gate, and AC-80 nonce mint;
+    canonical-action label on the emitted event is the corresponding
+    spec entry (covered by spec_coverage.md AC-82 — runtime selects
+    the closest entry from the AC-82 pipe-list, defaulting to
+    `ToolDispatches` if no finer-grained match applies; see C-AC82-3)
+  - `ToolResultProcessing` ← `ReceiveToolResult`
+  - `MidWakeEventPolling` ← `ToolResultProcessedToolLoop`
+  - `WakeEnding` ← `TerminalEndsWake` (every termination path —
+    `iteration_cap`, `tool_call_rate_limit_exceeded`,
+    `prompt_injection_suspected`, `FailureAuditPending`, `sleep`,
+    `completed`, `empty_response`, `llm_error` — routes through this
+    CAS before the existing `transition_to_maintenance` fires)
+  - `Maintenance` ← `WakeEndTransitionsToMaintenance`
+  - `Resting` ← post-maintenance unwind (existing
+    `release_to_asleep`, no canonical action label — terminal recovery)
+- **T-AC82-5** `tests/lifecycle_transition_test.rs` is a real DB
+  integration test (it provisions a `PgPool`, runs migrations,
+  drives the wake loop end-to-end against a stub `LlmClient` and
+  stub `ToolExecutor`, and reads back `events` ordered by
+  `emitted_at`). For each of three end-to-end scenarios — (a) a
+  one-tool-call wake that returns a result and reaches `completed`;
+  (b) a multi-tool-call wake (3 calls) that exits via `sleep`; (c)
+  an iteration-cap-terminated wake — it asserts:
+  1. Every `lifecycle_transition` row's `(from, to)` pair appears
+     in a static `CANONICAL_TRANSITIONS` table whose entries are
+     derived from the canonical actions in T-AC82-4.
+  2. Every entry in the agent's observed status timeline is one of
+     the ten variants in T-AC82-1 (no jumping from `Awake` straight
+     to `Maintenance`, no missing `WakeEnding`).
+  3. Successive `(prev_to, next_from)` agree (no gaps).
+  4. The number of `lifecycle_transition` events equals the number
+     of distinct status writes — exactly one per CAS.
+  5. `Inv_TerminalSuccession`-equivalent: every wake's last-before-
+     `Maintenance` status is `WakeEnding`; every wake's last-before-
+     `Resting` status is `Maintenance`.
+- **T-AC82-6** Drain-reacquire (`drain_reacquire` in
+  `src/runtime/drain.rs`) is wired through the same fine-grained
+  pipeline: the existing `Maintenance → Awake` jump is replaced by
+  `Maintenance → WakeAcquiring → PromptAssembling → Awake` so a drain
+  wake passes through the same canonical actions as a fresh wake. A
+  fourth scenario in `tests/lifecycle_transition_test.rs` covers
+  this drain path explicitly.
+- **T-AC82-7** `scaffolding/spec_coverage.md` AC-82 row already lists
+  every canonical action used in T-AC82-4; AC-82 BUILD does NOT
+  modify the AC-82 row. The Notes section foreshadows
+  "`Inv_TerminalSuccession` or equivalent" — BUILD adds that
+  invariant column to the AC-82 row in the same commit (replacing
+  `—`) and the `tests/spec_coverage_lint.rs` schema already accepts
+  any non-empty Invariant cell.
+- **T-AC82-8** Performance budget: the additional event-log
+  appends (one per CAS) increase per-wake event volume by roughly
+  the count of fine-grained states traversed (≈ 4–6 extra rows on a
+  one-tool wake, ≈ 4 + 3·N on an N-tool wake). This is well below
+  the existing per-wake event rate (`assistant_message`,
+  `tool_call`, `tool_result`, AC-79 `prompt_injection_canary_emitted`,
+  optional `model_response_schema_invalid`, AC-80 `capability_*`)
+  and does not exceed any documented budget. No performance
+  regression test is required (no SLO change).
+
+## Key Links
+
+- **L-AC82-1** [AC-82] → `src/models/agent.rs` (extend `AgentStatus`
+  enum + add 5 new `DB_*` constants + 5 new CAS helpers
+  `attempt_wake_acquire`, `wake_acquire_succeeds`,
+  `prompt_assembly_completes`, `enter_tool_dispatching`,
+  `enter_tool_executing`, `enter_tool_result_processing`,
+  `enter_mid_wake_event_polling`, `enter_wake_ending`,
+  `wake_end_transitions_to_maintenance`) +
+  `migrations/20260507000001_agent_status_fine_grained.sql`
+  (widen CHECK constraint) → DB-integration test
+  `tests/lifecycle_transition_test.rs::cas_helpers_round_trip`
+  asserting each helper succeeds from its precondition state and
+  rejects from any other state → runtime proof: post-deploy `psql -c
+  "SELECT DISTINCT status FROM agents"` returns at least the four
+  steady states the wake-loop scenarios traverse.
+- **L-AC82-2** [AC-82] → `src/runtime/wake_loop.rs` (replace direct
+  CAS jumps with the fine-grained sequence; existing
+  `acquire_wake` / `transition_to_maintenance` are decomposed —
+  `acquire_wake` becomes `attempt_wake_acquire` →
+  `wake_acquire_succeeds` → `prompt_assembly_completes`;
+  `transition_to_maintenance` is preceded by `enter_wake_ending` on
+  every termination path) → `tests/lifecycle_transition_test.rs`
+  scenarios (a)/(b)/(c)/(d) → runtime proof: post-deploy CLI
+  `pcy events tail --type lifecycle_transition --limit 20` shows the
+  expected canonical sequence on a freshly woken agent.
+- **L-AC82-3** [AC-82] → `src/models/event.rs` registers the new
+  `lifecycle_transition` event type (no schema change required —
+  `events.event_type` is text); the AC-71 redaction layer applies
+  unchanged because the canonical-JSON payload contains no
+  credential-shaped fields → `tests/lifecycle_transition_test.rs::lifecycle_event_payload_is_canonical_json`
+  asserts the payload deserializes into a typed
+  `LifecycleTransitionPayload { from, to, canonical_action,
+  wake_id }` and round-trips byte-equal → runtime proof: post-deploy
+  `psql -c "SELECT content FROM events WHERE event_type =
+  'lifecycle_transition' ORDER BY emitted_at DESC LIMIT 5"` returns
+  rows whose JSON parses cleanly under that schema.
+- **L-AC82-4** [AC-82] → `scaffolding/spec_coverage.md` AC-82 row
+  Invariant cell updated from `—` to `Inv_TerminalSuccession`
+  (canonical-action cell unchanged) → `tests/spec_coverage_lint.rs`
+  re-runs unchanged because the lint accepts any non-empty
+  invariant token → runtime proof: `cargo test
+  --test spec_coverage_lint` green; manual diff of
+  `spec_coverage.md` against the pre-AC-82 baseline shows exactly
+  one cell change.
+- **L-AC82-5** [AC-82] → `src/runtime/drain.rs` (decompose
+  `drain_reacquire` into the four-step fine-grained sequence so a
+  drain wake emits the same canonical-action chain as a fresh wake)
+  → `tests/lifecycle_transition_test.rs::drain_reacquire_emits_full_chain`
+  → runtime proof: `pcy events tail --type lifecycle_transition`
+  on a workspace where a drain has fired shows
+  `maintenance → wake_acquiring → prompt_assembling → awake`.
+
+## Acceptance Criteria Coverage
+
+| AC ID | Build Slice | Planned Test                                                                                                                       | Planned Runtime Proof                                                                                                                                                | Notes                                                                                                                                                |
+| ----- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AC-82 | G7a         | `tests/lifecycle_transition_test.rs::cas_helpers_round_trip` — every new CAS helper accepts only its precondition state           | `psql -c "SELECT DISTINCT status FROM agents"` post-deploy returns the fine-grained values                                                                            | Enum + DB CHECK constraint widening; rejects forbidden transitions (e.g., `Resting → Awake` directly is no longer possible via a runtime helper)     |
+| AC-82 | G7b         | `tests/lifecycle_transition_test.rs::wake_one_tool_call_full_chain` — scenario (a)                                                | `pcy events tail --type lifecycle_transition --limit 20` shows the canonical sequence                                                                                 | Wires fine-grained variants into wake_loop.rs front half (acquire → assemble → awake)                                                                |
+| AC-82 | G7c         | `tests/lifecycle_transition_test.rs::wake_multi_tool_call_full_chain` — scenario (b)                                              | Same `pcy events tail` output shows N rounds of `awake → tool_dispatching → tool_executing → tool_result_processing → mid_wake_event_polling → awake`                | Wires the tool-loop body; covers `ToolDispatches`, `ReceiveToolResult`, `ToolResultProcessedToolLoop`, `MidWakePollFindsNothing`                     |
+| AC-82 | G7d         | `tests/lifecycle_transition_test.rs::wake_iteration_cap_full_chain` — scenario (c)                                                | `pcy events tail` on a capped-out agent shows the wake ends via `wake_ending → maintenance → asleep`                                                                  | Forces every termination path through `enter_wake_ending`; closes the `Inv_TerminalSuccession` proof                                                  |
+| AC-82 | G7e         | `tests/lifecycle_transition_test.rs::drain_reacquire_emits_full_chain` — scenario (d)                                             | After injecting a mid-wake event, `pcy events tail` shows the drain wake re-emits the full canonical chain                                                            | Decomposes `drain_reacquire` symmetrically                                                                                                            |
+| AC-82 | G7f         | `tests/lifecycle_transition_test.rs::lifecycle_event_payload_is_canonical_json` + `assert_status_writes_are_cas_only` lint        | `psql -c "SELECT content FROM events WHERE event_type = 'lifecycle_transition'"` rows parse byte-equal under typed schema; grep finds zero ad-hoc status UPDATE writes | Locks payload schema and prevents future regressions                                                                                                  |
+| AC-82 | G7g         | `cargo test --test spec_coverage_lint` (unchanged) + manual diff                                                                  | `scaffolding/spec_coverage.md` AC-82 Invariant cell shows `Inv_TerminalSuccession`                                                                                    | Single-cell scope-coverage update; no scope expansion                                                                                                |
+
+## Scope Reduction Risks
+
+- **R-AC82-1** **Skip the missing five enum variants**: BUILD could
+  read scope.md's "already present in Rust" line, see only
+  `WakeAcquiring`/`WakeEnding` in the enum, and ship a "lifecycle"
+  story that only fires those two. T-AC82-1 makes the full list of
+  ten variants non-negotiable; the migration and the
+  `cas_helpers_round_trip` test will fail-closed if any of the five
+  new variants are missing.
+- **R-AC82-2** **Emit the event but skip the CAS**: it is tempting
+  to log a `lifecycle_transition` event without actually persisting
+  the new fine-grained state to `agents.status` (since most callers
+  only care about `Awake`/`Maintenance`/`Resting` today). T-AC82-2
+  and `assert_status_writes_are_cas_only` reject this — every event
+  must accompany a real CAS write to `agents.status`.
+- **R-AC82-3** **Skip the WakeEnding gate on terminal paths**: the
+  wake loop has 8+ termination reasons. BUILD could wire the happy
+  paths and forget the failure paths (`prompt_injection_suspected`,
+  `tool_call_rate_limit_exceeded`, `FailureAuditPending`,
+  `empty_response`, `llm_error`). Scenario (c) +
+  `Inv_TerminalSuccession` assertion in T-AC82-5 covers iteration
+  cap; G7d build slice explicitly enumerates the others — every
+  termination_reason MUST exit via `enter_wake_ending` before the
+  existing maintenance/release path.
+- **R-AC82-4** **Use plain JSON instead of canonical JSON in the
+  event payload**: a non-canonical encoding (key order, whitespace,
+  number formatting) breaks the AC-78 hash chain reproducibility
+  for `lifecycle_transition` rows. T-AC82-3 mandates canonical JSON
+  matching the AC-78 canonicalizer (re-use `event::canonicalize_json`
+  from G3 — already shipped); the payload-parse test asserts
+  byte-equal round-trip.
+- **R-AC82-5** **Drain-reacquire shortcut**: the existing
+  `drain_reacquire` does `Maintenance → Awake` in one CAS; it is
+  tempting to leave this as-is and only emit a single
+  `lifecycle_transition` for the jump. T-AC82-6 + scenario (d)
+  reject this — drain-reacquire MUST decompose into four CAS writes
+  with four canonical-action labels, mirroring the fresh-wake
+  acquire path.
+
+## Clarifications Needed
+
+- **C-AC82-1** **scope.md says "already present in Rust" but five of
+  the seven reserved variants are not in `AgentStatus` today**
+  (`PromptAssembling`, `ToolDispatching`, `ToolExecuting`,
+  `ToolResultProcessing`, `MidWakeEventPolling`). BUILD adds them.
+  This is a documented numerical correction, not a scope expansion:
+  AC-82's body explicitly enumerates all seven variants by name and
+  describes them as "reserved, not written". The data-model
+  addendum line ("already present in Rust, now actually written")
+  is updated in the same commit to read "extended in Rust to the
+  full TLA+ named set, now actually written" via the `AmendScope`
+  process-only convention. **Default applied — non-blocking.**
+- **C-AC82-2** **scope.md cites `src/runtime/wake.rs`; the
+  production module is `src/runtime/wake_loop.rs`** (no `wake.rs`
+  exists). BUILD touches `wake_loop.rs`; the scope text is
+  corrected via `AmendScope` in the same commit. **Default applied
+  — non-blocking.**
+- **C-AC82-3** **`AgentCallsTool` vs `ToolDispatches` for the
+  `Awake → ToolDispatching` entry label**: the canonical spec
+  separates the decision (`AgentCallsTool`, `Awake → ToolDispatching`)
+  from the dispatch CAS (`ToolDispatches`,
+  `ToolDispatching → ToolPermissionChecking`). The pincery runtime
+  has no separate `ToolPermissionChecking` state; the AC-35 / AC-80
+  permission and nonce gates run inside the `ToolDispatching →
+  ToolExecuting` window. `spec_coverage.md` AC-82's pipe-list
+  includes `ToolDispatches` (not `AgentCallsTool`). **Default
+  applied: the `lifecycle_transition` row entering
+  `ToolDispatching` carries `canonical_action = "ToolDispatches"`;
+  the row entering `ToolExecuting` carries `canonical_action =
+  "AuthorizeExecution"` (closest spec match for the pre-execute CAS,
+  even though AC-80 already binds it). Non-blocking: the lint only
+  asserts the action is in the AC-82 pipe-list, and both names
+  are.**
+
+## Build Order
+
+1. **G7a — Schema + enum widening**: extend `AgentStatus` in
+   `src/models/agent.rs` with the five missing variants and `DB_*`
+   constants; ship migration `20260507000001_agent_status_fine_grained.sql`
+   widening the CHECK constraint; add the
+   `attempt_wake_acquire` / `wake_acquire_succeeds` /
+   `prompt_assembly_completes` / `enter_tool_dispatching` /
+   `enter_tool_executing` / `enter_tool_result_processing` /
+   `enter_mid_wake_event_polling` / `enter_wake_ending` /
+   `wake_end_transitions_to_maintenance` CAS helpers; write
+   `tests/lifecycle_transition_test.rs::cas_helpers_round_trip`.
+   Rust compiles, migration applies cleanly, helper test green.
+2. **G7b — Front-half wiring + event type**: register
+   `lifecycle_transition` event type in `src/models/event.rs`;
+   replace `acquire_wake` in `wake_loop.rs` with the
+   `attempt_wake_acquire → wake_acquire_succeeds →
+   prompt_assembly_completes` chain plus three event emissions;
+   write scenario (a) test.
+3. **G7c — Tool-loop body wiring**: wrap the LLM-tool-calls block
+   in `wake_loop.rs` with `enter_tool_dispatching` →
+   per-tool-call `enter_tool_executing` →
+   `enter_tool_result_processing` → after the loop body
+   `enter_mid_wake_event_polling` → on no-new-events
+   `prompt_assembly_completes`-equivalent return to `Awake` (use a
+   second-entry helper or reuse `wake_acquire_succeeds`-style
+   helper named `mid_wake_poll_finds_nothing`); write scenario (b)
+   test.
+4. **G7d — Termination-path coverage**: every
+   `termination_reason` branch in `wake_loop.rs` (`iteration_cap`,
+   `tool_call_rate_limit_exceeded`, `prompt_injection_suspected`,
+   `FailureAuditPending`, `sleep`, `completed`, `empty_response`,
+   `llm_error`) routes through `enter_wake_ending` immediately
+   before the existing `transition_to_maintenance` call; write
+   scenario (c) test plus a parametric harness that exercises every
+   termination reason.
+5. **G7e — Drain decomposition**: rewrite `drain_reacquire` in
+   `src/runtime/drain.rs` (or in `src/models/agent.rs` with a
+   matching helper rename) into the four-step fine-grained
+   sequence, emitting one `lifecycle_transition` per step; write
+   scenario (d) test.
+6. **G7f — Lint + payload integrity**: write
+   `assert_status_writes_are_cas_only` (grep-style — fails on any
+   `UPDATE agents SET status` outside `src/models/agent.rs`); write
+   `lifecycle_event_payload_is_canonical_json`; re-use the AC-78
+   canonical-JSON encoder.
+7. **G7g — `spec_coverage.md` invariant cell update**: change the
+   AC-82 Invariant cell from `—` to `Inv_TerminalSuccession`; verify
+   `cargo test --test spec_coverage_lint` and the AC-81 commit-msg
+   hook still pass (the AC-82 commits will carry one or more
+   `canonical_action=AttemptWakeAcquire|WakeAcquireSucceeds|…`
+   trailers per AC-81).
+
+## Complexity Exceptions
+
+None. AC-82 stays inside the existing slice/file-size limits:
+`src/models/agent.rs` grows by ≈ 9 small CAS helpers (≈ 15 lines
+each); `src/runtime/wake_loop.rs` gains ≈ 9 single-line CAS calls
+plus mechanical event-emit wrappers; `tests/lifecycle_transition_test.rs`
+is a new file but is composed of four scenario tests + one lint
+test (well under 300 lines). The AC-78 canonical-JSON encoder is
+re-used unchanged. No new crates are pulled in.
 
 ---
 
