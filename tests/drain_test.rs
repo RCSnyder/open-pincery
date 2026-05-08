@@ -48,9 +48,11 @@ async fn test_drain_reacquires_on_new_events() {
     let reacquired = drain::check_drain(&pool, a.id, wake_started).await.unwrap();
     assert!(reacquired);
 
-    // Agent should be awake again
+    // AC-82 (G7b): drain re-entry now ends in `wake_acquiring`, not
+    // `awake`. The remaining `WakeAcquiring → PromptAssembling →
+    // Awake` hops fire at the top of the next `run_wake_loop` call.
     let refreshed = agent::get_agent(&pool, a.id).await.unwrap().unwrap();
-    assert_eq!(refreshed.status, "awake");
+    assert_eq!(refreshed.status, "wake_acquiring");
 }
 
 /// AC-9: Drain check with no new events releases to asleep

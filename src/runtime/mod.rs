@@ -1,6 +1,7 @@
 pub mod capability;
 pub mod capability_nonce;
 pub mod drain;
+pub mod lifecycle;
 pub mod llm;
 pub mod maintenance;
 pub mod prompt;

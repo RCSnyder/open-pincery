@@ -71,7 +71,10 @@ async fn test_wake_loop_sleep_termination() {
     .unwrap();
 
     // Acquire wake
-    let acquired = agent::acquire_wake(&pool, a.id).await.unwrap().unwrap();
+    let acquired = agent::attempt_wake_acquire(&pool, a.id)
+        .await
+        .unwrap()
+        .unwrap();
     let wake_id = acquired.wake_id.unwrap();
 
     // Mock LLM - respond with sleep tool call
@@ -189,7 +192,10 @@ async fn test_wake_loop_iteration_cap() {
     .await
     .unwrap();
 
-    let acquired = agent::acquire_wake(&pool, a.id).await.unwrap().unwrap();
+    let acquired = agent::attempt_wake_acquire(&pool, a.id)
+        .await
+        .unwrap()
+        .unwrap();
     let wake_id = acquired.wake_id.unwrap();
 
     // Set iteration count to cap

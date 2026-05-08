@@ -102,7 +102,10 @@ async fn fresh_agent(name: &str) -> (sqlx::PgPool, uuid::Uuid, uuid::Uuid) {
     )
     .await
     .unwrap();
-    let acquired = agent::acquire_wake(&pool, a.id).await.unwrap().unwrap();
+    let acquired = agent::attempt_wake_acquire(&pool, a.id)
+        .await
+        .unwrap()
+        .unwrap();
     (pool, a.id, acquired.wake_id.unwrap())
 }
 
@@ -309,7 +312,10 @@ async fn injected_webhook_payload_is_wrapped_in_untrusted_delimiters_no_smuggled
     )
     .await
     .unwrap();
-    let acquired = agent::acquire_wake(&pool, a.id).await.unwrap().unwrap();
+    let acquired = agent::attempt_wake_acquire(&pool, a.id)
+        .await
+        .unwrap()
+        .unwrap();
     let wake_id = acquired.wake_id.unwrap();
 
     let mock_server = MockServer::start().await;

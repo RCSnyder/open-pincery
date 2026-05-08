@@ -12,6 +12,7 @@ use super::tools::{self, ToolResult};
 use super::vault::Vault;
 use crate::config::Config;
 use crate::error::AppError;
+use crate::models::agent::AgentStatus;
 use crate::models::{agent, event, llm_call};
 use crate::observability::metrics as m;
 
@@ -51,6 +52,48 @@ pub async fn run_wake_loop(
     info!(agent_id = %agent_id, wake_id = %wake_id, "Starting wake loop");
     metrics::counter!(m::WAKE_STARTED).increment(1);
     let _wake_metrics = WakeMetricsGuard::new();
+
+    // AC-82 (T-AC82-2 / G7b): Continue the canonical acquire chain.
+    // `attempt_wake_acquire` ran in the listener; `wake_acquire_succeeds`
+    // and `prompt_assembly_completes` run here so wake_id minting,
+    // prompt context, and lifecycle bookkeeping all live in the same
+    // task that drives the body of the wake. Each CAS is paired 1:1
+    // with a `lifecycle_transition` event (T-AC82-3); a `None` return
+    // from a CAS is a runtime invariant break (someone else moved the
+    // status between us and the listener) and is propagated as a
+    // not-found error rather than silently continuing.
+    agent::wake_acquire_succeeds(pool, agent_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "AC-82 G7b: agent {agent_id} not in wake_acquiring at run_wake_loop entry"
+            ))
+        })?;
+    super::lifecycle::emit(
+        pool,
+        agent_id,
+        wake_id,
+        AgentStatus::DB_WAKE_ACQUIRING,
+        AgentStatus::DB_PROMPT_ASSEMBLING,
+        "WakeAcquireSucceeds",
+    )
+    .await?;
+    agent::prompt_assembly_completes(pool, agent_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "AC-82 G7b: agent {agent_id} not in prompt_assembling after wake_acquire_succeeds"
+            ))
+        })?;
+    super::lifecycle::emit(
+        pool,
+        agent_id,
+        wake_id,
+        AgentStatus::DB_PROMPT_ASSEMBLING,
+        AgentStatus::DB_AWAKE,
+        "PromptAssemblyCompletes",
+    )
+    .await?;
 
     // AC-79 (T-AC79-1): mint per-wake prompt-injection defense context.
     // Both nonce and canary are 16-byte hex strings drawn from the OS CSPRNG,

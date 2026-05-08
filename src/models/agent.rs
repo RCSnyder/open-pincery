@@ -305,6 +305,39 @@ pub async fn attempt_wake_acquire(
     Ok(agent)
 }
 
+/// CAS: AC-82 drain re-entry. Maintenance → WakeAcquiring.
+/// Canonical action: `AttemptWakeAcquire` (drain edition — same
+/// canonical name; the spec's transition relation admits both
+/// `Resting → WakeAcquiring` and `Maintenance → WakeAcquiring` under
+/// the same action label, distinguished only by the prior state).
+///
+/// Replaces the legacy `drain_reacquire` (which jumped Maintenance →
+/// Awake in one step). G7b uses this to keep the listener's
+/// post-drain path on the same wake-loop entry contract; G7e will
+/// extend the drain branch with full lifecycle event emission for
+/// every step of the chain.
+pub async fn drain_attempt_wake_acquire(
+    pool: &PgPool,
+    agent_id: Uuid,
+) -> Result<Option<Agent>, AppError> {
+    let sql = format!(
+        "UPDATE agents
+         SET status = '{next}',
+             wake_id = gen_random_uuid(),
+             wake_started_at = NOW(),
+             wake_iteration_count = 0
+         WHERE id = $1 AND status = '{prev}' AND is_enabled = TRUE
+         RETURNING *",
+        next = AgentStatus::DB_WAKE_ACQUIRING,
+        prev = AgentStatus::DB_MAINTENANCE,
+    );
+    let agent = sqlx::query_as::<_, Agent>(&sql)
+        .bind(agent_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(agent)
+}
+
 /// CAS: AC-82. WakeAcquiring → PromptAssembling.
 /// Canonical action: `WakeAcquireSucceeds`.
 pub async fn wake_acquire_succeeds(

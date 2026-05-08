@@ -142,8 +142,15 @@ async fn handle_wake(
         return Ok(());
     }
 
-    // Attempt CAS acquisition
-    let acquired = agent::acquire_wake(&pool, agent_id).await?;
+    // AC-82 (T-AC82-2 / G7b): Attempt CAS acquisition into the
+    // fine-grained `WakeAcquiring` state. The legacy single-step
+    // `acquire_wake` (Resting → Awake) is replaced by the canonical
+    // chain `attempt_wake_acquire → wake_acquire_succeeds →
+    // prompt_assembly_completes`. The first hop fires here; the
+    // remaining two fire at the top of `run_wake_loop` so the wake_id
+    // and prompt context are minted in the same task that actually
+    // runs the loop body.
+    let acquired = agent::attempt_wake_acquire(&pool, agent_id).await?;
     let agent_data = match acquired {
         Some(a) => a,
         None => {
@@ -154,6 +161,19 @@ async fn handle_wake(
 
     let wake_id = agent_data.wake_id.unwrap();
     let wake_started_at = agent_data.wake_started_at.unwrap();
+
+    // AC-82 (T-AC82-3 / G7b): emit `lifecycle_transition` for the
+    // `AttemptWakeAcquire` canonical action. Pairs 1:1 with the CAS
+    // write above. Source = "runtime".
+    crate::runtime::lifecycle::emit(
+        &pool,
+        agent_id,
+        wake_id,
+        crate::models::agent::AgentStatus::DB_ASLEEP,
+        crate::models::agent::AgentStatus::DB_WAKE_ACQUIRING,
+        "AttemptWakeAcquire",
+    )
+    .await?;
 
     // Run wake loop
     let _reason =
