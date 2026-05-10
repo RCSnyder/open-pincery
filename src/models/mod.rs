@@ -2,6 +2,7 @@ pub mod agent;
 pub mod credential;
 pub mod event;
 pub mod llm_call;
+pub mod llm_provider;
 pub mod projection;
 pub mod prompt_template;
 pub mod user;

@@ -88,6 +88,14 @@ enum Commands {
         #[command(subcommand)]
         command: CredentialCommands,
     },
+    /// AC-93 (v9.1): manage LLM providers — register OpenAI-compatible
+    /// base URLs paired with a stored credential. One provider per
+    /// workspace may be marked default; the wake loop uses it instead
+    /// of falling back to environment variables.
+    Provider {
+        #[command(subcommand)]
+        command: ProviderCommands,
+    },
     /// AC-48 (v8): manage named connection contexts on disk.
     Context {
         #[command(subcommand)]
@@ -169,6 +177,29 @@ enum CredentialCommands {
     List,
     /// Revoke an active credential by name. Requires `--yes` to confirm.
     Revoke {
+        name: String,
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ProviderCommands {
+    /// Register a new LLM provider. The credential must already exist
+    /// in this workspace (`pcy credential add <name>` first).
+    Add {
+        name: String,
+        #[arg(long)]
+        base_url: String,
+        #[arg(long)]
+        credential: String,
+    },
+    /// List LLM providers registered for the caller's workspace.
+    List,
+    /// Mark a provider as the workspace default.
+    Use { name: String },
+    /// Remove a provider. Requires `--yes` to confirm.
+    Remove {
         name: String,
         #[arg(long)]
         yes: bool,
@@ -344,6 +375,30 @@ async fn run_inner() -> Result<ExitCode, AppError> {
                 }
                 CredentialCommands::Revoke { name, yes } => {
                     commands::credential::revoke(&client, name, yes).await?
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Provider { command } => {
+            let token = token.clone().ok_or_else(|| {
+                AppError::Unauthorized("missing token; run pcy login first".into())
+            })?;
+            let client = ApiClient::new(url, Some(token));
+            match command {
+                ProviderCommands::Add {
+                    name,
+                    base_url,
+                    credential,
+                } => commands::provider::add(&client, name, base_url, credential).await?,
+                ProviderCommands::List => {
+                    let fmt = output::default_for_tty(cli.output.clone());
+                    commands::provider::list(&client, &fmt).await?
+                }
+                ProviderCommands::Use { name } => {
+                    commands::provider::use_default(&client, name).await?
+                }
+                ProviderCommands::Remove { name, yes } => {
+                    commands::provider::remove(&client, name, yes).await?
                 }
             }
             Ok(ExitCode::SUCCESS)

@@ -9,5 +9,6 @@ pub mod events;
 pub mod init;
 pub mod login;
 pub mod message;
+pub mod provider;
 pub mod status;
 pub mod whoami;

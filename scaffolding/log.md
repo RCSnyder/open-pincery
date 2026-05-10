@@ -1,5 +1,24 @@
 # Open Pincery — Experiment Log
 
+## BUILD V91-S5 — AC-93 (pcy provider) — 2026-05-08T
+
+- **Gate**: PARTIAL (attempt 1) — code compiles, DB-dependent integration test (`tests/cli_provider_test.rs`) is written but requires Postgres harness to run locally; unit + non-DB v9.1 tests still green (4+8+10+6 = 28).
+- **Evidence**:
+  - `cargo check --tests --offline` clean (1 pre-existing dead-code warning for `ShellExecution.exit_code`).
+  - `cargo test --offline --no-run` builds every test crate including new `cli_provider_test`.
+  - Earlier v9.1 tests (`onboarding_doc_test` 6/6, `cli_doctor_test` 10/10, `cli_init_test` 8/8, `honesty_pass_test` 4/4) pass post-merge.
+- **Changes**:
+  - New migration: `migrations/20260510000001_create_llm_providers.sql` — table `llm_providers`, partial unique index `llm_providers_one_default_per_workspace`, CHECK constraints on name (1..=64) / credential_name / base_url, logical FK to credentials at app layer.
+  - New model: `src/models/llm_provider.rs` — `ProviderRow`, `validate_name`, `validate_base_url`, `credential_exists`, `create` (refuses missing credential), `list`, `set_default` (transactional), `delete` (refuses default-with-siblings), `resolve_default`.
+  - New API: `src/api/providers.rs` — POST/GET/POST(default)/DELETE handlers under `/workspaces/{id}/providers`, admin-gated via `credential::is_workspace_admin`, emits audit rows `provider_added` / `provider_default_set` / `provider_removed` / `provider_forbidden`.
+  - New ApiClient methods: `create_provider`, `list_providers`, `set_default_provider`, `delete_provider`.
+  - New CLI noun: `src/cli/commands/provider.rs` with `add | list | use | remove` subcommands; renders through `output::OutputFormat`; NO `--key` argument.
+  - Runtime resolver: `src/runtime/wake_loop.rs::resolve_workspace_llm` — at wake start, looks up the agent's workspace, resolves default provider, decrypts referenced credential via the shared vault, and constructs a per-wake `LlmClient` override. On any failure path (no default row, missing/revoked credential, bad nonce, vault auth, non-UTF-8 plaintext) returns `None` and the wake emits `llm_provider_env_fallback` exactly once before falling back to the process-wide env-var-backed client.
+  - New event type: `llm_provider_env_fallback` (one of v9.1's three sanctioned new event types).
+  - Wired modules: `src/api/mod.rs` (`providers::router()`), `src/cli/commands/mod.rs`, `src/cli/mod.rs` (`Commands::Provider` + `ProviderCommands`), `src/models/mod.rs`.
+- **Retries**: 1 (initial providers.rs had an unused `get` import + dead `noop_pass` middleware from a copy-paste; cleaned in same slice).
+- **Next**: BUILD V91-S6 / AC-91 `pcy backup` / `pcy restore`.
+
 ## RECONCILE — AC-82 — 2026-05-08T (post-REVIEW, pre-VERIFY)
 
 - **Trigger**: User-requested 7-axis reconcile after AC-82 REVIEW pass at HEAD `56c8209` on `v6-01_implementation`. CI run 25535326298 GREEN. AC-82 REVIEW (round 1 FAIL → fixes in `56c8209` → round 2 PASS) had not been individually logged — log.md jumped from BUILD-complete (`d7dad7c`) straight to this reconcile.
