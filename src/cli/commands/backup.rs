@@ -97,6 +97,38 @@ fn vault_key_b64() -> Option<String> {
     std::env::var("VAULT_KEY_BASE64").ok()
 }
 
+/// Create a file with mode 0o600 on Unix. On Windows the file
+/// inherits the default ACL; this mirrors AC-89's "best-effort
+/// Windows ACL" stance documented in init.rs.
+fn create_secret_file(path: &Path) -> Result<fs::File, AppError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| AppError::Internal(format!("create {path:?}: {e}")))
+    }
+    #[cfg(not(unix))]
+    {
+        fs::File::create(path).map_err(|e| AppError::Internal(format!("create {path:?}: {e}")))
+    }
+}
+
+/// Write `bytes` to `path` with mode 0o600 on Unix. Same Windows
+/// caveat as [`create_secret_file`].
+fn write_secret_file(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+    use std::io::Write as _;
+    let mut f = create_secret_file(path)?;
+    f.write_all(bytes)
+        .map_err(|e| AppError::Internal(format!("write {path:?}: {e}")))?;
+    f.sync_all().ok();
+    Ok(())
+}
+
 /// AC-91: take a backup. Writes `output` (gzipped tar). On success
 /// inserts a `backup_taken` event row before returning.
 pub async fn backup(output: PathBuf, include_vault_key: bool) -> Result<(), AppError> {
@@ -142,12 +174,23 @@ pub async fn backup(output: PathBuf, include_vault_key: bool) -> Result<(), AppE
                 "--include-vault-key requested but VAULT_KEY_BASE64 not set".into(),
             )
         })?;
-        fs::write(&key_path, key.as_bytes())
-            .map_err(|e| AppError::Internal(format!("key write: {e}")))?;
+        // Stage the plaintext key file with 0o600 on Unix — the
+        // tempdir inherits umask otherwise, which on a shared host
+        // could expose the AES-256-GCM master key to other users
+        // between `tar finish` and tempdir drop. Same standard as
+        // AC-89's `.env` writer.
+        write_secret_file(&key_path, key.as_bytes())?;
     }
 
-    let out_file = fs::File::create(&output)
-        .map_err(|e| AppError::Internal(format!("create {output:?}: {e}")))?;
+    // Create the output tarball with 0o600 when it carries key
+    // material. Without the flag the tarball is harmless and the
+    // operator likely wants to scp/rsync it; 0o644 is fine there.
+    let out_file = if include_vault_key {
+        create_secret_file(&output)?
+    } else {
+        fs::File::create(&output)
+            .map_err(|e| AppError::Internal(format!("create {output:?}: {e}")))?
+    };
     let gz = GzEncoder::new(out_file, Compression::default());
     let mut builder = tar::Builder::new(gz);
 
@@ -174,7 +217,18 @@ pub async fn backup(output: PathBuf, include_vault_key: bool) -> Result<(), AppE
 
 /// AC-91: restore from a backup tarball. Validates manifest, runs
 /// `pg_restore --clean --if-exists`, then `sqlx migrate run`.
-pub async fn restore(input: PathBuf) -> Result<(), AppError> {
+///
+/// `write_vault_key_to`: if `Some(path)`, and the tarball was
+/// created with `--include-vault-key`, the bundled key file is
+/// written to `path` with mode 0o600 and the operator is told to
+/// load it into `$VAULT_KEY_BASE64` before restarting `pcy`.
+/// If `None`, an `--include-vault-key` tarball is still accepted
+/// but the bundled key is left in the in-memory tempdir (dropped
+/// on return) and the operator is reminded — via stderr — that
+/// they must already have `$VAULT_KEY_BASE64` set or the restored
+/// vault rows will be undecryptable. This matches the operator
+/// recovery story from scope AC-91 (3).
+pub async fn restore(input: PathBuf, write_vault_key_to: Option<PathBuf>) -> Result<(), AppError> {
     // Read + validate the manifest BEFORE shelling out, so an
     // operator on a machine without `pg_restore` still gets a clear
     // "this backup is from a newer build" diagnostic instead of a
@@ -209,6 +263,44 @@ pub async fn restore(input: PathBuf) -> Result<(), AppError> {
     let dump_path = staging.path().join("pgdump.bin");
     if !dump_path.exists() {
         return Err(AppError::BadRequest("backup missing pgdump.bin".into()));
+    }
+
+    // Consume the bundled vault key — AC-91 sub-criterion (3).
+    // If the manifest claims includes_vault_key:true, the tarball
+    // MUST contain the file or the backup is malformed. If the
+    // operator asked for `--write-vault-key-to PATH`, persist the
+    // key there with 0o600 and print operator instructions.
+    let staged_key = staging.path().join("vault_key.b64");
+    if manifest.includes_vault_key {
+        if !staged_key.exists() {
+            return Err(AppError::BadRequest(
+                "manifest declares includes_vault_key:true but tarball is missing vault_key.b64"
+                    .into(),
+            ));
+        }
+        let key_bytes = fs::read(&staged_key)
+            .map_err(|e| AppError::Internal(format!("read staged vault key: {e}")))?;
+        if let Some(dest) = &write_vault_key_to {
+            write_secret_file(dest, &key_bytes)?;
+            eprintln!(
+                "wrote bundled vault key to {} (mode 0600). Load it before restarting pcy:\n\
+                 \texport VAULT_KEY_BASE64=\"$(cat {})\"",
+                dest.display(),
+                dest.display(),
+            );
+        } else if vault_key_b64().is_none() {
+            eprintln!(
+                "warning: backup tarball includes a bundled vault key, but $VAULT_KEY_BASE64 \
+                 is not set and `--write-vault-key-to PATH` was not passed. The restored \
+                 credential rows will be undecryptable until you load the key. Re-run \
+                 `pcy restore` with `--write-vault-key-to /path/to/vault.b64` to extract it.",
+            );
+        }
+    } else if write_vault_key_to.is_some() {
+        return Err(AppError::BadRequest(
+            "--write-vault-key-to passed but this backup was taken without --include-vault-key"
+                .into(),
+        ));
     }
 
     // Manifest accepted — now we actually need pg_restore.

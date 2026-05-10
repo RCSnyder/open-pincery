@@ -116,9 +116,15 @@ enum Commands {
     /// Validates the manifest's `schema_version` first; refuses if
     /// the backup is from a newer build. Runs `pg_restore --clean
     /// --if-exists` followed by `sqlx migrate run` to catch up.
+    /// If the backup was taken with `--include-vault-key` and the
+    /// operator passes `--write-vault-key-to PATH`, the bundled
+    /// key is written there with mode 0o600 and instructions are
+    /// printed to stderr.
     Restore {
         #[arg(long)]
         input: std::path::PathBuf,
+        #[arg(long = "write-vault-key-to")]
+        write_vault_key_to: Option<std::path::PathBuf>,
     },
     /// AC-48 (v8): manage named connection contexts on disk.
     Context {
@@ -434,8 +440,11 @@ async fn run_inner() -> Result<ExitCode, AppError> {
             commands::backup::backup(file, include_vault_key).await?;
             Ok(ExitCode::SUCCESS)
         }
-        Commands::Restore { input } => {
-            commands::backup::restore(input).await?;
+        Commands::Restore {
+            input,
+            write_vault_key_to,
+        } => {
+            commands::backup::restore(input, write_vault_key_to).await?;
             Ok(ExitCode::SUCCESS)
         }
         Commands::Context { command } => {
