@@ -54,9 +54,10 @@ inheritance rules).
 
 ## 3. Doctor check
 
-`pcy doctor` runs eight ordered checks and prints `OK | WARN | FAIL`
+`pcy doctor` runs seven ordered checks and prints `OK | WARN | FAIL`
 plus a one-line remediation for each. Re-run it after every change to
-`.env` or after a server restart.
+`.env` or after a server restart. (An eighth sandbox-preflight check
+is planned for v9.2 — see scope AC-90b.)
 
 ```sh
 pcy doctor              # human-readable table
@@ -78,7 +79,6 @@ OK      database          SELECT 1 ok
 OK      migrations        30/30 applied
 OK      bootstrap         1 admin user(s) present
 OK      llm               provider responded 200
-WARN    sandbox smoke     sandbox unavailable (non-Linux host or kernel-floor unmet)
 ```
 
 A single `FAIL` exits non-zero; a `WARN` exits zero by default.

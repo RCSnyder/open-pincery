@@ -1,6 +1,8 @@
 //! AC-90 (v9.1): `pcy doctor` — operator self-diagnosis.
 //!
-//! Eight ordered, independent checks. Each yields a [`CheckResult`].
+//! Seven ordered, independent checks (an eighth sandbox-preflight
+//! check is deferred to v9.2 as AC-90b — see scope.md amendment
+//! 2026-05-10). Each yields a [`CheckResult`].
 //! No check aborts the run — a FAIL in one row does not skip later
 //! rows. Output: human-readable table (default) or JSON
 //! (`--output json`). Exit code policy:
@@ -119,9 +121,12 @@ pub trait Probe {
     fn admin_user_count(&self) -> Result<u64, String>;
     /// HEAD or GET against `LLM_API_BASE_URL` within a few seconds.
     fn llm_probe(&self) -> Result<u16, String>;
-    /// On Linux: `Ok` if a no-op sandboxed exec returns 0 without
-    /// emitting `sandbox_blocked`. `Err(msg)` otherwise. `None` if
-    /// the sandbox preflight already failed or the host is non-Linux.
+    /// Forward-compat stub for AC-90b (v9.2): a sandbox-smoke probe
+    /// that re-runs a no-op sandboxed exec and verifies exit 0 +
+    /// `sandbox_blocked` not emitted. Kept on the trait so the v9.2
+    /// implementation does not need a breaking change. NOT rendered
+    /// by `diagnose()` in v9.1 (see scope.md AC-90 amendment 2026-05-10).
+    #[allow(dead_code)]
     fn sandbox_smoke(&self) -> Option<Result<(), String>>;
 }
 
