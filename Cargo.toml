@@ -59,6 +59,12 @@ tabled = "0.15"
 # canonical `tool_definitions()` `parameters` schemas.
 jsonschema = "0.28"
 
+# AC-91 (v9.1): backup / restore tarballs. `tar` walks the archive;
+# `flate2` provides gzip framing. Sanctioned in v9.1 ITERATE clarifier
+# CR-v91-1; both crates are MIT/Apache-2.0 and trivially auditable.
+tar = "0.4"
+flate2 = "1"
+
 # AC-53 / Slice A2b.1: Linux-only sandbox crates.
 #
 # These crates provide the six-layer fail-closed sandbox (bwrap

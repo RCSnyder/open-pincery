@@ -119,21 +119,33 @@ Before you point real work at your instance, confirm that you can
 restore it. The backup pipeline (AC-91) ships in this same v9.1
 release. A round-trip takes about 30 seconds for a clean install:
 
-1. Snapshot the database **plus** the encrypted credential vault.
-2. Drop and re-create the database from the snapshot.
-3. Run `pcy doctor` and confirm every row is still `OK`.
-4. Send a test message and confirm the event log resumes.
+```bash
+pcy backup --file pcy.bak.tar.gz
+# optional: bundle the vault envelope for an air-gapped restore
+pcy backup --file pcy.bak.tar.gz --include-vault-key
+pcy restore --input pcy.bak.tar.gz
+pcy doctor --strict
+```
 
-If step 3 or 4 fails on a freshly-restored backup, **do not trust the
+If `pcy doctor` fails on a freshly-restored backup, **do not trust the
 instance with real data**. File the issue and re-run the round-trip
 after the fix.
 
 ## 7. Where next
 
-- **Add a second LLM provider** — once AC-93 ships, `pcy provider add`
-  lets you switch between providers per workspace without editing
-  `.env`. Until then, set `LLM_API_BASE_URL` and `LLM_API_KEY`
-  directly.
+- **Add a second LLM provider** — `pcy provider add` registers an
+  OpenAI-compatible base URL paired with a stored credential so the
+  wake loop talks to the right vendor per workspace, no `.env` edits
+  required:
+
+  ```bash
+  pcy credential add openrouter
+  pcy provider add openrouter \
+      --base-url https://openrouter.ai/api/v1 \
+      --credential openrouter
+  pcy provider list
+  pcy provider use openrouter
+  ```
 - **Reverse proxy** — see `Caddyfile.example` and
   `docker-compose.caddy.yml` for a TLS-terminating front door.
 - **Audit verification** — `pcy audit verify` walks the per-agent

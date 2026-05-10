@@ -96,6 +96,30 @@ enum Commands {
         #[command(subcommand)]
         command: ProviderCommands,
     },
+    /// AC-91 (v9.1): take a gzipped-tar backup of the configured
+    /// Postgres database (via `pg_dump --format=custom`). The
+    /// archive contains a manifest with `schema_version` so a future
+    /// `pcy restore` can refuse a forward-incompatible restore.
+    /// Pass `--include-vault-key` to bundle the `VAULT_KEY_BASE64`
+    /// envelope so an air-gapped restore can decrypt sealed
+    /// credentials. Without it the tarball contains zero key bytes.
+    Backup {
+        /// Destination path for the backup tarball (`*.tar.gz`).
+        /// Named `--file` to avoid clashing with the global
+        /// `--output table|json|yaml` formatter flag.
+        #[arg(long = "file")]
+        file: std::path::PathBuf,
+        #[arg(long)]
+        include_vault_key: bool,
+    },
+    /// AC-91 (v9.1): restore a backup tarball into `$DATABASE_URL`.
+    /// Validates the manifest's `schema_version` first; refuses if
+    /// the backup is from a newer build. Runs `pg_restore --clean
+    /// --if-exists` followed by `sqlx migrate run` to catch up.
+    Restore {
+        #[arg(long)]
+        input: std::path::PathBuf,
+    },
     /// AC-48 (v8): manage named connection contexts on disk.
     Context {
         #[command(subcommand)]
@@ -401,6 +425,17 @@ async fn run_inner() -> Result<ExitCode, AppError> {
                     commands::provider::remove(&client, name, yes).await?
                 }
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Backup {
+            file,
+            include_vault_key,
+        } => {
+            commands::backup::backup(file, include_vault_key).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Restore { input } => {
+            commands::backup::restore(input).await?;
             Ok(ExitCode::SUCCESS)
         }
         Commands::Context { command } => {

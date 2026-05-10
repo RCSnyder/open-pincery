@@ -40,6 +40,9 @@ fn real_clap_verbs() -> HashSet<&'static str> {
         "audit",
         "init",
         "doctor",
+        "provider",
+        "backup",
+        "restore",
     ]
     .into_iter()
     .collect()
@@ -134,15 +137,17 @@ fn every_fenced_pcy_command_maps_to_a_real_clap_verb() {
 
 #[test]
 fn unimplemented_verbs_appear_only_in_prose() {
-    // AC-91 (backup/restore) and AC-93 (provider) are v9.1 work that
-    // lands AFTER this doc — they may be referenced in prose but
-    // never as runnable examples.
+    // v9.1 shipped AC-91 (backup/restore) and AC-93 (provider) — they
+    // now appear in fenced examples. This list is intentionally empty
+    // until a future release teases an unshipped verb again; the test
+    // is preserved as a tripwire for that pattern.
     let doc = read_doc();
     let fenced = fenced_pcy_verbs(&doc);
-    for blocked in &["backup", "restore", "provider"] {
+    let blocked: [&str; 0] = [];
+    for b in &blocked {
         assert!(
-            !fenced.iter().any(|v| v == blocked),
-            "`pcy {blocked}` must not appear in a fenced code block until its AC ships"
+            !fenced.iter().any(|v| v == b),
+            "`pcy {b}` must not appear in a fenced code block until its AC ships"
         );
     }
 }
