@@ -159,8 +159,9 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
-    /// AC-90 (v9.1): self-diagnose an installation. Runs eight
+    /// AC-90 (v9.1): self-diagnose an installation. Runs seven
     /// ordered, independent checks and reports each as OK/WARN/FAIL.
+    /// (An eighth sandbox-preflight check is planned for v9.2 — AC-90b.)
     Doctor {
         /// Output format.
         #[arg(long, value_enum, default_value_t = DoctorOutputArg::Table)]
