@@ -822,7 +822,8 @@ pub async fn run_wake_loop(
 /// on any of: no default provider, missing/revoked credential, bad
 /// nonce length, vault auth failure, non-UTF-8 plaintext. The caller
 /// must emit `llm_provider_env_fallback` when this returns `None`.
-async fn resolve_workspace_llm(
+#[doc(hidden)]
+pub async fn resolve_workspace_llm(
     pool: &PgPool,
     vault: &Arc<Vault>,
     llm: &LlmClient,

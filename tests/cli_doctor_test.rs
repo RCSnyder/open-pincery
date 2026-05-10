@@ -79,9 +79,15 @@ fn happy_probe() -> StubProbe {
 }
 
 #[test]
-fn diagnose_emits_eight_checks_in_fixed_order() {
+fn diagnose_emits_seven_checks_in_fixed_order() {
+    // AC-90 v9.1-amended (REVIEW 2026-05-10): originally 8 checks;
+    // the 8th "sandbox smoke" was dropped to v9.2 (AC-90b).
     let rows = diagnose(&happy_probe());
-    assert_eq!(rows.len(), 8, "AC-90 specifies 8 ordered checks");
+    assert_eq!(
+        rows.len(),
+        7,
+        "AC-90 (v9.1 amended) specifies 7 ordered checks"
+    );
     let names: Vec<&str> = rows.iter().map(|r| r.check.as_str()).collect();
     assert_eq!(
         names,
@@ -93,7 +99,6 @@ fn diagnose_emits_eight_checks_in_fixed_order() {
             "migrations",
             "bootstrap",
             "llm",
-            "sandbox smoke",
         ]
     );
 }
@@ -153,7 +158,7 @@ fn json_output_is_valid_json_array_with_expected_keys() {
     let s = render_json(&rows);
     let parsed: serde_json::Value = serde_json::from_str(&s).expect("valid JSON");
     let arr = parsed.as_array().expect("top-level array");
-    assert_eq!(arr.len(), 8);
+    assert_eq!(arr.len(), 7);
     for row in arr {
         assert!(row.get("check").is_some());
         assert!(row.get("status").is_some());

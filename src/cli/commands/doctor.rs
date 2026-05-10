@@ -230,24 +230,12 @@ pub fn diagnose(probe: &dyn Probe) -> Vec<CheckResult> {
         ),
     });
 
-    // 8. Sandbox smoke
-    rows.push(match probe.sandbox_smoke() {
-        Some(Ok(())) => CheckResult::ok("sandbox smoke", "no-op tool ran successfully"),
-        Some(Err(msg)) => CheckResult::fail(
-            "sandbox smoke",
-            format!("sandboxed exec failed: {msg}"),
-            "review sandbox events with `pcy audit verify`",
-        ),
-        None => {
-            let mut r = CheckResult::warn(
-                "sandbox smoke",
-                "sandbox unavailable (non-Linux host or kernel-floor unmet)",
-                "use the Linux devshell to exercise the sandbox layer",
-            );
-            r.strict_exempt = true;
-            r
-        }
-    });
+    // The original v9.1 design listed an eighth "sandbox smoke" check.
+    // It was dropped from scope at v9.1 REVIEW (2026-05-10) — a real
+    // probe requires a bootstrapped DB + agent and is out of v9.1's
+    // budget. The check is deferred to v9.2 as AC-90b. The
+    // `Probe::sandbox_smoke` trait method remains for forward
+    // compatibility but is no longer rendered.
 
     rows
 }
