@@ -2736,3 +2736,17 @@
 - **Concerns**: `LiveProbe` opens a fresh `PgConnection` per check (no shared pool) because doctor must work before the server is running; acceptable given typical 2-3 checks against the DB and short-lived doctor invocations.
 - **Retries**: 0
 - **Next**: BUILD V91-S4 = AC-92 `docs/onboarding.md` (0.5d budget). One page, ≤250 lines, seven sections; test asserts every shown command corresponds to a real clap verb.
+
+## BUILD V91-S4 / AC-92 — docs/onboarding.md — 2026-05-10
+
+- **Phase**: BUILD slice 4 of 6 (v9.1)
+- **AC**: AC-92 (one-page onboarding gate)
+- **Gate**: post-build PASS (attempt 1)
+- **Evidence**: `cargo test --test onboarding_doc_test` -> 6/6 passed. Final line count: ~165 (well under the 250-line tripwire).
+- **Changed**:
+  - `docs/onboarding.md` (new) — seven sections in order: Prerequisites, Five commands, Doctor check, Add first credential, Send first message, Backup before trust, Where next.
+  - `tests/onboarding_doc_test.rs` (new) — six lockdown tests: file exists, <=250 lines, seven sections in order, fenced `pcy <verb>` examples map to real clap verbs, AC-91/AC-93 verbs (backup/restore/provider) appear in prose only, doctor --strict and --output json documented.
+- **Forward-reference discipline**: backup/restore/provider get prose mentions ("ships in this v9.1 release") so the operator knows what's coming, but are deliberately kept out of fenced code blocks until AC-91 / AC-93 ship — guarded by `unimplemented_verbs_appear_only_in_prose`. After AC-91 / AC-93 land, the onboarding doc will be updated to include runnable examples and the guard list shortened.
+- **Not touched**: no migration, no event types, no Cargo.toml deps, no source files.
+- **Retries**: 0
+- **Next**: BUILD V91-S5 = AC-93 `pcy provider` (2d budget). New migration for llm_providers, four subcommands, one new event type `llm_provider_env_fallback`, secret_proxy integration.
