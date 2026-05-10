@@ -2701,3 +2701,20 @@
 - **Concerns**: `security_table_acs_are_shipped_per_scope` is a coarse cross-doc lint (substring match against scope.md). It cannot detect a typo where the same wrong AC appears in both files; it can only detect a typo unique to README. Acceptable for v9.1 — RECONCILE will catch deeper drift.
 - **Retries**: 0 (build), 1 (test fence-detection bug, fixed in same slice)
 - **Next**: BUILD V91-S2 = AC-89 `pcy init` (1d budget). Implements clap subcommand `Init { out: PathBuf, force: bool }` in `src/cli/commands/init.rs`; uses `rand_core::OsRng` for 32-byte admin seed (hex) and 32-byte vault key (base64); reuses `rpassword` for hidden LLM key prompt; writes `.env` with `0600` on Unix; refuses overwrite without `--force`; never echoes secrets to stdout. Test: `tests/cli_init_test.rs`.
+
+## BUILD V91-S2 / AC-89 — pcy init — 2026-05-10
+
+- **Phase**: BUILD slice 2 of 6 (v9.1)
+- **AC**: AC-89 (`pcy init` bootstraps a fresh `.env`)
+- **Gate**: post-build PASS (attempt 1)
+- **Evidence**: `cargo test --test cli_init_test` → 8/8 passed.
+- **Changed**:
+  - `src/cli/commands/init.rs` (new) — `Prompts` injection seam (interactive vs. test stubs); `generate_bootstrap_token` (32 OsRng → 64 hex); `generate_vault_key` (32 OsRng → 44 base64); `render_env` pure renderer; `open_for_write` with `O_CREAT|O_TRUNC|O_EXCL` semantics via `create_new` unless `--force`, mode 0600 on Unix; `next_steps_message` helper that proves no secret bytes leak.
+  - `src/cli/commands/mod.rs` — registered `init` module.
+  - `src/cli/mod.rs` — `Commands::Init { out, force }` variant + dispatch.
+  - `tests/cli_init_test.rs` (new) — 8 tests (entropy shape, render content, blank-key hint path, file write, refuse-overwrite, force-overwrite, Unix mode 0600, no-secret-leak in next-steps).
+- **Reality-check during build (RECONCILE flag)**: Scope.md AC-89 names the var `OPEN_PINCERY_ADMIN_SEED`, but the running binary already reads `OPEN_PINCERY_BOOTSTRAP_TOKEN` (`src/cli/mod.rs` `Commands::Demo`, `Commands::Login`, `tests/bootstrap_test.rs`). Generating an `ADMIN_SEED` var would produce a `.env` that does not bootstrap the server — exactly the failure AC-89 exists to prevent. Used the real var name; RECONCILE should align scope.md and readiness.md to `OPEN_PINCERY_BOOTSTRAP_TOKEN` (or, alternately, rename the env var across the codebase — but that is a separate breaking change and out of v9.1 scope).
+- **Not touched**: any migration, any other src module, no Cargo.toml deps, no event types.
+- **Concerns**: Windows ACL is best-effort per AC-89 (h) — file is created but POSIX mode bits don't apply. Documented in module doc-comment; will surface in `docs/onboarding.md` (AC-92).
+- **Retries**: 0
+- **Next**: BUILD V91-S3 = AC-90 `pcy doctor` (2d budget). 8 ordered checks, `--output table|json`, `--strict`, library-exposed `assert_kernel_floor`.

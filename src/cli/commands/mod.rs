@@ -5,6 +5,7 @@ pub mod completion;
 pub mod credential;
 pub mod demo;
 pub mod events;
+pub mod init;
 pub mod login;
 pub mod message;
 pub mod status;

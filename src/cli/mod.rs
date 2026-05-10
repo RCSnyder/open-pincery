@@ -110,6 +110,17 @@ enum Commands {
         #[command(subcommand)]
         command: AuditCommands,
     },
+    /// AC-89 (v9.1): bootstrap a fresh operator `.env` with strong
+    /// random secrets. Refuses to overwrite unless `--force` is
+    /// passed; never echoes the generated values to stdout.
+    Init {
+        /// Output path. Defaults to `.env` in the current directory.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+        /// Overwrite an existing file at `--out`.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -355,6 +366,10 @@ async fn run_inner() -> Result<ExitCode, AppError> {
                     commands::audit::verify(&client, agent, workspace).await
                 }
             }
+        }
+        Commands::Init { out, force } => {
+            commands::init::run(out, force, commands::init::Prompts::interactive())?;
+            Ok(ExitCode::SUCCESS)
         }
     }
 }
