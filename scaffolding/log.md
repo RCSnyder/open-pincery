@@ -1,5 +1,48 @@
 # Open Pincery — Experiment Log
 
+## RECONCILE — v9.1 Onboarding Gate (AC-89..AC-94) — 2026-05-10T
+
+- **Phase**: RECONCILE (between REVIEW round 3 PASS and VERIFY).
+- **Mode**: MLP — documentation-as-deferral preferred over additional build work.
+- **Inputs**: `scaffolding/scope.md` v9.1 section, `scaffolding/design.md`, `scaffolding/readiness.md`, this log, the actual repo tree, `git log --oneline -25`, the v9.1 code under `src/cli/commands/`, `src/models/llm_provider.rs`, `src/api/providers.rs`, `migrations/20260510000001_create_llm_providers.sql`, `docs/onboarding.md`, `tests/cli_*.rs` + `tests/wake_loop_provider_test.rs` + `tests/onboarding_doc_test.rs` + `tests/honesty_pass_test.rs`, `Cargo.toml`, `.env.example`, `docker-compose.yml`.
+- **Verdict**: REPAIRED — four structural drifts auto-fixed and annotated below; no spec-violating drift; no BLOCKED items. Pipeline proceeds to VERIFY.
+
+### Drift report (7-axis sweep)
+
+**Cosmetic** — none significant; all caught silently or absent.
+
+**Structural** (auto-fixed; code is ground truth):
+
+1. **AC-89 env var name** (Axis 3 + Axis 5). `scope.md` AC-89 specified `OPEN_PINCERY_ADMIN_SEED`; shipped `src/cli/commands/init.rs`, `tests/cli_init_test.rs`, `.env.example`, `docker-compose.yml`, and every prior auth/login/bootstrap path use `OPEN_PINCERY_BOOTSTRAP_TOKEN`. The v9.0 AC-60 rename was design vocabulary that never landed in code. **Action:** updated scope.md AC-89 acceptance text + Smallest Useful Version to the shipped name; added a v9.1 RECONCILE Amendments subsection noting the v9.0 rename plan was abandoned; `docs/onboarding.md` was already correct (no `OPEN_PINCERY_ADMIN_SEED` references in shipped docs).
+2. **AC-91 backup flag** (Axis 3). `scope.md` AC-91 specified `pcy backup --out <path>`; shipped CLI is `--file` (rename forced by collision with the global `--output table|json|yaml` formatter). **Action:** updated scope.md AC-91 acceptance text to the shipped flag; documented the rename rationale in the new v9.1 RECONCILE Amendments subsection. `docs/onboarding.md` already uses `--file`.
+3. **AC-91 restore flags** (Axis 3). `scope.md` AC-91 specified `pcy restore --from <path> [--vault-key-from-env]`; shipped CLI is `--input <path> [--write-vault-key-to <path>]`. The renames are strictly improvements (input/output symmetry; richer recovery contract that writes the recovered key to a 0o600 file with operator instructions instead of relying on shell state). **Action:** updated scope.md AC-91 acceptance text; documented rationale in the amendments subsection.
+4. **AC-91 audit emission deferral** (Axis 3 + Axis 7). `scope.md` AC-91 said `backup_taken` / `backup_restored` are inserted into the `events` table. Shipped `src/cli/commands/backup.rs::emit_event` emits via `tracing::info!(target: "open_pincery::audit", …)` + `eprintln!` — NOT the `events` table — because `events.agent_id` is `NOT NULL`/FK and T-v91-2 sanctioned only the `llm_providers` migration for v9.1. **Action:** added a v9.1 Known Limitations subsection in scope.md (`L-v91-1`) recording the deferral; an `operator_events` table is on the v9.2 backlog. AC-91 pass/fail meaning is preserved because the AC text reads "emits an audit trail" rather than "writes to the events table".
+
+**Spec-violating** — none.
+
+### Other axes (clean or annotated)
+
+- **Axis 1 (Directory structure)**: `design.md` had no v9.1 section. **Action:** appended a `# v9.1 Addendum — Onboarding Gate (AC-89..AC-94)` block listing the new files (`src/cli/commands/{init,doctor,backup,provider}.rs`, `src/models/llm_provider.rs`, `src/api/providers.rs`, `migrations/20260510000001_create_llm_providers.sql`, `docs/onboarding.md`, seven new test files), the resolver interface, the canonical CLI flag names, and the two new crates.
+- **Axis 2 (Interfaces)**: `llm_providers` schema in the new migration matches `ProviderRow` + the partial unique index `llm_providers_one_default_per_workspace` from `models::llm_provider`. `Manifest` JSON shape stable per `tests/cli_backup_restore_test.rs::ac91_manifest_json_shape_is_stable`. Captured in the v9.1 design addendum.
+- **Axis 4 (External integrations)**: No new external services. `pg_dump` / `pg_restore` already part of the Postgres deploy; `reqwest` re-used for AC-90 reachability probe. Tar/gzip in-process via the two newly sanctioned crates.
+- **Axis 5 (Stack & deploy)**: `Cargo.toml` contains `tar = "0.4"` and `flate2 = "1"` matching the CR-v91-1 ITERATE clarification and `readiness.md` "New Crate Dependencies" table. Documented in the v9.1 design addendum and the v9.1 scope amendments block. `.env.example` and `docker-compose.yml` unchanged for v9.1 (consistent with the AC-89 amendment above).
+- **Axis 6 (Log accuracy)**: `git log --oneline -20` matches the v9.1 build commits (`830751e` ITERATE → `203b6d9` ANALYZE → `91737db` AC-94 → `88f98c3` AC-89 → `7d4712c` AC-90 → `4cdb192` AC-92 → `17b2b6a` AC-93 → `5716003` AC-91 → `2d71a20` AC-91 review-fix → `eee48c0` AC-90/AC-93 review-fix → `0e195ee` doc/docstring alignment). `log.md` REVIEW round 2 / round 3 entries are consistent with the git timeline.
+- **Axis 7 (Readiness / traceability)**: `readiness.md` AC-89..AC-94 coverage rows reference real test files (`tests/cli_init_test.rs`, `tests/cli_doctor_test.rs`, `tests/cli_backup_restore_test.rs`, `tests/cli_provider_test.rs`, `tests/wake_loop_provider_test.rs`, `tests/onboarding_doc_test.rs`, `tests/honesty_pass_test.rs`). AC-90 row already amended to seven checks during REVIEW round 2. AC-91 row reflects shipped flag names via the readiness BUILD entries. No readiness drift requiring repair.
+
+### AC-90 spot-check (7 checks, not 8)
+
+Verified across the four touchpoints: `scope.md` AC-90 ends with the explicit "v9.1 amendment (REVIEW-fix, 2026-05-10)" paragraph dropping check 8 to v9.2 as AC-90b; `src/cli/commands/doctor.rs` no longer renders an 8th row; `tests/cli_doctor_test.rs::diagnose_emits_seven_checks_in_fixed_order` asserts seven; `docs/onboarding.md` § 3 says "seven ordered checks" and parenthesises the eighth as deferred. No other doc implies 8 checks.
+
+### Documents modified
+
+- `scaffolding/scope.md` — AC-89 env var name + AC-91 flag names normalised; appended "v9.1 RECONCILE Amendments (2026-05-10)", "v9.1 Known Limitations", and "v9.1 New Crate Dependencies" subsections.
+- `scaffolding/design.md` — appended "# v9.1 Addendum — Onboarding Gate (AC-89..AC-94)" with directory delta, interface delta, stack delta, external-integration delta, observability note, and complexity-exceptions note.
+- `scaffolding/log.md` — this entry.
+
+### Confidence
+
+**REPAIRED.** No spec-violating drift detected. v9.1 acceptance criteria remain valid; tests + runtime proof paths in `readiness.md` are intact; pipeline proceeds to VERIFY.
+
 ## REVIEW round 2 fix — AC-90 amendment + AC-93 resolver test — 2026-05-10T
 
 - **Phase**: REVIEW-fix (round 2). v9.1 MLP path to clear the two remaining Required findings from REVIEW round 1.

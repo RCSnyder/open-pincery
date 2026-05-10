@@ -3311,3 +3311,107 @@ Acceptance criterion AC-82 (scope.md). Final v9.0 ship blocker for
 the lifecycle-state slice. Listener no longer owns the `WakeEnding
 → Maintenance` transition — `run_wake_loop` does, on every fresh
 and drain-reacquired wake.
+
+---
+
+# v9.1 Addendum — Onboarding Gate (AC-89..AC-94)
+
+v9.1 is a CLI/docs/runtime-config slice. No architecture change; no
+new daemon, container, or external service. The addendum captures
+only the directory + interface + dependency deltas that landed in
+the repo so that future RECONCILE passes have a stable baseline.
+
+## v9.1 Directory Structure (delta only)
+
+```text
+src/
+  cli/commands/
+    init.rs          — NEW: AC-89 `pcy init` first-run .env bootstrap
+    doctor.rs        — NEW: AC-90 `pcy doctor` 7-check self-diagnosis
+    backup.rs        — NEW: AC-91 `pcy backup` / `pcy restore` (tar+gzip)
+    provider.rs      — NEW: AC-93 `pcy provider {add,list,use,remove}`
+  models/
+    llm_provider.rs  — NEW: AC-93 `ProviderRow` + CRUD/resolver helpers
+  api/providers.rs   — NEW: AC-93 per-workspace provider HTTP handlers
+migrations/
+  20260510000001_create_llm_providers.sql  — NEW: AC-93 single new table
+docs/
+  onboarding.md      — NEW: AC-92 seven-section first-run walkthrough
+tests/
+  cli_init_test.rs               — NEW: AC-89 coverage
+  cli_doctor_test.rs             — NEW: AC-90 coverage (10 tests)
+  cli_backup_restore_test.rs     — NEW: AC-91 coverage (4 tests)
+  cli_provider_test.rs           — NEW: AC-93 CRUD coverage
+  wake_loop_provider_test.rs     — NEW: AC-93 resolver coverage (3 tests)
+  onboarding_doc_test.rs         — NEW: AC-92 doc-shape lint (6 tests)
+  honesty_pass_test.rs           — NEW: AC-94 README + DELIVERY.md lint
+```
+
+CLI verbs `init`, `doctor`, `backup`, `restore`, `provider` are
+registered in `src/cli/mod.rs::Commands` and routed through the
+existing dispatch in `Cli::run`.
+
+## v9.1 Interface Deltas
+
+* **`llm_providers` table** (AC-93): columns `id uuid pk`,
+  `workspace_id uuid fk`, `name text` (1..=64, unique per
+  workspace), `base_url text`, `credential_name text` (logical FK
+  to `credentials.name` within the same workspace, enforced at app
+  layer in `models::llm_provider::credential_exists`),
+  `is_default boolean`, `created_at timestamptz`. Partial unique
+  index `llm_providers_one_default_per_workspace` guarantees at most
+  one default per workspace.
+* **`runtime::wake_loop::resolve_workspace_llm`** (AC-93): exposed
+  as `#[doc(hidden)] pub` so `tests/wake_loop_provider_test.rs` can
+  exercise the resolver path directly. Returns `Some(LlmClient)`
+  when a default provider plus active credential exist; `None`
+  otherwise (caller emits `llm_provider_env_fallback` exactly once
+  per workspace, then falls back to `LLM_API_KEY` / `LLM_API_BASE_URL`
+  env vars per AC-93).
+* **`cli::commands::backup::Manifest`** (AC-91): JSON
+  `{ schema_version: u32, server_version: String, taken_at: String,
+  includes_vault_key: bool }`. `SCHEMA_VERSION` is asserted
+  matching the count of `.sql` files in `migrations/` by an inline
+  unit test (`schema_version_matches_migrations_dir`).
+* **CLI flag names (RECONCILE-canonical):**
+  * `pcy backup --file <path> [--include-vault-key]`
+  * `pcy restore --input <path> [--write-vault-key-to <path>]`
+  See scope.md § v9.1 RECONCILE Amendments for the rename rationale.
+
+## v9.1 External Integrations
+
+No new external services. AC-91 shells out to `pg_dump` /
+`pg_restore` (already documented as part of the Postgres deploy);
+AC-90 reuses the existing `reqwest` client to probe
+`LLM_API_BASE_URL`. Tar/gzip stays in-process via `tar` + `flate2`
+crates (no subprocess fragility on Windows).
+
+## v9.1 Stack Deltas
+
+Two new Rust crates ratified by ITERATE clarification CR-v91-1:
+
+| Crate | Version | Purpose | License |
+|---|---|---|---|
+| `tar` | 0.4 | In-process tarball read/write | MIT/Apache-2.0 |
+| `flate2` | 1 | gzip wrapper around `tar` | MIT/Apache-2.0 |
+
+No other top-level dependencies added in v9.1. The two-crate soft
+cap from scope.md is now fully consumed; further v9.1-tagged work
+that would want a new crate must defer instead.
+
+## v9.1 Observability
+
+No new metrics. AC-91 emits a structured `tracing` audit trail at
+target `open_pincery::audit` (`backup_taken` / `backup_restored`)
+plus a single-line `eprintln!`; see scope.md § v9.1 Known
+Limitations L-v91-1 for the rationale (events-table-row form
+deferred to a future `operator_events` slice). AC-93 emits a
+single `llm_provider_env_fallback` warning event per workspace via
+the existing event-emit path.
+
+## v9.1 Complexity Exceptions
+
+None. Every v9.1 slice stays inside the standard slice/file-size
+limits. `src/cli/commands/backup.rs` is the largest new file at
+under 350 lines and is dominated by manifest + tar-stream code
+that naturally lives together.
