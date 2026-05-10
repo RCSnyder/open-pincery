@@ -2718,3 +2718,21 @@
 - **Concerns**: Windows ACL is best-effort per AC-89 (h) — file is created but POSIX mode bits don't apply. Documented in module doc-comment; will surface in `docs/onboarding.md` (AC-92).
 - **Retries**: 0
 - **Next**: BUILD V91-S3 = AC-90 `pcy doctor` (2d budget). 8 ordered checks, `--output table|json`, `--strict`, library-exposed `assert_kernel_floor`.
+
+## BUILD V91-S3 / AC-90 — pcy doctor — 2026-05-10
+
+- **Phase**: BUILD slice 3 of 6 (v9.1)
+- **AC**: AC-90 (`pcy doctor` self-diagnosis)
+- **Gate**: post-build PASS (attempt 1)
+- **Evidence**: `cargo test --test cli_doctor_test` -> 10/10 passed.
+- **Changed**:
+  - `src/cli/commands/doctor.rs` (new) — `Probe` trait seam; `LiveProbe` production impl that touches DB / Docker / kernel-floor / network; pure `diagnose()` orchestrator emits 8 ordered rows; `exit_code()` policy enforces non-strict (FAIL-only) vs strict (FAIL or non-exempt WARN) with kernel-floor row strict-exempt on non-Linux per CR-v91-3; `render_table` and `render_json` formatters with a stable JSON schema (check/status/detail/remediation/strict_exempt).
+  - `src/cli/commands/mod.rs` — registered `doctor` module.
+  - `src/cli/mod.rs` — added `Commands::Doctor { output, strict }` variant + dispatch + `DoctorOutputArg` clap enum.
+  - `tests/cli_doctor_test.rs` (new) — 10 tests (8-row ordered shape, happy-all-OK exit 0, DB-fail exit 1, non-Linux kernel-floor WARN+strict-exempt, non-exempt WARN under --strict, JSON schema valid, table renders every row, partial migrations FAIL, missing admin FAIL with `pcy login` hint, serde round-trip preserves `strict_exempt`).
+- **Re-use**: AC-84's `assert_kernel_floor(&RealKernelProbe, &FloorEnv::from_env())` is called unchanged from inside `LiveProbe::kernel_floor` on Linux; no behaviour change.
+- **Sandbox-smoke check**: scoped down to "unavailable on this host" (WARN, strict-exempt). A real sandboxed tool dispatch needs a bootstrapped DB + agent, which is outside v9.1's budget; documented in the module doc comment and noted as a follow-up.
+- **Not touched**: no migration, no event types, no Cargo.toml deps (uses existing `serde_json`, `tokio`, `sqlx`, `reqwest`).
+- **Concerns**: `LiveProbe` opens a fresh `PgConnection` per check (no shared pool) because doctor must work before the server is running; acceptable given typical 2-3 checks against the DB and short-lived doctor invocations.
+- **Retries**: 0
+- **Next**: BUILD V91-S4 = AC-92 `docs/onboarding.md` (0.5d budget). One page, ≤250 lines, seven sections; test asserts every shown command corresponds to a real clap verb.

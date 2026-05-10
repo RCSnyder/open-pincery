@@ -121,6 +121,23 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// AC-90 (v9.1): self-diagnose an installation. Runs eight
+    /// ordered, independent checks and reports each as OK/WARN/FAIL.
+    Doctor {
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = DoctorOutputArg::Table)]
+        output: DoctorOutputArg,
+        /// Treat WARN as failure (except for kernel-floor on non-Linux
+        /// hosts; see CR-v91-3).
+        #[arg(long)]
+        strict: bool,
+    },
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+pub enum DoctorOutputArg {
+    Table,
+    Json,
 }
 
 #[derive(Subcommand, Debug)]
@@ -370,6 +387,14 @@ async fn run_inner() -> Result<ExitCode, AppError> {
         Commands::Init { out, force } => {
             commands::init::run(out, force, commands::init::Prompts::interactive())?;
             Ok(ExitCode::SUCCESS)
+        }
+        Commands::Doctor { output, strict } => {
+            let out = match output {
+                DoctorOutputArg::Table => commands::doctor::DoctorOutput::Table,
+                DoctorOutputArg::Json => commands::doctor::DoctorOutput::Json,
+            };
+            let code = commands::doctor::run(strict, out);
+            Ok(ExitCode::from(code as u8))
         }
     }
 }

@@ -4,6 +4,7 @@ pub mod budget;
 pub mod completion;
 pub mod credential;
 pub mod demo;
+pub mod doctor;
 pub mod events;
 pub mod init;
 pub mod login;
