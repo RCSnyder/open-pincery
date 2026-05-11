@@ -100,6 +100,13 @@ fn ac40_exactly_one_rpassword_prompt_in_src() {
     // credential value. If a second prompt site appears, this test
     // flags it so reviewers can confirm the new site is also safe
     // (e.g. zeroizes, does not log, etc.).
+    //
+    // v9.1 AC-89 allowlist: `pcy init` (src/cli/commands/init.rs)
+    // prompts ONCE for an optional `LLM_API_KEY` and writes it
+    // directly into a 0o600 `.env` file. The prompt does not echo
+    // to stdout and the value is never logged. Reviewers approved
+    // this second site at v9.1; any THIRD site must be explicitly
+    // allowlisted here.
     let mut count = 0;
     let mut sites: Vec<String> = Vec::new();
     let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -127,10 +134,22 @@ fn ac40_exactly_one_rpassword_prompt_in_src() {
             }
         }
     }
-    assert_eq!(
-        count,
-        1,
-        "expected exactly one rpassword::prompt_password call site in src/, found {count}:\n{}",
+    // Allowlisted call sites, by repo-relative path suffix.
+    const ALLOWED_SUFFIXES: &[&str] =
+        &["src/cli/commands/credential.rs", "src/cli/commands/init.rs"];
+    let normalized: Vec<String> = sites.iter().map(|s| s.replace('\\', "/")).collect();
+    for site in &normalized {
+        let on_allowlist = ALLOWED_SUFFIXES.iter().any(|suffix| site.contains(suffix));
+        assert!(
+            on_allowlist,
+            "rpassword::prompt_password call site not on AC-40 allowlist: {site}\n\
+             allowlist: {ALLOWED_SUFFIXES:?}"
+        );
+    }
+    assert!(
+        count <= ALLOWED_SUFFIXES.len(),
+        "expected at most {} rpassword::prompt_password call sites in src/, found {count}:\n{}",
+        ALLOWED_SUFFIXES.len(),
         sites.join("\n")
     );
 }

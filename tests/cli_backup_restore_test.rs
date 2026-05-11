@@ -24,10 +24,15 @@ fn pcy_bin() -> String {
 
 #[test]
 fn ac91_schema_version_constant_present() {
-    assert!(
-        SCHEMA_VERSION >= 24,
-        "SCHEMA_VERSION must be at least v9.0's count"
-    );
+    // Compile-time check: `SCHEMA_VERSION` is a const, but we keep this
+    // as an assertion so the message points at the v9.0 baseline.
+    #[allow(clippy::assertions_on_constants)]
+    {
+        assert!(
+            SCHEMA_VERSION >= 24,
+            "SCHEMA_VERSION must be at least v9.0's count"
+        );
+    }
 }
 
 #[test]
