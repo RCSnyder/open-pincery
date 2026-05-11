@@ -106,7 +106,7 @@ fn no_aspirational_vocabulary_outside_historical_markers() {
 }
 
 #[test]
-fn delivery_heading_is_v9_0() {
+fn delivery_heading_is_v9_1() {
     let delivery = read(DELIVERY_PATH);
     let first_line = delivery
         .lines()
@@ -114,19 +114,27 @@ fn delivery_heading_is_v9_0() {
         .expect("DELIVERY.md must not be empty");
     assert_eq!(
         first_line.trim(),
-        "# DELIVERY.md — Open Pincery v9.0",
-        "DELIVERY.md top heading must be exactly `# DELIVERY.md — Open Pincery v9.0`"
+        "# DELIVERY.md — Open Pincery v9.1",
+        "DELIVERY.md top heading must be exactly `# DELIVERY.md — Open Pincery v9.1`"
     );
 
-    // And a `## v9.0 Summary` lead must appear before the first `## What Was Built`.
-    let summary_idx = delivery
+    // The v9.1 summary lead must appear before the carried-forward
+    // `## v9.0 Summary` and the `## What Was Built` section.
+    let v91_idx = delivery
+        .find("## v9.1 Summary")
+        .expect("DELIVERY.md must contain a `## v9.1 Summary` lead");
+    let v90_idx = delivery
         .find("## v9.0 Summary")
-        .expect("DELIVERY.md must contain a `## v9.0 Summary` lead");
+        .expect("DELIVERY.md must retain the `## v9.0 Summary` lead");
     let what_idx = delivery
         .find("## What Was Built")
         .expect("DELIVERY.md must retain `## What Was Built`");
     assert!(
-        summary_idx < what_idx,
+        v91_idx < v90_idx,
+        "`## v9.1 Summary` must precede `## v9.0 Summary`"
+    );
+    assert!(
+        v90_idx < what_idx,
         "`## v9.0 Summary` must precede `## What Was Built`"
     );
 }

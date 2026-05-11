@@ -1,4 +1,8 @@
-# DELIVERY.md — Open Pincery v9.0
+# DELIVERY.md — Open Pincery v9.1
+
+## v9.1 Summary
+
+v9.1 is the **Onboarding Gate** — the smallest set of operator-facing tools that turn a fresh clone into a working install in 15 minutes without reading the source. Six acceptance criteria: AC-89 (`pcy init` — `.env` bootstrap with 32-byte OsRng secrets, mode 0600, no secret bytes on stdout), AC-90 (`pcy doctor` — seven ordered self-diagnosis checks with strict-mode + JSON output; eighth sandbox-preflight check deferred to v9.2 as AC-90b), AC-91 (`pcy backup` / `pcy restore` — tarball with `pg_dump --format=custom`, manifest with schema-version forward-incompatibility refusal, optional `--include-vault-key` round-trip, 0o600 recovered-key extraction), AC-92 (`docs/onboarding.md` — single one-page first-run gate, ≤250 lines, every fenced `pcy` command tied to a real clap verb), AC-93 (`pcy provider {add|list|use|remove}` — first-class per-workspace LLM provider rows with credentialed key resolution; refuses raw `--key` at clap layer), AC-94 (honesty pass — README five-row "Security Model" table reflects shipped code; aspirational design-vocabulary names that were never code are removed from the live surface). Two new crates (`tar`, `flate2`), one new migration (`llm_providers`), three new event types (`backup_taken`, `backup_restored`, `llm_provider_env_fallback`). v9.1 ship gate **CLEAR** after REVIEW (round 3 PASS) + RECONCILE + VERIFY (PASS with declared MLP residual risks).
 
 ## v9.0 Summary
 
@@ -206,6 +210,14 @@ This wave adds the seven P0 acceptance criteria identified by the v9 TLA+ + secu
 - **AC-82 fine-grained agent statuses**: dashboards or external monitors that previously matched `agents.status` against the literal set `{asleep, awake, maintenance}` MUST now also accept the seven new in-flight values (`wake_acquiring`, `prompt_assembling`, `tool_dispatching`, `tool_executing`, `tool_result_processing`, `mid_wake_event_polling`, `wake_ending`). The migration is forward-only and additive; no row rewrite. The new `lifecycle_transition` event type is emitted once per CAS with a canonical-JSON payload `{"canonical_action": "<TLA+Action>", "from": "<prev_status>", "to": "<new_status>", "wake_id": "<uuid>"}` — alphabetical key order is byte-stable and chains through the AC-78 audit hash trigger transparently. The AC-8 stale-recovery job now sees all nine in-flight states and will unwedge agents stuck mid-wake by a transient DB failure between fine-grained CASes.
 
 ## Known Limitations
+
+### v9.1 (Onboarding Gate)
+
+- **L-v91-1 — backup audit events not in `events` table**: `backup_taken` and `backup_restored` emit via `tracing::info!(target: "open_pincery::audit", …)` + `eprintln!` rather than as rows in `events`. The events table requires `agent_id NOT NULL` and the v9.1 budget (T-v91-2) sanctioned only the `llm_providers` migration. Operators relying on audit-log scrapers for backup compliance must consume stdout/stderr until v9.2 adds an `operator_events` table.
+- **AC-90b — sandbox-smoke doctor check deferred to v9.2**: `pcy doctor` ships seven of the eight originally scoped checks. The eighth ("re-run a no-op sandboxed command and verify exit 0 + `sandbox_blocked` not emitted") needs a bootstrapped DB + agent at probe time and was out of the v9.1 7.5-day budget. The `Probe::sandbox_smoke` trait method is preserved as a forward-compat stub.
+- **AC-93c — key-in-process-memory probe deferred to v9.2**: The wake-loop resolver reads the credentialed LLM key from the vault into a `String` and hands it to `LlmClient::new`. The AC-71 "key value never appears in agent process memory" guarantee is satisfied by construction at the `--key` flag layer (clap rejects raw keys) and at the env-var layer (no `LLM_API_KEY` lookup when a provider row exists), but it is not yet asserted with a live-process memory probe. Closing requires either `secret_proxy` extension to the LLM client or a `/proc/self/maps` grep in VERIFY.
+- **AC-91 live `pg_dump`/`pg_restore` round-trip exercised in CI only**: The backup/restore in-process tests (manifest shape, forward-incompatible refusal, vault-key 0o600 extraction, key-bytes byte-grep) all pass locally; the end-to-end binary round-trip runs on CI with a real Postgres + `postgresql-client`.
+- **`pg_dump` / `pg_restore` are operator-side tools**: Backup and restore are designed to run on the host, not inside the runtime container. The runtime image does not bundle the Postgres client utilities.
 
 <!-- historical -->
 - **Host-level sandbox only**: v6 ships env-clear + tempdir + 30s timeout + sudo-token rejection via `ProcessExecutor`. This is defense-in-depth, not isolation — a process running as the `pcy` user can still read any file that user can read. True container-level isolation (Zerobox) is on the roadmap.
