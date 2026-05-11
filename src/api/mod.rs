@@ -23,6 +23,7 @@ pub mod health;
 pub mod me;
 pub mod messages;
 pub mod openapi;
+pub mod providers;
 pub mod webhooks;
 
 use crate::{
@@ -214,6 +215,7 @@ pub fn router(state: AppState) -> Router {
         .merge(messages::router())
         .merge(events::router())
         .merge(credentials::router())
+        .merge(providers::router())
         .merge(me::router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

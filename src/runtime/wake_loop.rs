@@ -136,6 +136,35 @@ pub async fn run_wake_loop(
     )
     .await?;
 
+    // AC-93 (v9.1): resolve per-workspace LLM provider. If a default
+    // provider row exists for this agent's workspace, build a per-wake
+    // `LlmClient` pointing at the row's `base_url` and decrypting the
+    // referenced credential through the shared vault. Otherwise fall
+    // back to the process-wide `LlmClient` (env vars) and emit a
+    // `llm_provider_env_fallback` event exactly once per wake so the
+    // operator can see when no provider is configured.
+    let resolved_agent = agent::get_agent(pool, agent_id)
+        .await?
+        .ok_or(AppError::NotFound("Agent disappeared".into()))?;
+    let ws_id_for_llm = resolved_agent.workspace_id;
+    let llm_override = resolve_workspace_llm(pool, vault, llm, ws_id_for_llm).await;
+    if llm_override.is_none() {
+        event::append_event(
+            pool,
+            agent_id,
+            "llm_provider_env_fallback",
+            "runtime",
+            Some(wake_id),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await?;
+    }
+    let llm: &LlmClient = llm_override.as_ref().unwrap_or(llm);
+
     #[allow(unused_assignments)]
     let mut termination_reason = String::new();
 
@@ -784,6 +813,46 @@ pub async fn run_wake_loop(
     info!(agent_id = %agent_id, wake_id = %wake_id, reason = %termination_reason, "Wake loop ended");
     metrics::counter!(m::WAKE_COMPLETED, "reason" => termination_reason.clone()).increment(1);
     Ok(termination_reason)
+}
+
+/// AC-93 (v9.1): resolve a per-workspace LLM provider override.
+///
+/// Returns `Some(LlmClient)` when the workspace has a default provider
+/// row AND its referenced credential decrypts cleanly. Returns `None`
+/// on any of: no default provider, missing/revoked credential, bad
+/// nonce length, vault auth failure, non-UTF-8 plaintext. The caller
+/// must emit `llm_provider_env_fallback` when this returns `None`.
+#[doc(hidden)]
+pub async fn resolve_workspace_llm(
+    pool: &PgPool,
+    vault: &Arc<Vault>,
+    llm: &LlmClient,
+    workspace_id: Uuid,
+) -> Option<LlmClient> {
+    let (base, credential_name) = crate::models::llm_provider::resolve_default(pool, workspace_id)
+        .await
+        .ok()
+        .flatten()?;
+    let row = crate::models::credential::find_active(pool, workspace_id, &credential_name)
+        .await
+        .ok()
+        .flatten()?;
+    let nonce_arr: [u8; 12] = row.nonce.as_slice().try_into().ok()?;
+    let sealed = crate::runtime::vault::SealedCredential {
+        nonce: nonce_arr,
+        ciphertext: row.ciphertext.clone(),
+    };
+    let plaintext = vault.open(workspace_id, &credential_name, &sealed).ok()?;
+    let api_key = String::from_utf8(plaintext).ok()?;
+    Some(
+        LlmClient::new(
+            base,
+            api_key,
+            llm.model.clone(),
+            llm.maintenance_model.clone(),
+        )
+        .with_pricing(llm.primary_pricing, llm.maintenance_pricing),
+    )
 }
 
 /// AC-79 (T-AC79-1): mint a fresh `WakePromptContext` for one wake.

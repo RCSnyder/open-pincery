@@ -77,14 +77,15 @@ Each agent has its own event stream, identity projection, and work list. The run
 
 ## Security Model
 
-Six defense layers, from innermost to outermost:
+Five defense layers, each backed by shipped code on `main` and a closed acceptance criterion. The table reflects the runtime topology actually deployed by `docker compose up -d --wait`; aspirational design vocabulary from earlier scoping rounds is retained only inside `<!-- historical -->` markers below.
 
-1. **[Zerobox](https://github.com/afshinm/zerobox)** — deny-by-default per-tool process sandboxing with secret injection via proxy
-2. **[OneCLI](https://github.com/onecli/onecli)** — credential vault where agents authenticate with proxy tokens; real credentials injected at the gateway
-3. **Prompt injection defense** — delimiter enforcement, instruction hierarchy, canary tokens, rate limiting
-4. **[Greywall](https://github.com/GreyhavenHQ/greywall)** — outer host-level sandbox wrapping the entire runtime
-5. **Database security** — Postgres RLS, compile-time checked queries, append-only audit
-6. **Webhook/API security** — HMAC-SHA256 verification, SHA-256 dedup, rate limiting, TLS
+| Layer | Mechanism | Status | AC |
+| --- | --- | --- | --- |
+| Process sandbox | bubblewrap + seccomp default-deny allowlist + landlock ABI ≥ 6 + `pincery-init` exec wrapper + UID/capability drop | Shipped | AC-53 / AC-77 / AC-83 / AC-85 / AC-86 |
+| Audit log | SHA-256 per-agent hash chain w/ Postgres `BEFORE INSERT` trigger + `pcy audit verify` + startup verify gate (exit 5) | Shipped | AC-78 |
+| Capability gate | Single-use TTL nonces, workspace-scoped, capability-shape-bound | Shipped | AC-80 |
+| Prompt-injection floor | Untrusted-content delimiter wrapping + per-wake canary + JSON-Schema tool-call gate + per-wake rate limit | Shipped | AC-79 |
+| Credential vault | AES-256-GCM at rest + `PLACEHOLDER:` substitution via secret-proxy (plaintext never enters the reasoner process) | Shipped | AC-38 / AC-40 / AC-43 / AC-71 / AC-74 |
 
 See [docs/SECURITY.md](docs/SECURITY.md) for the v9 threat model — adversary capabilities, in-scope vs out-of-scope attacks, and the vulnerability disclosure process.
 
@@ -145,22 +146,28 @@ Start with:
 
 - [docs/input/technical-stack.md](docs/input/technical-stack.md) — implementation stack and crate choices
 - [docs/input/OpenPinceryAgent.tla](docs/input/OpenPinceryAgent.tla) — formal TLA+ specification of the agent state machine. Copy into [TLA+ Process Studio](https://tlaplus-process-studio.com/) for visualizing the state machine of the system.
-- [docs/input/security-architecture.md](docs/input/security-architecture.md) — six-layer security model
+- [docs/input/security-architecture.md](docs/input/security-architecture.md) — original five-layer security model writeup
 - [docs/input/best-practices.md](docs/input/best-practices.md) — practices mapped to academic research
 
 ## Development
 
-Open Pincery v9 introduces a Linux-only agent sandbox (AC-53 **Zerobox**,
-AC-71 secret injection proxy, AC-72 per-agent egress allowlist) that
-relies on kernel primitives unavailable on macOS or Windows hosts
-(bubblewrap, slirp4netns, landlock LSM, cgroup v2). AC-75 ships a
-pinned Ubuntu 24.04 Docker "devshell" so every contributor runs the
-identical toolchain against the identical kernel surface.
+Open Pincery v9 introduces a Linux-only agent sandbox (AC-53 process
+sandbox, AC-71 secret-injection proxy, AC-72 per-agent egress
+allowlist) that relies on kernel primitives unavailable on macOS or
+Windows hosts (bubblewrap, slirp4netns, landlock LSM, cgroup v2).
+AC-75 ships a pinned Ubuntu 24.04 Docker "devshell" so every
+contributor runs the identical toolchain against the identical kernel
+surface.
 
-> **Terminology.** _Zerobox_ is the Linux sandbox architecture that
-> isolates each tool invocation. [`zeroize`](https://docs.rs/zeroize)
-> is an unrelated Rust crate used under AC-74 for memory hygiene inside
-> the secret-handling path. They coexist; neither replaces the other.
+<!-- historical -->
+> **Terminology (historical).** Earlier design rounds named the Linux
+> sandbox architecture _Zerobox_; the implementation that shipped is
+> the bubblewrap + seccomp + landlock + `pincery-init` stack described
+> in the Security Model table above. The unrelated Rust crate
+> [`zeroize`](https://docs.rs/zeroize) is used under AC-74 for memory
+> hygiene inside the secret-handling path — different concern, similar
+> name, no relationship.
+<!-- /historical -->
 
 ### On Linux
 

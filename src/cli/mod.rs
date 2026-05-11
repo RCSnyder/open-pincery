@@ -88,6 +88,44 @@ enum Commands {
         #[command(subcommand)]
         command: CredentialCommands,
     },
+    /// AC-93 (v9.1): manage LLM providers — register OpenAI-compatible
+    /// base URLs paired with a stored credential. One provider per
+    /// workspace may be marked default; the wake loop uses it instead
+    /// of falling back to environment variables.
+    Provider {
+        #[command(subcommand)]
+        command: ProviderCommands,
+    },
+    /// AC-91 (v9.1): take a gzipped-tar backup of the configured
+    /// Postgres database (via `pg_dump --format=custom`). The
+    /// archive contains a manifest with `schema_version` so a future
+    /// `pcy restore` can refuse a forward-incompatible restore.
+    /// Pass `--include-vault-key` to bundle the `VAULT_KEY_BASE64`
+    /// envelope so an air-gapped restore can decrypt sealed
+    /// credentials. Without it the tarball contains zero key bytes.
+    Backup {
+        /// Destination path for the backup tarball (`*.tar.gz`).
+        /// Named `--file` to avoid clashing with the global
+        /// `--output table|json|yaml` formatter flag.
+        #[arg(long = "file")]
+        file: std::path::PathBuf,
+        #[arg(long)]
+        include_vault_key: bool,
+    },
+    /// AC-91 (v9.1): restore a backup tarball into `$DATABASE_URL`.
+    /// Validates the manifest's `schema_version` first; refuses if
+    /// the backup is from a newer build. Runs `pg_restore --clean
+    /// --if-exists` followed by `sqlx migrate run` to catch up.
+    /// If the backup was taken with `--include-vault-key` and the
+    /// operator passes `--write-vault-key-to PATH`, the bundled
+    /// key is written there with mode 0o600 and instructions are
+    /// printed to stderr.
+    Restore {
+        #[arg(long)]
+        input: std::path::PathBuf,
+        #[arg(long = "write-vault-key-to")]
+        write_vault_key_to: Option<std::path::PathBuf>,
+    },
     /// AC-48 (v8): manage named connection contexts on disk.
     Context {
         #[command(subcommand)]
@@ -110,6 +148,35 @@ enum Commands {
         #[command(subcommand)]
         command: AuditCommands,
     },
+    /// AC-89 (v9.1): bootstrap a fresh operator `.env` with strong
+    /// random secrets. Refuses to overwrite unless `--force` is
+    /// passed; never echoes the generated values to stdout.
+    Init {
+        /// Output path. Defaults to `.env` in the current directory.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+        /// Overwrite an existing file at `--out`.
+        #[arg(long)]
+        force: bool,
+    },
+    /// AC-90 (v9.1): self-diagnose an installation. Runs seven
+    /// ordered, independent checks and reports each as OK/WARN/FAIL.
+    /// (An eighth sandbox-preflight check is planned for v9.2 — AC-90b.)
+    Doctor {
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = DoctorOutputArg::Table)]
+        output: DoctorOutputArg,
+        /// Treat WARN as failure (except for kernel-floor on non-Linux
+        /// hosts; see CR-v91-3).
+        #[arg(long)]
+        strict: bool,
+    },
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+pub enum DoctorOutputArg {
+    Table,
+    Json,
 }
 
 #[derive(Subcommand, Debug)]
@@ -141,6 +208,29 @@ enum CredentialCommands {
     List,
     /// Revoke an active credential by name. Requires `--yes` to confirm.
     Revoke {
+        name: String,
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ProviderCommands {
+    /// Register a new LLM provider. The credential must already exist
+    /// in this workspace (`pcy credential add <name>` first).
+    Add {
+        name: String,
+        #[arg(long)]
+        base_url: String,
+        #[arg(long)]
+        credential: String,
+    },
+    /// List LLM providers registered for the caller's workspace.
+    List,
+    /// Mark a provider as the workspace default.
+    Use { name: String },
+    /// Remove a provider. Requires `--yes` to confirm.
+    Remove {
         name: String,
         #[arg(long)]
         yes: bool,
@@ -320,6 +410,44 @@ async fn run_inner() -> Result<ExitCode, AppError> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        Commands::Provider { command } => {
+            let token = token.clone().ok_or_else(|| {
+                AppError::Unauthorized("missing token; run pcy login first".into())
+            })?;
+            let client = ApiClient::new(url, Some(token));
+            match command {
+                ProviderCommands::Add {
+                    name,
+                    base_url,
+                    credential,
+                } => commands::provider::add(&client, name, base_url, credential).await?,
+                ProviderCommands::List => {
+                    let fmt = output::default_for_tty(cli.output.clone());
+                    commands::provider::list(&client, &fmt).await?
+                }
+                ProviderCommands::Use { name } => {
+                    commands::provider::use_default(&client, name).await?
+                }
+                ProviderCommands::Remove { name, yes } => {
+                    commands::provider::remove(&client, name, yes).await?
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Backup {
+            file,
+            include_vault_key,
+        } => {
+            commands::backup::backup(file, include_vault_key).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Restore {
+            input,
+            write_vault_key_to,
+        } => {
+            commands::backup::restore(input, write_vault_key_to).await?;
+            Ok(ExitCode::SUCCESS)
+        }
         Commands::Context { command } => {
             // AC-48 slice 2d-i: pure on-disk verbs, no HTTP.
             // AC-47 slice 2e-a: `--output` flows from the root `Cli`;
@@ -355,6 +483,18 @@ async fn run_inner() -> Result<ExitCode, AppError> {
                     commands::audit::verify(&client, agent, workspace).await
                 }
             }
+        }
+        Commands::Init { out, force } => {
+            commands::init::run(out, force, commands::init::Prompts::interactive())?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Doctor { output, strict } => {
+            let out = match output {
+                DoctorOutputArg::Table => commands::doctor::DoctorOutput::Table,
+                DoctorOutputArg::Json => commands::doctor::DoctorOutput::Json,
+            };
+            let code = commands::doctor::run(strict, out);
+            Ok(ExitCode::from(code as u8))
         }
     }
 }

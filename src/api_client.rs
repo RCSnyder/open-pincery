@@ -247,4 +247,110 @@ impl ApiClient {
         ));
         self.send_json(req, None).await
     }
+
+    /// AC-93: `POST /api/workspaces/{id}/providers`
+    pub async fn create_provider(
+        &self,
+        workspace_id: &str,
+        name: &str,
+        base_url: &str,
+        credential_name: &str,
+    ) -> Result<Value, AppError> {
+        let req = self.http.post(format!(
+            "{}/api/workspaces/{}/providers",
+            self.base_url, workspace_id
+        ));
+        self.send_json(
+            req,
+            Some(serde_json::json!({
+                "name": name,
+                "base_url": base_url,
+                "credential_name": credential_name,
+            })),
+        )
+        .await
+    }
+
+    /// AC-93: `GET /api/workspaces/{id}/providers`
+    pub async fn list_providers(&self, workspace_id: &str) -> Result<Value, AppError> {
+        let req = self.http.get(format!(
+            "{}/api/workspaces/{}/providers",
+            self.base_url, workspace_id
+        ));
+        self.send_json(req, None).await
+    }
+
+    /// AC-93: `POST /api/workspaces/{id}/providers/{name}/default`
+    pub async fn set_default_provider(
+        &self,
+        workspace_id: &str,
+        name: &str,
+    ) -> Result<(), AppError> {
+        let url = format!(
+            "{}/api/workspaces/{}/providers/{}/default",
+            self.base_url, workspace_id, name
+        );
+        let req = self.http.post(url);
+        let req = if let Some(token) = self.token.as_ref() {
+            req.bearer_auth(token)
+        } else {
+            req
+        };
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| AppError::Internal(format!("request failed: {e:?}")))?;
+        let status = resp.status();
+        if status == StatusCode::NO_CONTENT {
+            return Ok(());
+        }
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| AppError::Internal(format!("response read failed: {e}")))?;
+        if status == StatusCode::NOT_FOUND {
+            Err(AppError::NotFound(format!("provider '{name}' not found")))
+        } else {
+            Err(AppError::BadRequest(format!(
+                "HTTP {}: {}",
+                status.as_u16(),
+                text
+            )))
+        }
+    }
+
+    /// AC-93: `DELETE /api/workspaces/{id}/providers/{name}`
+    pub async fn delete_provider(&self, workspace_id: &str, name: &str) -> Result<(), AppError> {
+        let url = format!(
+            "{}/api/workspaces/{}/providers/{}",
+            self.base_url, workspace_id, name
+        );
+        let req = self.http.delete(url);
+        let req = if let Some(token) = self.token.as_ref() {
+            req.bearer_auth(token)
+        } else {
+            req
+        };
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| AppError::Internal(format!("request failed: {e:?}")))?;
+        let status = resp.status();
+        if status == StatusCode::NO_CONTENT {
+            return Ok(());
+        }
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| AppError::Internal(format!("response read failed: {e}")))?;
+        if status == StatusCode::NOT_FOUND {
+            Err(AppError::NotFound(format!("provider '{name}' not found")))
+        } else {
+            Err(AppError::BadRequest(format!(
+                "HTTP {}: {}",
+                status.as_u16(),
+                text
+            )))
+        }
+    }
 }

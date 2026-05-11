@@ -19,7 +19,7 @@ use open_pincery::cli::Cli;
 /// Commands that are allowed to expose `--yes` for destructive
 /// confirmation. Paths are space-joined subcommand names rooted at
 /// `pcy`, e.g. `"credential revoke"`.
-const YES_ALLOWLIST: &[&str] = &["credential revoke"];
+const YES_ALLOWLIST: &[&str] = &["credential revoke", "provider remove"];
 
 fn walk<'a>(
     cmd: &'a clap::Command,

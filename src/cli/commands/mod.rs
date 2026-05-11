@@ -1,11 +1,15 @@
 pub mod agent;
 pub mod audit;
+pub mod backup;
 pub mod budget;
 pub mod completion;
 pub mod credential;
 pub mod demo;
+pub mod doctor;
 pub mod events;
+pub mod init;
 pub mod login;
 pub mod message;
+pub mod provider;
 pub mod status;
 pub mod whoami;
