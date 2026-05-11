@@ -38,6 +38,14 @@ const INTERNAL_ONLY: &[&str] = &[
     // integration tests. Only honoured when OPEN_PINCERY_ALLOW_UNSAFE=true;
     // never set by operators.
     "OPEN_PINCERY_INIT_FORCE_PARTIAL",
+    // AC-91 (v9.1): operator-side recovery env var read by `pcy backup
+    // --include-vault-key` (to bundle the active vault key into the
+    // tarball) and by `pcy restore` (to verify a restored install's
+    // vault key matches the live runtime). Operators export this from
+    // the `vault.key` file extracted from the tarball during recovery;
+    // it is never part of the steady-state server config and so does
+    // not belong in .env.example.
+    "VAULT_KEY_BASE64",
 ];
 
 fn scan_source_for_env_vars() -> HashSet<String> {
