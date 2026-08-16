@@ -1,0 +1,14 @@
+{
+  "lines": 4609,
+  "words": 21823,
+  "ac_cj_count": 40,
+  "ac_cj_unique": 40,
+  "ac_so_count": 40,
+  "ac_so_unique": 40,
+  "research_count": 38,
+  "research_unique": 38,
+  "synthesis_markers": 26,
+  "code_fence_count": 156,
+  "code_fences_even": true,
+  "sha256": "33b8b2b0251fd740fd1b8180a25516c853ba9d4e3d7b8c00900214c057729c83"
+}
