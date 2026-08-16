@@ -805,7 +805,7 @@ impl ToolExecutor for RealSandbox {
                 // convention `128 + signum` so callers can detect
                 // SIGSYS (signal 31 -> exit_code 159) without a
                 // schema change.
-                exit_code: out.status.code().unwrap_or_else(|| {
+                exit_code: out.status.code().unwrap_or({
                     use std::os::unix::process::ExitStatusExt;
                     out.status.signal().map(|s| 128 + s).unwrap_or(-1)
                 }),

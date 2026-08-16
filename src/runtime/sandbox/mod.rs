@@ -216,7 +216,7 @@ impl ToolExecutor for ProcessExecutor {
                 // via the POSIX `128 + signum` convention so SIGSYS
                 // (31) appears as exit_code 159 to callers, matching
                 // the bwrap path.
-                exit_code: out.status.code().unwrap_or_else(|| {
+                exit_code: out.status.code().unwrap_or({
                     #[cfg(unix)]
                     {
                         use std::os::unix::process::ExitStatusExt;
