@@ -628,6 +628,7 @@ struct ShellExecution {
     /// terminations are translated to `128 + signum` (POSIX
     /// convention) so SIGSYS appears as 159. -1 if no code and no
     /// signal could be observed (e.g. wait error / timeout).
+    #[cfg(target_os = "linux")]
     exit_code: i32,
     #[cfg(target_os = "linux")]
     audit_pids: Vec<u32>,
@@ -661,6 +662,7 @@ async fn execute_shell(
             };
             ShellExecution {
                 result: ToolResult::Output(truncated),
+                #[cfg(target_os = "linux")]
                 exit_code,
                 #[cfg(target_os = "linux")]
                 audit_pids: _audit_pids,
@@ -668,18 +670,21 @@ async fn execute_shell(
         }
         ExecResult::Timeout => ShellExecution {
             result: ToolResult::Error("Shell execution timed out".into()),
+            #[cfg(target_os = "linux")]
             exit_code: -1,
             #[cfg(target_os = "linux")]
             audit_pids: Vec::new(),
         },
         ExecResult::Rejected(reason) => ShellExecution {
             result: ToolResult::Error(format!("Shell execution rejected: {reason}")),
+            #[cfg(target_os = "linux")]
             exit_code: -1,
             #[cfg(target_os = "linux")]
             audit_pids: Vec::new(),
         },
         ExecResult::Err(e) => ShellExecution {
             result: ToolResult::Error(format!("Shell execution failed: {e}")),
+            #[cfg(target_os = "linux")]
             exit_code: -1,
             #[cfg(target_os = "linux")]
             audit_pids: Vec::new(),
